@@ -12,13 +12,14 @@ func SeedDefaults(db *sql.DB) error {
 	}
 
 	defaultSources := []struct {
-		key   string
-		name  string
-		kind  string
+		key     string
+		name    string
+		kind    string
 		enabled bool
 	}{
 		{key: "mangadex", name: "MangaDex", kind: "native", enabled: true},
 		{key: "mangaplus", name: "MangaPlus", kind: "native", enabled: true},
+		{key: "mangafire", name: "MangaFire", kind: "native", enabled: true},
 	}
 
 	for _, source := range defaultSources {

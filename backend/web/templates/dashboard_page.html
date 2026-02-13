@@ -264,6 +264,42 @@
                 sourceUrl: sourceUrl
             });
             hidden.value = JSON.stringify(items);
+
+            var latestKnownField = form.querySelector('input[name="latest_known_chapter"]');
+            var incomingLatestRaw = button.dataset.latestChapter;
+            var incomingLatest = parseFloat(String(incomingLatestRaw || '').trim());
+            var currentLatest = NaN;
+            if (latestKnownField) {
+                currentLatest = parseFloat(String(latestKnownField.value || '').trim());
+            }
+
+            var shouldPromoteAsPrimary = false;
+            if (!Number.isNaN(incomingLatest)) {
+                if (Number.isNaN(currentLatest) || incomingLatest > currentLatest) {
+                    shouldPromoteAsPrimary = true;
+                }
+            }
+
+            if (shouldPromoteAsPrimary) {
+                var setField = function (selector, value) {
+                    if (value === undefined || value === null) {
+                        return;
+                    }
+                    var field = form.querySelector(selector);
+                    if (!field) {
+                        return;
+                    }
+                    field.value = value;
+                    field.dispatchEvent(new Event('input', { bubbles: true }));
+                    field.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+
+                setField('select[name="source_id"]', String(sourceId));
+                setField('input[name="source_url"]', sourceUrl);
+                setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
+                setField('input[name="latest_known_chapter"]', String(incomingLatest));
+            }
+
             window.renderLinkedSources(form);
             window.syncLinkedSourceSelect(form);
         };

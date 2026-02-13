@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ type coverCacheEntry struct {
 	Found     bool
 	ExpiresAt time.Time
 }
+
+var mangafireMangaURLPattern = regexp.MustCompile(`(?i)https?://(?:www\.)?mangafire\.to/manga/[^\s"'<>]+`)
 
 type dashboardPageData struct {
 	Statuses []string
@@ -225,12 +228,27 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	}
 
 	searchTimeout := 5 * time.Second
-	if source.Key == "mangaplus" {
+	if source.Key == "mangaplus" || source.Key == "mangafire" {
 		searchTimeout = 12 * time.Second
 	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), searchTimeout)
 	defer cancel()
+
+	if source.Key == "mangafire" {
+		if mangaURL, ok := extractMangaFireMangaURL(query); ok {
+			resolved, resolveErr := connector.ResolveByURL(ctx, mangaURL)
+			if resolveErr == nil && resolved != nil {
+				return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
+					Items:      []connectors.MangaResult{*resolved},
+					Query:      query,
+					SourceID:   source.ID,
+					SourceName: source.Name,
+					Intent:     intent,
+				})
+			}
+		}
+	}
 
 	results, err := connector.SearchByTitle(ctx, query, 8)
 	if err != nil {
@@ -238,6 +256,39 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	}
 
 	return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Items: results, Query: query, SourceID: source.ID, SourceName: source.Name, Intent: intent})
+}
+
+func extractMangaFireMangaURL(query string) (string, bool) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return "", false
+	}
+
+	if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			return "", false
+		}
+		if strings.EqualFold(parsed.Hostname(), "mangafire.to") || strings.EqualFold(parsed.Hostname(), "www.mangafire.to") {
+			if strings.HasPrefix(strings.ToLower(parsed.Path), "/manga/") {
+				parsed.RawQuery = ""
+				parsed.Fragment = ""
+				return parsed.String(), true
+			}
+		}
+	}
+
+	match := mangafireMangaURLPattern.FindString(trimmed)
+	if match == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(match)
+	if err != nil {
+		return "", false
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), true
 }
 
 func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {

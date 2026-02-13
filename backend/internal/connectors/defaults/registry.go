@@ -5,6 +5,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangadex"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangaplus"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/yamlconnector"
 )
@@ -13,6 +14,7 @@ func NewRegistry(yamlConnectorsPath string) (*connectors.Registry, error) {
 	registry := connectors.NewRegistry()
 	_ = registry.Register(mangadex.NewConnector())
 	_ = registry.Register(mangaplus.NewConnector())
+	_ = registry.Register(mangafire.NewConnector())
 
 	loaded, loadErr := yamlconnector.LoadFromDir(yamlConnectorsPath, nil)
 	for _, connector := range loaded {
