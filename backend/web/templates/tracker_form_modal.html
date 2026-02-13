@@ -1,0 +1,65 @@
+<div class="modal-backdrop" hx-get="/dashboard/trackers" hx-target="#trackers-zone" hx-trigger="trackersChanged from:body">
+    <div class="modal-card" onclick="event.stopPropagation()">
+        <header>
+            <h2>{{if eq .Mode "edit"}}Edit Tracker{{else}}New Tracker{{end}}</h2>
+            <button type="button" class="close-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">×</button>
+        </header>
+
+        <form class="tracker-form"
+              hx-post="{{if eq .Mode "edit"}}/dashboard/trackers/{{.Tracker.ID}}{{else}}/dashboard/trackers{{end}}"
+              hx-target="#modal-zone"
+              hx-swap="innerHTML">
+            <label>
+                Title
+                <input type="text" name="title" value="{{if .Tracker}}{{.Tracker.Title}}{{end}}" required>
+            </label>
+
+            <label>
+                Source
+                <select name="source_id" required>
+                    <option value="">Select source</option>
+                    {{range .Sources}}
+                    <option value="{{.ID}}" {{if and $.Tracker (eq $.Tracker.SourceID .ID)}}selected{{end}}>{{.Name}}</option>
+                    {{end}}
+                </select>
+            </label>
+
+            <label>
+                Source URL
+                <input type="url" name="source_url" value="{{if .Tracker}}{{.Tracker.SourceURL}}{{end}}" required>
+            </label>
+
+            <label>
+                Source Item ID
+                <input type="text" name="source_item_id" value="">
+            </label>
+
+            <label>
+                Status
+                <select name="status" required>
+                    <option value="reading" {{if and .Tracker (eq .Tracker.Status "reading")}}selected{{end}}>reading</option>
+                    <option value="completed" {{if and .Tracker (eq .Tracker.Status "completed")}}selected{{end}}>completed</option>
+                    <option value="on_hold" {{if and .Tracker (eq .Tracker.Status "on_hold")}}selected{{end}}>on_hold</option>
+                    <option value="dropped" {{if and .Tracker (eq .Tracker.Status "dropped")}}selected{{end}}>dropped</option>
+                    <option value="plan_to_read" {{if and .Tracker (eq .Tracker.Status "plan_to_read")}}selected{{end}}>plan_to_read</option>
+                </select>
+            </label>
+
+            <div class="split-row">
+                <label>
+                    Last Read
+                    <input type="number" step="0.1" name="last_read_chapter" value="">
+                </label>
+                <label>
+                    Latest Known
+                    <input type="number" step="0.1" name="latest_known_chapter" value="">
+                </label>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="action-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">Cancel</button>
+                <button type="submit" class="action-btn action-btn--accent">Save</button>
+            </div>
+        </form>
+    </div>
+</div>

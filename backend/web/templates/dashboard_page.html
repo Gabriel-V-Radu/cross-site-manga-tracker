@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Cross-Site Tracker — Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,500;6..96,700&family=IBM+Plex+Sans+Condensed:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/dashboard.css">
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+
+<body>
+    <div class="grain"></div>
+    <main class="shell">
+        <header class="masthead">
+            <p class="kicker">Cross-Site Tracker</p>
+            <h1>Editorial Control Room</h1>
+            <p class="subtitle">Track updates across sources with sharp filters, fast edits, and a focused reading queue.</p>
+        </header>
+
+        <section class="control-panel">
+            <form id="tracker-filters"
+                  hx-get="/dashboard/trackers"
+                  hx-target="#trackers-zone"
+                  hx-trigger="change from:select, keyup changed delay:300ms from:input[name='q'], load, trackersChanged from:body"
+                  class="filters-grid">
+                <label>
+                    Search
+                    <input type="text" name="q" placeholder="Title or URL">
+                </label>
+                <label>
+                    Status
+                    <select name="status">
+                        {{range .Statuses}}
+                        <option value="{{.}}">{{.}}</option>
+                        {{end}}
+                    </select>
+                </label>
+                <label>
+                    Sort
+                    <select name="sort">
+                        {{range .Sorts}}
+                        <option value="{{.}}">{{.}}</option>
+                        {{end}}
+                    </select>
+                </label>
+                <label>
+                    Order
+                    <select name="order">
+                        <option value="desc">desc</option>
+                        <option value="asc">asc</option>
+                    </select>
+                </label>
+                <input type="hidden" name="view" id="view-input" value="grid">
+            </form>
+
+            <div class="panel-actions">
+                <button type="button"
+                        class="action-btn"
+                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('tracker-filters').dispatchEvent(new Event('change'))">
+                    Grid
+                </button>
+                <button type="button"
+                        class="action-btn"
+                        onclick="document.getElementById('view-input').value='list'; document.getElementById('tracker-filters').dispatchEvent(new Event('change'))">
+                    List
+                </button>
+                <button type="button"
+                        class="action-btn action-btn--accent"
+                        hx-get="/dashboard/trackers/new"
+                        hx-target="#modal-zone"
+                        hx-swap="innerHTML">
+                    + Add Tracker
+                </button>
+            </div>
+        </section>
+
+        <section id="trackers-zone" class="trackers-zone"></section>
+    </main>
+
+    <div id="modal-zone"></div>
+</body>
+
+</html>

@@ -1,0 +1,45 @@
+package models
+
+import "time"
+
+type Source struct {
+	ID            int64     `json:"id"`
+	Key           string    `json:"key"`
+	Name          string    `json:"name"`
+	ConnectorKind string    `json:"connectorKind"`
+	BaseURL       *string   `json:"baseUrl,omitempty"`
+	ConfigPath    *string   `json:"configPath,omitempty"`
+	Enabled       bool      `json:"enabled"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type Tracker struct {
+	ID                 int64      `json:"id"`
+	Title              string     `json:"title"`
+	SourceID           int64      `json:"sourceId"`
+	SourceItemID       *string    `json:"sourceItemId,omitempty"`
+	SourceURL          string     `json:"sourceUrl"`
+	Status             string     `json:"status"`
+	LastReadChapter    *float64   `json:"lastReadChapter,omitempty"`
+	LatestKnownChapter *float64   `json:"latestKnownChapter,omitempty"`
+	LastCheckedAt      *time.Time `json:"lastCheckedAt,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+}
+
+type Chapter struct {
+	ID            int64      `json:"id"`
+	TrackerID     int64      `json:"trackerId"`
+	ChapterNumber *float64   `json:"chapterNumber,omitempty"`
+	ChapterLabel  *string    `json:"chapterLabel,omitempty"`
+	ChapterURL    *string    `json:"chapterUrl,omitempty"`
+	ReleasedAt    *time.Time `json:"releasedAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+}
+
+type Setting struct {
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}

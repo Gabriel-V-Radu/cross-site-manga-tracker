@@ -1,0 +1,57 @@
+package connectors_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+)
+
+type fakeConnector struct {
+	key    string
+	name   string
+	kind   string
+	health error
+}
+
+func (f *fakeConnector) Key() string                       { return f.key }
+func (f *fakeConnector) Name() string                      { return f.name }
+func (f *fakeConnector) Kind() string                      { return f.kind }
+func (f *fakeConnector) HealthCheck(context.Context) error { return f.health }
+func (f *fakeConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	return nil, nil
+}
+func (f *fakeConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+
+func TestRegistryRegisterListHealth(t *testing.T) {
+	r := connectors.NewRegistry()
+
+	if err := r.Register(&fakeConnector{key: "b", name: "B", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	if err := r.Register(&fakeConnector{key: "a", name: "A", kind: connectors.KindYAML, health: errors.New("down")}); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+
+	list := r.List()
+	if len(list) != 2 {
+		t.Fatalf("expected 2 connectors, got %d", len(list))
+	}
+	if list[0].Key != "a" || list[1].Key != "b" {
+		t.Fatalf("expected sorted keys a,b got %s,%s", list[0].Key, list[1].Key)
+	}
+
+	health := r.Health(context.Background())
+	if len(health) != 2 {
+		t.Fatalf("expected 2 health items, got %d", len(health))
+	}
+	if health[0].Key != "a" || health[0].Healthy {
+		t.Fatalf("expected a unhealthy")
+	}
+	if health[1].Key != "b" || !health[1].Healthy {
+		t.Fatalf("expected b healthy")
+	}
+}

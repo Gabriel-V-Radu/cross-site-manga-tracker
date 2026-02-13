@@ -1,0 +1,33 @@
+{{if eq (len .Trackers) 0}}
+<div class="empty-state">
+    <h2>No trackers found</h2>
+    <p>Try a different filter, or add your first source entry.</p>
+</div>
+{{else}}
+<div class="{{if eq .ViewMode "list"}}cards-list{{else}}cards-grid{{end}}">
+    {{range .Trackers}}
+    <article class="tracker-card">
+        <header>
+            <h3>{{.Title}}</h3>
+            <span class="badge">{{.Status}}</span>
+        </header>
+        <p class="url">{{.SourceURL}}</p>
+        <p class="meta">Updated {{.UpdatedAt.Format "2006-01-02 15:04"}}</p>
+
+        <div class="card-actions">
+            <button type="button"
+                    class="mini-btn"
+                    hx-get="/dashboard/trackers/{{.ID}}/edit"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML">Edit</button>
+            <button type="button"
+                    class="mini-btn mini-btn--danger"
+                    hx-post="/dashboard/trackers/{{.ID}}/delete"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML"
+                    hx-confirm="Delete this tracker?">Delete</button>
+        </div>
+    </article>
+    {{end}}
+</div>
+{{end}}

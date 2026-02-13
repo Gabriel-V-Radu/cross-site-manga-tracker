@@ -1,0 +1,19 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cross-site-tracker-api
+    env_file:
+      - ./backend/.env.example
+    environment:
+      - SQLITE_PATH=/app/data/app.sqlite
+      - MIGRATIONS_PATH=/app/migrations
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  app_data:

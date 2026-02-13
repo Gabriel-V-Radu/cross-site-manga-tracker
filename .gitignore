@@ -47,3 +47,7 @@ data/
 
 # Docker
 docker-compose.override.yml
+
+# Backups
+.backups/
+pre-restore-*.sqlite

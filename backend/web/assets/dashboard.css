@@ -1,0 +1,333 @@
+:root {
+    --paper: #f0ece2;
+    --ink: #181513;
+    --ink-soft: #574c44;
+    --accent: #9f1a1a;
+    --accent-soft: #d66f5f;
+    --line: #d1c7b7;
+    --card: #faf6ef;
+    --shadow: 0 24px 44px -28px rgba(35, 28, 23, 0.42);
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: "IBM Plex Sans Condensed", "Trebuchet MS", sans-serif;
+    color: var(--ink);
+    background: radial-gradient(circle at 18% -10%, #fffef9 0%, var(--paper) 42%, #e2d7c4 100%);
+    min-height: 100vh;
+    letter-spacing: 0.02em;
+}
+
+.grain {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.17;
+    background-image: repeating-radial-gradient(circle at 0 0, transparent 0, transparent 1px, rgba(40, 31, 24, 0.35) 1.8px, transparent 2.4px);
+    background-size: 4px 4px;
+}
+
+.shell {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 40px 24px 72px;
+}
+
+.masthead {
+    border: 1px solid var(--line);
+    background: linear-gradient(130deg, rgba(255,255,255,0.77), rgba(255,255,255,0.23));
+    box-shadow: var(--shadow);
+    padding: 28px 30px;
+    position: relative;
+    overflow: hidden;
+}
+
+.masthead::before {
+    content: "";
+    position: absolute;
+    width: 240px;
+    height: 240px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(159, 26, 26, 0.18), transparent 70%);
+    right: -80px;
+    top: -100px;
+}
+
+.kicker {
+    margin: 0;
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: 0.24em;
+    color: var(--ink-soft);
+}
+
+h1 {
+    margin: 10px 0 12px;
+    font-family: "Bodoni Moda", Georgia, serif;
+    font-size: clamp(2.1rem, 5vw, 3.3rem);
+    line-height: 1;
+    letter-spacing: -0.015em;
+}
+
+.subtitle {
+    margin: 0;
+    max-width: 70ch;
+    color: var(--ink-soft);
+}
+
+.control-panel {
+    margin-top: 22px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.55);
+    padding: 18px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    align-items: end;
+    box-shadow: var(--shadow);
+}
+
+.filters-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: 2fr repeat(3, minmax(120px, 1fr));
+}
+
+label {
+    display: grid;
+    gap: 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-soft);
+}
+
+input, select {
+    width: 100%;
+    border: 1px solid #baaa92;
+    background: #fffdf9;
+    color: var(--ink);
+    font: inherit;
+    font-size: 16px;
+    padding: 10px 11px;
+    transition: border-color 120ms ease, transform 120ms ease;
+}
+
+input:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.panel-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.action-btn {
+    border: 1px solid #352d28;
+    background: #201a16;
+    color: #fef7ef;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 12px;
+    padding: 11px 14px;
+    cursor: pointer;
+    transition: transform 130ms ease, box-shadow 130ms ease;
+}
+
+.action-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 20px -16px rgba(0, 0, 0, 0.9);
+}
+
+.action-btn--accent {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.trackers-zone {
+    margin-top: 24px;
+}
+
+.cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+}
+
+.cards-list {
+    display: grid;
+    gap: 10px;
+}
+
+.tracker-card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: var(--shadow);
+    padding: 14px 14px 12px;
+    position: relative;
+    overflow: hidden;
+}
+
+.tracker-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-top: 2px solid transparent;
+    transition: border-color 130ms ease;
+}
+
+.tracker-card:hover::after { border-color: var(--accent-soft); }
+
+.tracker-card h3 {
+    margin: 0;
+    font-family: "Bodoni Moda", Georgia, serif;
+    font-size: 1.24rem;
+}
+
+.tracker-card header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+}
+
+.url {
+    margin: 10px 0 8px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+    font-size: 13px;
+}
+
+.meta {
+    margin: 0;
+    font-size: 12px;
+    color: var(--ink-soft);
+}
+
+.card-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+}
+
+.mini-btn {
+    border: 1px solid #2f2926;
+    background: transparent;
+    color: var(--ink);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.11em;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+.mini-btn--danger {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.empty-state {
+    border: 1px dashed #b8a990;
+    padding: 30px;
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.empty-state h2 {
+    margin: 0 0 8px;
+    font-family: "Bodoni Moda", Georgia, serif;
+}
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(28, 19, 15, 0.58);
+    display: grid;
+    place-items: center;
+    z-index: 20;
+    padding: 24px;
+}
+
+.modal-card {
+    width: min(640px, 100%);
+    border: 1px solid #685241;
+    background: #fff9f0;
+    box-shadow: 0 30px 70px -40px rgba(0, 0, 0, 0.95);
+    padding: 20px;
+}
+
+.modal-card header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+}
+
+.modal-card h2 {
+    margin: 0;
+    font-family: "Bodoni Moda", Georgia, serif;
+}
+
+.close-btn {
+    border: 1px solid #332a25;
+    background: transparent;
+    width: 36px;
+    height: 36px;
+    font-size: 22px;
+    cursor: pointer;
+}
+
+.tracker-form {
+    display: grid;
+    gap: 10px;
+}
+
+.split-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.modal-actions {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+@media (max-width: 900px) {
+    .control-panel {
+        grid-template-columns: 1fr;
+    }
+
+    .filters-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .shell {
+        padding: 24px 14px 40px;
+    }
+
+    .filters-grid,
+    .split-row {
+        grid-template-columns: 1fr;
+    }
+
+    .panel-actions {
+        flex-wrap: wrap;
+    }
+}
