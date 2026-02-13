@@ -39,5 +39,4 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 - Full runbook: [BACKUP_RESTORE.md](BACKUP_RESTORE.md)
 
 ## Release Docs
-- Release checklist: [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
 - Release notes: [RELEASE_NOTES_v0.1.md](RELEASE_NOTES_v0.1.md)
