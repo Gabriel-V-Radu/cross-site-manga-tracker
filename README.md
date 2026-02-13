@@ -21,6 +21,20 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 - Health check at `http://localhost:8080/health`
 - Dashboard at `http://localhost:8080/dashboard`
 
+## One-Click Deploy (Windows)
+- Double-click `deploy.cmd` from the repo root, or run:
+   - `./scripts/deploy.ps1`
+- What it does:
+   - Builds and starts the full stack with Docker Compose
+   - Waits for health check (`/health`)
+   - Opens dashboard automatically (`/dashboard`)
+- Stop the app:
+   - Double-click `stop.cmd`, or run `./scripts/stop.ps1`
+- Restart the app:
+   - Double-click `restart.cmd`, or run `./scripts/restart.ps1`
+- Manual fallback:
+   - `docker compose down`
+
 ## Access Mode (Current)
 - The app is intentionally exposed only on `localhost` (`127.0.0.1:8080`).
 - This keeps usage single-PC for now.
