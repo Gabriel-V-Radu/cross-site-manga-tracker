@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,11 +123,18 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		title = "Untitled"
 	}
 
+	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
+	if latestChapter == nil {
+		latestChapter, _ = c.fetchLatestChapterFromFeed(ctx, titleID)
+	}
+
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  payload.Data.ID,
 		Title:         title,
 		URL:           trimmed,
+		CoverImageURL: pickCoverImageURL(payload.Data.ID, payload.Data.Relationships),
+		LatestChapter: latestChapter,
 		LastUpdatedAt: time.Now().UTC(),
 	}, nil
 }
@@ -147,6 +155,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	values := url.Values{}
 	values.Set("title", query)
 	values.Set("limit", fmt.Sprintf("%d", limit))
+	values.Add("includes[]", "cover_art")
 
 	searchURL := c.apiBaseURL + "/manga?" + values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
@@ -175,11 +184,19 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if bestTitle == "" {
 			bestTitle = "Untitled"
 		}
+
+		latestChapter := parseChapterNumber(item.Attributes.LastChapter)
+		if latestChapter == nil {
+			latestChapter, _ = c.fetchLatestChapterFromFeed(ctx, item.ID)
+		}
+
 		items = append(items, connectors.MangaResult{
 			SourceKey:     c.Key(),
 			SourceItemID:  item.ID,
 			Title:         bestTitle,
 			URL:           "https://mangadex.org/title/" + item.ID,
+			CoverImageURL: pickCoverImageURL(item.ID, item.Relationships),
+			LatestChapter: latestChapter,
 			LastUpdatedAt: time.Now().UTC(),
 		})
 	}
@@ -215,12 +232,94 @@ func pickBestTitle(titleMap map[string]string) string {
 	return ""
 }
 
+func pickCoverImageURL(mangaID string, relationships []mangaRelationship) string {
+	for _, relationship := range relationships {
+		if relationship.Type != "cover_art" {
+			continue
+		}
+		fileName := strings.TrimSpace(relationship.Attributes.FileName)
+		if fileName == "" {
+			continue
+		}
+		return "https://uploads.mangadex.org/covers/" + mangaID + "/" + fileName + ".256.jpg"
+	}
+
+	return ""
+}
+
+func parseChapterNumber(raw string) *float64 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return nil
+	}
+
+	return &parsed
+}
+
+func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID string) (*float64, error) {
+	if strings.TrimSpace(mangaID) == "" {
+		return nil, nil
+	}
+
+	values := url.Values{}
+	values.Set("limit", "100")
+	values.Set("offset", "0")
+	values.Set("order[chapter]", "desc")
+	values.Set("includeExternalUrl", "0")
+	values.Add("translatedLanguage[]", "en")
+	values.Add("contentRating[]", "safe")
+	values.Add("contentRating[]", "suggestive")
+	values.Add("contentRating[]", "erotica")
+	values.Add("contentRating[]", "pornographic")
+
+	feedURL := c.apiBaseURL + "/manga/" + mangaID + "/feed?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create feed request: %w", err)
+	}
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request feed: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
+	}
+
+	var payload mangaFeedResponse
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode feed response: %w", err)
+	}
+
+	var latest *float64
+	for _, chapter := range payload.Data {
+		parsed := parseChapterNumber(chapter.Attributes.Chapter)
+		if parsed == nil {
+			continue
+		}
+		if latest == nil || *parsed > *latest {
+			latest = parsed
+		}
+	}
+
+	return latest, nil
+}
+
 type mangaByIDResponse struct {
 	Data struct {
 		ID         string `json:"id"`
 		Attributes struct {
-			Title map[string]string `json:"title"`
+			Title       map[string]string `json:"title"`
+			LastChapter string            `json:"lastChapter"`
 		} `json:"attributes"`
+		Relationships []mangaRelationship `json:"relationships"`
 	} `json:"data"`
 }
 
@@ -228,7 +327,24 @@ type mangaSearchResponse struct {
 	Data []struct {
 		ID         string `json:"id"`
 		Attributes struct {
-			Title map[string]string `json:"title"`
+			Title       map[string]string `json:"title"`
+			LastChapter string            `json:"lastChapter"`
+		} `json:"attributes"`
+		Relationships []mangaRelationship `json:"relationships"`
+	} `json:"data"`
+}
+
+type mangaRelationship struct {
+	Type       string `json:"type"`
+	Attributes struct {
+		FileName string `json:"fileName"`
+	} `json:"attributes"`
+}
+
+type mangaFeedResponse struct {
+	Data []struct {
+		Attributes struct {
+			Chapter string `json:"chapter"`
 		} `json:"attributes"`
 	} `json:"data"`
 }

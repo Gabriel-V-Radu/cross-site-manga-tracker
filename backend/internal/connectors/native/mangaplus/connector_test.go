@@ -14,14 +14,53 @@ func TestMangaPlusConnector(t *testing.T) {
 	mux.HandleFunc("/title_list/allV2", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"success": map[string]any{
-				"allTitlesView": map[string]any{
-					"titles": []map[string]any{
-						{"titleId": 100, "name": "One Piece"},
-						{"titleId": 200, "name": "Blue Box"},
+				"allTitlesViewV2": map[string]any{
+					"AllTitlesGroup": []map[string]any{
+						{
+							"theTitle": "A",
+							"titles": []map[string]any{
+								{"titleId": 100, "name": "One Piece"},
+								{"titleId": 200, "name": "Blue Box"},
+							},
+						},
 					},
 				},
 			},
 		})
+	})
+	mux.HandleFunc("/title_detailV3", func(w http.ResponseWriter, r *http.Request) {
+		titleID := r.URL.Query().Get("title_id")
+		if titleID == "100" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": map[string]any{
+					"titleDetailView": map[string]any{
+						"chapterListGroup": []map[string]any{
+							{
+								"chapterNumbers":   "111",
+								"firstChapterList": []map[string]any{{"name": "#001"}},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		if titleID == "200" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": map[string]any{
+					"titleDetailView": map[string]any{
+						"chapterListGroup": []map[string]any{
+							{
+								"chapterNumbers": "10",
+								"midChapterList": []map[string]any{{"name": "#012.5"}},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
 	})
 
 	server := httptest.NewServer(mux)
@@ -40,6 +79,9 @@ func TestMangaPlusConnector(t *testing.T) {
 	if resolved.Title != "One Piece" {
 		t.Fatalf("expected One Piece, got %s", resolved.Title)
 	}
+	if resolved.LatestChapter == nil || *resolved.LatestChapter != 111 {
+		t.Fatalf("expected latest chapter 111, got %v", resolved.LatestChapter)
+	}
 
 	results, err := connector.SearchByTitle(context.Background(), "blue", 10)
 	if err != nil {
@@ -50,5 +92,8 @@ func TestMangaPlusConnector(t *testing.T) {
 	}
 	if results[0].SourceItemID != "200" {
 		t.Fatalf("expected source item id 200, got %s", results[0].SourceItemID)
+	}
+	if results[0].LatestChapter == nil || *results[0].LatestChapter != 12.5 {
+		t.Fatalf("expected latest chapter 12.5, got %v", results[0].LatestChapter)
 	}
 }

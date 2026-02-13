@@ -28,6 +28,17 @@ type Tracker struct {
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
+type TrackerSource struct {
+	ID           int64     `json:"id"`
+	TrackerID    int64     `json:"trackerId"`
+	SourceID     int64     `json:"sourceId"`
+	SourceName   string    `json:"sourceName,omitempty"`
+	SourceItemID *string   `json:"sourceItemId,omitempty"`
+	SourceURL    string    `json:"sourceUrl"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type Chapter struct {
 	ID            int64      `json:"id"`
 	TrackerID     int64      `json:"trackerId"`

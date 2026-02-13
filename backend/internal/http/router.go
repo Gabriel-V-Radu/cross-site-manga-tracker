@@ -25,7 +25,6 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)
-	dashboard := handlers.NewDashboardHandler(db)
 	if connectorRegistry == nil {
 		loadedRegistry, err := connectordefaults.NewRegistry(cfg.YAMLConnectorsPath)
 		if err != nil {
@@ -33,16 +32,19 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 		}
 		connectorRegistry = loadedRegistry
 	}
+	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)
 	app.Static("/assets", "./web/assets")
 	app.Get("/", dashboard.Page)
 	app.Get("/dashboard", dashboard.Page)
 	app.Get("/dashboard/trackers", dashboard.TrackersPartial)
+	app.Get("/dashboard/trackers/search", dashboard.SearchSourceTitles)
 	app.Get("/dashboard/trackers/empty-modal", dashboard.EmptyModal)
 	app.Get("/dashboard/trackers/new", dashboard.NewTrackerModal)
 	app.Get("/dashboard/trackers/:id/edit", dashboard.EditTrackerModal)
 	app.Post("/dashboard/trackers", dashboard.CreateFromForm)
 	app.Post("/dashboard/trackers/:id", dashboard.UpdateFromForm)
+	app.Post("/dashboard/trackers/:id/set-last-read", dashboard.SetLastReadFromCard)
 	app.Post("/dashboard/trackers/:id/delete", dashboard.DeleteFromForm)
 	app.Get("/health", health.Check)
 	app.Get("/v1/health", health.Check)

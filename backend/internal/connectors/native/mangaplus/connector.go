@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ type Connector struct {
 	allowedHost []string
 	httpClient  *http.Client
 }
+
+var chapterNumberPattern = regexp.MustCompile(`\d+(?:\.\d+)?`)
 
 func NewConnector() *Connector {
 	return &Connector{
@@ -92,11 +95,14 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 
 	for _, title := range titles {
 		if title.TitleID == titleID {
+			latestChapter, _ := c.fetchLatestChapterByTitleID(ctx, title.TitleID)
 			return &connectors.MangaResult{
 				SourceKey:     c.Key(),
 				SourceItemID:  title.TitleID,
 				Title:         title.Name,
 				URL:           "https://mangaplus.shueisha.co.jp/titles/" + title.TitleID,
+				CoverImageURL: strings.TrimSpace(title.PortraitImageURL),
+				LatestChapter: latestChapter,
 				LastUpdatedAt: time.Now().UTC(),
 			}, nil
 		}
@@ -128,6 +134,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 				SourceItemID:  title.TitleID,
 				Title:         title.Name,
 				URL:           "https://mangaplus.shueisha.co.jp/titles/" + title.TitleID,
+				CoverImageURL: strings.TrimSpace(title.PortraitImageURL),
 				LastUpdatedAt: time.Now().UTC(),
 			})
 		}
@@ -139,6 +146,13 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 
 	if len(results) > limit {
 		results = results[:limit]
+	}
+
+	for index := range results {
+		latestChapter, err := c.fetchLatestChapterByTitleID(ctx, results[index].SourceItemID)
+		if err == nil {
+			results[index].LatestChapter = latestChapter
+		}
 	}
 
 	return results, nil
@@ -156,8 +170,80 @@ func (c *Connector) isAllowedHost(host string) bool {
 }
 
 type mangaPlusTitle struct {
-	TitleID string
-	Name    string
+	TitleID          string
+	Name             string
+	PortraitImageURL string
+}
+
+func parseChapterValue(raw string) *float64 {
+	match := chapterNumberPattern.FindString(strings.TrimSpace(raw))
+	if match == "" {
+		return nil
+	}
+
+	parsed, err := strconv.ParseFloat(match, 64)
+	if err != nil {
+		return nil
+	}
+
+	return &parsed
+}
+
+func updateMaxChapter(current *float64, candidate *float64) *float64 {
+	if candidate == nil {
+		return current
+	}
+	if current == nil || *candidate > *current {
+		return candidate
+	}
+	return current
+}
+
+func (c *Connector) fetchLatestChapterByTitleID(ctx context.Context, titleID string) (*float64, error) {
+	if strings.TrimSpace(titleID) == "" {
+		return nil, nil
+	}
+
+	values := url.Values{}
+	values.Set("title_id", titleID)
+	values.Set("format", "json")
+
+	detailURL := c.apiBaseURL + "/title_detailV3?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, detailURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create title detail request: %w", err)
+	}
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request title detail: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("title detail returned status %d", res.StatusCode)
+	}
+
+	var payload mangaPlusTitleDetailResponse
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode title detail response: %w", err)
+	}
+
+	var latest *float64
+	for _, group := range payload.Success.TitleDetailView.ChapterListGroup {
+		latest = updateMaxChapter(latest, parseChapterValue(group.ChapterNumbers))
+		for _, chapter := range group.FirstChapterList {
+			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+		}
+		for _, chapter := range group.MidChapterList {
+			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+		}
+		for _, chapter := range group.LastChapterList {
+			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+		}
+	}
+
+	return latest, nil
 }
 
 func (c *Connector) fetchAllTitles(ctx context.Context) ([]mangaPlusTitle, error) {
@@ -194,19 +280,21 @@ func (c *Connector) fetchAllTitles(ctx context.Context) ([]mangaPlusTitle, error
 			continue
 		}
 
-		if len(payload.Success.AllTitlesView.Titles) == 0 {
+		titles := payload.collectTitles()
+		if len(titles) == 0 {
 			lastErr = fmt.Errorf("empty title list")
 			continue
 		}
 
-		items := make([]mangaPlusTitle, 0, len(payload.Success.AllTitlesView.Titles))
-		for _, item := range payload.Success.AllTitlesView.Titles {
+		items := make([]mangaPlusTitle, 0, len(titles))
+		for _, item := range titles {
 			if item.TitleID == 0 || strings.TrimSpace(item.Name) == "" {
 				continue
 			}
 			items = append(items, mangaPlusTitle{
-				TitleID: strconv.Itoa(item.TitleID),
-				Name:    strings.TrimSpace(item.Name),
+				TitleID:          strconv.Itoa(item.TitleID),
+				Name:             strings.TrimSpace(item.Name),
+				PortraitImageURL: strings.TrimSpace(item.PortraitImageURL),
 			})
 		}
 		if len(items) > 0 {
@@ -225,9 +313,87 @@ type mangaPlusTitleListResponse struct {
 	Success struct {
 		AllTitlesView struct {
 			Titles []struct {
-				TitleID int    `json:"titleId"`
-				Name    string `json:"name"`
+				TitleID          int    `json:"titleId"`
+				Name             string `json:"name"`
+				PortraitImageURL string `json:"portraitImageUrl"`
 			} `json:"titles"`
 		} `json:"allTitlesView"`
+		AllTitlesViewV2 struct {
+			AllTitlesGroup []struct {
+				Titles []struct {
+					TitleID          int    `json:"titleId"`
+					Name             string `json:"name"`
+					PortraitImageURL string `json:"portraitImageUrl"`
+				} `json:"titles"`
+			} `json:"AllTitlesGroup"`
+			AllTitlesGroupLower []struct {
+				Titles []struct {
+					TitleID          int    `json:"titleId"`
+					Name             string `json:"name"`
+					PortraitImageURL string `json:"portraitImageUrl"`
+				} `json:"titles"`
+			} `json:"allTitlesGroup"`
+		} `json:"allTitlesViewV2"`
+	} `json:"success"`
+}
+
+func (r mangaPlusTitleListResponse) collectTitles() []struct {
+	TitleID          int
+	Name             string
+	PortraitImageURL string
+} {
+	titles := make([]struct {
+		TitleID          int
+		Name             string
+		PortraitImageURL string
+	}, 0)
+
+	for _, item := range r.Success.AllTitlesView.Titles {
+		titles = append(titles, struct {
+			TitleID          int
+			Name             string
+			PortraitImageURL string
+		}{TitleID: item.TitleID, Name: item.Name, PortraitImageURL: item.PortraitImageURL})
+	}
+
+	for _, group := range r.Success.AllTitlesViewV2.AllTitlesGroup {
+		for _, item := range group.Titles {
+			titles = append(titles, struct {
+				TitleID          int
+				Name             string
+				PortraitImageURL string
+			}{TitleID: item.TitleID, Name: item.Name, PortraitImageURL: item.PortraitImageURL})
+		}
+	}
+
+	for _, group := range r.Success.AllTitlesViewV2.AllTitlesGroupLower {
+		for _, item := range group.Titles {
+			titles = append(titles, struct {
+				TitleID          int
+				Name             string
+				PortraitImageURL string
+			}{TitleID: item.TitleID, Name: item.Name, PortraitImageURL: item.PortraitImageURL})
+		}
+	}
+
+	return titles
+}
+
+type mangaPlusTitleDetailResponse struct {
+	Success struct {
+		TitleDetailView struct {
+			ChapterListGroup []struct {
+				ChapterNumbers   string `json:"chapterNumbers"`
+				FirstChapterList []struct {
+					Name string `json:"name"`
+				} `json:"firstChapterList"`
+				MidChapterList []struct {
+					Name string `json:"name"`
+				} `json:"midChapterList"`
+				LastChapterList []struct {
+					Name string `json:"name"`
+				} `json:"lastChapterList"`
+			} `json:"chapterListGroup"`
+		} `json:"titleDetailView"`
 	} `json:"success"`
 }

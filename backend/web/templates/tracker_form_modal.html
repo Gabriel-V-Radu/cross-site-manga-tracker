@@ -25,13 +25,67 @@
             </label>
 
             <label>
+                Search by Title (Auto-fill)
+                <input type="text"
+                       id="source-search-input"
+                       name="q"
+                       placeholder="Type title to search selected source"
+                       autocomplete="off"
+                       hx-get="/dashboard/trackers/search"
+                       hx-target="#source-search-results"
+                       hx-trigger="keyup changed delay:350ms"
+                       hx-include="[name='source_id'], #source-search-input"
+                       hx-indicator="#source-search-loading">
+            </label>
+            <p id="source-search-loading" class="search-loading htmx-indicator">Searching…</p>
+            <div id="source-search-results" class="source-search-results"></div>
+
+            {{if eq .Mode "edit"}}
+            <hr>
+            <h3>Linked Sites</h3>
+            <p class="search-message">Search another site and add it as the same manga tracker.</p>
+            <input type="hidden" name="linked_sources_json" id="linked-sources-json" value='{{toJSON .LinkedSources}}'>
+            <input type="hidden" id="all-sources-json" value='{{toJSON .Sources}}'>
+            <div id="linked-sources-list" class="search-results-list"></div>
+
+            <label>
+                Site to Add
+                <select name="linked_source_id" id="linked-source-id">
+                    <option value="">Select source</option>
+                    {{range .AvailableLinkSources}}
+                    <option value="{{.ID}}">{{.Name}}</option>
+                    {{end}}
+                </select>
+            </label>
+
+            <label>
+                Search Additional Site
+                <input type="text"
+                       id="linked-search-input"
+                       name="linked_q"
+                       placeholder="Type title to search another source"
+                       autocomplete="off"
+                       hx-get="/dashboard/trackers/search"
+                       hx-target="#linked-search-results"
+                       hx-trigger="keyup changed delay:350ms"
+                       hx-vals='{"intent":"link"}'
+                       hx-include="#linked-source-id, #linked-search-input"
+                       hx-params="not source_id,q"
+                       hx-indicator="#linked-search-loading"
+                       hx-on:htmx:config-request="event.detail.parameters.source_id = document.getElementById('linked-source-id').value; event.detail.parameters.q = this.value;">
+            </label>
+            <p id="linked-search-loading" class="search-loading htmx-indicator">Searching…</p>
+            <div id="linked-search-results" class="source-search-results"></div>
+            {{end}}
+
+            <label>
                 Source URL
                 <input type="url" name="source_url" value="{{if .Tracker}}{{.Tracker.SourceURL}}{{end}}" required>
             </label>
 
             <label>
                 Source Item ID
-                <input type="text" name="source_item_id" value="">
+                <input type="text" name="source_item_id" value="{{if .Tracker}}{{textInputValue .Tracker.SourceItemID}}{{end}}">
             </label>
 
             <label>
@@ -48,11 +102,11 @@
             <div class="split-row">
                 <label>
                     Last Read
-                    <input type="number" step="0.1" name="last_read_chapter" value="">
+                    <input type="number" step="0.1" name="last_read_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LastReadChapter}}{{end}}">
                 </label>
                 <label>
                     Latest Known
-                    <input type="number" step="0.1" name="latest_known_chapter" value="">
+                    <input type="number" step="0.1" name="latest_known_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LatestKnownChapter}}{{end}}">
                 </label>
             </div>
 

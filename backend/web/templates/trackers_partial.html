@@ -7,14 +7,51 @@
 <div class="{{if eq .ViewMode "list"}}cards-list{{else}}cards-grid{{end}}">
     {{range .Trackers}}
     <article class="tracker-card">
-        <header>
+        <header class="tracker-card__header">
             <h3>{{.Title}}</h3>
             <span class="badge">{{.Status}}</span>
         </header>
-        <p class="url">{{.SourceURL}}</p>
-        <p class="meta">Updated {{.UpdatedAt.Format "2006-01-02 15:04"}}</p>
+
+        <div class="tracker-card__cover">
+            {{if .CoverURL}}
+            <img src="{{.CoverURL}}" alt="{{.Title}} cover" loading="lazy">
+            {{else}}
+            <div class="tracker-card__cover-title">{{.Title}}</div>
+            {{end}}
+        </div>
+
+        <div class="tracker-card__stats">
+            <div class="stat-row">
+                <span class="stat-label">Latest Known Chapter:</span>
+                <span class="stat-value">{{.LatestKnownChapter}}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Release Date:</span>
+                <span class="stat-value">{{.LastCheckedAgo}}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Last Read Chapter:</span>
+                <span class="stat-value">{{.LastReadChapter}}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Read Date:</span>
+                <span class="stat-value">{{.LastReadAgo}}</span>
+            </div>
+        </div>
 
         <div class="card-actions">
+            <button type="button"
+                    class="mini-btn"
+                    hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML">Set last read</button>
+            <a class="mini-btn mini-btn--highlight"
+               href="{{.SourceURL}}"
+               target="_blank"
+               rel="noopener noreferrer">Highlight</a>
+        </div>
+
+        <div class="card-actions card-actions--secondary">
             <button type="button"
                     class="mini-btn"
                     hx-get="/dashboard/trackers/{{.ID}}/edit"

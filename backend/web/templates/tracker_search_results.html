@@ -1,0 +1,30 @@
+{{if .Error}}
+<p class="search-message search-message--error">{{.Error}}</p>
+{{else if eq (len .Items) 0}}
+{{if .Query}}
+<p class="search-message">No matches found for "{{.Query}}"</p>
+{{end}}
+{{else}}
+<div class="search-results-list">
+    {{range .Items}}
+    <button type="button"
+            class="search-result-item"
+            data-title="{{.Title}}"
+            data-url="{{.URL}}"
+            data-source-item-id="{{.SourceItemID}}"
+            data-source-id="{{$.SourceID}}"
+            data-source-name="{{$.SourceName}}"
+            data-latest-chapter="{{chapterInputValue .LatestChapter}}"
+            onclick="{{if eq $.Intent "link"}}window.addTrackerLinkedSource(this){{else}}window.applyTrackerSearchResult(this){{end}}">
+        <span class="search-result-thumb">
+            {{if .CoverImageURL}}
+            <img src="{{.CoverImageURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer" />
+            {{else}}
+            <span class="search-result-thumb-fallback">No cover</span>
+            {{end}}
+        </span>
+        <span class="search-result-title">{{.Title}}</span>
+    </button>
+    {{end}}
+</div>
+{{end}}

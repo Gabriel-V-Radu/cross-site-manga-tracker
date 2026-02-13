@@ -58,6 +58,14 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("get tracker last insert id: %w", err)
 	}
 
+	if err := r.ReplaceTrackerSources(id, []models.TrackerSource{{
+		SourceID:     tracker.SourceID,
+		SourceItemID: tracker.SourceItemID,
+		SourceURL:    tracker.SourceURL,
+	}}); err != nil {
+		return nil, fmt.Errorf("create tracker sources: %w", err)
+	}
+
 	return r.GetByID(id)
 }
 
@@ -181,7 +189,116 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		return nil, nil
 	}
 
+	if err := r.UpsertTrackerSource(id, models.TrackerSource{
+		SourceID:     tracker.SourceID,
+		SourceItemID: tracker.SourceItemID,
+		SourceURL:    tracker.SourceURL,
+	}); err != nil {
+		return nil, fmt.Errorf("upsert primary tracker source: %w", err)
+	}
+
 	return r.GetByID(id)
+}
+
+func (r *TrackerRepository) ListTrackerSources(trackerID int64) ([]models.TrackerSource, error) {
+	rows, err := r.db.Query(`
+		SELECT
+			ts.id,
+			ts.tracker_id,
+			ts.source_id,
+			s.name,
+			ts.source_item_id,
+			ts.source_url,
+			ts.created_at,
+			ts.updated_at
+		FROM tracker_sources ts
+		INNER JOIN sources s ON s.id = ts.source_id
+		WHERE ts.tracker_id = ?
+		ORDER BY s.name ASC, ts.id ASC
+	`, trackerID)
+	if err != nil {
+		return nil, fmt.Errorf("list tracker sources: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]models.TrackerSource, 0)
+	for rows.Next() {
+		var item models.TrackerSource
+		var sourceItemID sql.NullString
+		if err := rows.Scan(
+			&item.ID,
+			&item.TrackerID,
+			&item.SourceID,
+			&item.SourceName,
+			&sourceItemID,
+			&item.SourceURL,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan tracker source: %w", err)
+		}
+		if sourceItemID.Valid {
+			item.SourceItemID = &sourceItemID.String
+		}
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tracker sources: %w", err)
+	}
+
+	return items, nil
+}
+
+func (r *TrackerRepository) ReplaceTrackerSources(trackerID int64, sources []models.TrackerSource) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin replace tracker sources tx: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM tracker_sources WHERE tracker_id = ?`, trackerID); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("delete tracker sources: %w", err)
+	}
+
+	for _, source := range sources {
+		if strings.TrimSpace(source.SourceURL) == "" || source.SourceID <= 0 {
+			continue
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+			VALUES (?, ?, ?, ?)
+		`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert tracker source: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace tracker sources tx: %w", err)
+	}
+
+	return nil
+}
+
+func (r *TrackerRepository) UpsertTrackerSource(trackerID int64, source models.TrackerSource) error {
+	if source.SourceID <= 0 || strings.TrimSpace(source.SourceURL) == "" {
+		return nil
+	}
+
+	_, err := r.db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(tracker_id, source_id, source_url)
+		DO UPDATE SET
+			source_item_id = excluded.source_item_id,
+			updated_at = CURRENT_TIMESTAMP
+	`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL))
+	if err != nil {
+		return fmt.Errorf("upsert tracker source: %w", err)
+	}
+
+	return nil
 }
 
 func (r *TrackerRepository) Delete(id int64) (bool, error) {

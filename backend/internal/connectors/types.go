@@ -15,6 +15,7 @@ type MangaResult struct {
 	SourceItemID  string    `json:"sourceItemId"`
 	Title         string    `json:"title"`
 	URL           string    `json:"url"`
+	CoverImageURL string    `json:"coverImageUrl,omitempty"`
 	LatestChapter *float64  `json:"latestChapter,omitempty"`
 	LastUpdatedAt time.Time `json:"lastUpdatedAt"`
 }
