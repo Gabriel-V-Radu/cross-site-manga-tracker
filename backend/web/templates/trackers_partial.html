@@ -14,7 +14,7 @@
 
         <div class="tracker-card__cover">
             {{if .CoverURL}}
-            <img src="{{.CoverURL}}" alt="{{.Title}} cover" loading="lazy">
+            <img src="{{.CoverURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
             {{else}}
             <div class="tracker-card__cover-title">{{.Title}}</div>
             {{end}}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html/template"
 	"math"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -25,7 +24,6 @@ type DashboardHandler struct {
 	trackerRepo *repository.TrackerRepository
 	sourceRepo  *repository.SourceRepository
 	registry    *connectors.Registry
-	httpClient  *http.Client
 	coverCache  map[string]coverCacheEntry
 	cacheMu     sync.RWMutex
 }
@@ -66,11 +64,10 @@ type trackerCardView struct {
 }
 
 type trackerFormData struct {
-	Mode                 string
-	Tracker              *models.Tracker
-	Sources              []models.Source
-	AvailableLinkSources []models.Source
-	LinkedSources        []models.TrackerSource
+	Mode          string
+	Tracker       *models.Tracker
+	Sources       []models.Source
+	LinkedSources []models.TrackerSource
 }
 
 type trackerSearchResultsData struct {
@@ -90,12 +87,14 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		trackerRepo: repository.NewTrackerRepository(db),
 		sourceRepo:  repository.NewSourceRepository(db),
 		registry:    registry,
-		httpClient:  &http.Client{Timeout: 8 * time.Second},
 		coverCache:  make(map[string]coverCacheEntry),
 	}
 }
 
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Set("Pragma", "no-cache")
+	c.Set("Expires", "0")
 	data := dashboardPageData{
 		Statuses: []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
 		Sorts:    []string{"updated_at", "title", "created_at", "last_checked_at", "latest_known_chapter"},
@@ -104,6 +103,10 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Set("Pragma", "no-cache")
+	c.Set("Expires", "0")
+
 	status := strings.TrimSpace(c.Query("status", "all"))
 	statuses := make([]string, 0)
 	if status != "" && status != "all" {
@@ -170,10 +173,8 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		}
 
 		sourceKey := sourceKeyByID[item.SourceID]
-		if sourceKey == "mangadex" && item.SourceItemID != nil && strings.TrimSpace(*item.SourceItemID) != "" {
-			if coverURL, coverErr := h.fetchMangaDexCoverURL(c.Context(), *item.SourceItemID); coverErr == nil {
-				card.CoverURL = coverURL
-			}
+		if coverURL, coverErr := h.fetchCoverURL(c.Context(), sourceKey, item.SourceURL, item.SourceItemID); coverErr == nil {
+			card.CoverURL = coverURL
 		}
 
 		cards = append(cards, card)
@@ -188,10 +189,9 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
 	}
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
-		Mode:                 "create",
-		Sources:              sources,
-		AvailableLinkSources: sources,
-		LinkedSources:        []models.TrackerSource{},
+		Mode:          "create",
+		Sources:       sources,
+		LinkedSources: []models.TrackerSource{},
 	})
 }
 
@@ -332,29 +332,11 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 	}
 
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
-		Mode:                 "edit",
-		Tracker:              tracker,
-		Sources:              sources,
-		AvailableLinkSources: filterAvailableLinkSources(sources, linkedSources),
-		LinkedSources:        linkedSources,
+		Mode:          "edit",
+		Tracker:       tracker,
+		Sources:       sources,
+		LinkedSources: linkedSources,
 	})
-}
-
-func filterAvailableLinkSources(sources []models.Source, linkedSources []models.TrackerSource) []models.Source {
-	linkedBySourceID := make(map[int64]struct{}, len(linkedSources))
-	for _, linked := range linkedSources {
-		linkedBySourceID[linked.SourceID] = struct{}{}
-	}
-
-	filtered := make([]models.Source, 0, len(sources))
-	for _, source := range sources {
-		if _, exists := linkedBySourceID[source.ID]; exists {
-			continue
-		}
-		filtered = append(filtered, source)
-	}
-
-	return filtered
 }
 
 func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
@@ -650,70 +632,71 @@ func relativeTime(value time.Time) string {
 	return fmt.Sprintf("%d years ago", years)
 }
 
-func (h *DashboardHandler) fetchMangaDexCoverURL(parent context.Context, titleID string) (string, error) {
-	trimmedID := strings.TrimSpace(titleID)
-	if trimmedID == "" {
-		return "", fmt.Errorf("empty title id")
+func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sourceURL string, sourceItemID *string) (string, error) {
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return "", fmt.Errorf("missing source key")
 	}
 
-	if cachedURL, found, ok := h.getCachedCover(trimmedID); ok {
+	cacheKey := buildCoverCacheKey(trimmedSourceKey, sourceURL, sourceItemID)
+	if cachedURL, found, ok := h.getCachedCover(cacheKey); ok {
 		if found {
 			return cachedURL, nil
 		}
 		return "", fmt.Errorf("cover not found")
 	}
 
-	endpoint := "https://api.mangadex.org/manga/" + url.PathEscape(trimmedID) + "?includes[]=cover_art"
-	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
+	connector, ok := h.registry.Get(trimmedSourceKey)
+	if !ok {
+		h.setCachedCover(cacheKey, "", false, 30*time.Minute)
+		return "", fmt.Errorf("connector not found")
+	}
+
+	resolvedURL := strings.TrimSpace(sourceURL)
+	if resolvedURL == "" {
+		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+		return "", fmt.Errorf("missing source url")
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	result, err := connector.ResolveByURL(ctx, resolvedURL)
 	if err != nil {
-		return "", fmt.Errorf("build cover request: %w", err)
+		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+		return "", fmt.Errorf("resolve source url: %w", err)
 	}
 
-	res, err := h.httpClient.Do(req)
-	if err != nil {
-		h.setCachedCover(trimmedID, "", false, 2*time.Minute)
-		return "", fmt.Errorf("cover request failed: %w", err)
+	coverURL := ""
+	if result != nil {
+		coverURL = strings.TrimSpace(result.CoverImageURL)
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		h.setCachedCover(trimmedID, "", false, 10*time.Minute)
-		return "", fmt.Errorf("cover request status: %d", res.StatusCode)
+	if coverURL == "" {
+		h.setCachedCover(cacheKey, "", false, 30*time.Minute)
+		return "", fmt.Errorf("cover not found")
 	}
 
-	var payload struct {
-		Data struct {
-			Relationships []struct {
-				Type       string `json:"type"`
-				Attributes struct {
-					FileName string `json:"fileName"`
-				} `json:"attributes"`
-			} `json:"relationships"`
-		} `json:"data"`
+	h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
+	return coverURL, nil
+}
+
+func buildCoverCacheKey(sourceKey, sourceURL string, sourceItemID *string) string {
+	itemID := ""
+	if sourceItemID != nil {
+		itemID = strings.TrimSpace(*sourceItemID)
 	}
 
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		h.setCachedCover(trimmedID, "", false, 2*time.Minute)
-		return "", fmt.Errorf("decode cover response: %w", err)
+	base := strings.ToLower(strings.TrimSpace(sourceKey)) + "|"
+	if itemID != "" {
+		return base + "item:" + strings.ToLower(itemID)
 	}
 
-	for _, relation := range payload.Data.Relationships {
-		if relation.Type == "cover_art" {
-			fileName := strings.TrimSpace(relation.Attributes.FileName)
-			if fileName != "" {
-				coverURL := "https://uploads.mangadex.org/covers/" + trimmedID + "/" + fileName + ".512.jpg"
-				h.setCachedCover(trimmedID, coverURL, true, 12*time.Hour)
-				return coverURL, nil
-			}
-		}
+	trimmedURL := strings.TrimSpace(sourceURL)
+	if trimmedURL != "" {
+		return base + "url:" + strings.ToLower(trimmedURL)
 	}
 
-	h.setCachedCover(trimmedID, "", false, 30*time.Minute)
-
-	return "", fmt.Errorf("cover not found")
+	return base + "missing"
 }
 
 func (h *DashboardHandler) getCachedCover(titleID string) (coverURL string, found bool, ok bool) {

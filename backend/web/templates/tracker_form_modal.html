@@ -52,7 +52,7 @@
                 Site to Add
                 <select name="linked_source_id" id="linked-source-id">
                     <option value="">Select source</option>
-                    {{range .AvailableLinkSources}}
+                    {{range .Sources}}
                     <option value="{{.ID}}">{{.Name}}</option>
                     {{end}}
                 </select>

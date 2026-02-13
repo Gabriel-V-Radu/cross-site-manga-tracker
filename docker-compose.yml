@@ -12,8 +12,5 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - app_data:/app/data
+      - ./backend/data:/app/data
     restart: unless-stopped
-
-volumes:
-  app_data:

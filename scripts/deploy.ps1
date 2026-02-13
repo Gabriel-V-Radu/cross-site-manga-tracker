@@ -3,6 +3,8 @@ param(
     [string]$HealthUrl = "http://localhost:8080/health",
     [string]$DashboardUrl = "http://localhost:8080/dashboard",
     [int]$HealthTimeoutSeconds = 120,
+    [switch]$NoPull,
+    [switch]$NoCache,
     [switch]$NoBrowser
 )
 
@@ -24,8 +26,18 @@ try {
 
     docker info | Out-Null
 
-    Write-Host "Building and starting containers..."
-    docker compose up -d --build
+    Write-Host "Building containers..."
+    $buildArgs = @("compose", "build")
+    if (-not $NoPull) {
+        $buildArgs += "--pull"
+    }
+    if ($NoCache) {
+        $buildArgs += "--no-cache"
+    }
+    & docker @buildArgs
+
+    Write-Host "Starting containers..."
+    docker compose up -d --force-recreate --remove-orphans
 
     $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
     $isHealthy = $false
@@ -50,6 +62,7 @@ try {
 
     Write-Host "App is running."
     Write-Host "Dashboard: $DashboardUrl"
+    docker compose ps
 
     if (-not $NoBrowser) {
         Start-Process $DashboardUrl | Out-Null

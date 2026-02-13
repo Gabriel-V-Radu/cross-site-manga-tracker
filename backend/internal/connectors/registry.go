@@ -3,7 +3,9 @@ package connectors
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -55,8 +57,66 @@ func (r *Registry) Get(key string) (Connector, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	connector, ok := r.connectors[key]
-	return connector, ok
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return nil, false
+	}
+
+	if connector, ok := r.connectors[trimmed]; ok {
+		return connector, true
+	}
+
+	lower := strings.ToLower(trimmed)
+	if connector, ok := r.connectors[lower]; ok {
+		return connector, true
+	}
+
+	if normalized := normalizeConnectorKey(lower); normalized != "" {
+		if connector, ok := r.connectors[normalized]; ok {
+			return connector, true
+		}
+	}
+
+	return nil, false
+}
+
+func normalizeConnectorKey(raw string) string {
+	key := strings.TrimSpace(strings.ToLower(raw))
+	if key == "" {
+		return ""
+	}
+
+	if parsed, err := url.Parse(key); err == nil && parsed.Hostname() != "" {
+		key = parsed.Hostname()
+	} else {
+		key = strings.TrimPrefix(key, "https://")
+		key = strings.TrimPrefix(key, "http://")
+		if slash := strings.IndexByte(key, '/'); slash >= 0 {
+			key = key[:slash]
+		}
+		if question := strings.IndexByte(key, '?'); question >= 0 {
+			key = key[:question]
+		}
+		if hash := strings.IndexByte(key, '#'); hash >= 0 {
+			key = key[:hash]
+		}
+		if colon := strings.IndexByte(key, ':'); colon >= 0 {
+			key = key[:colon]
+		}
+	}
+
+	key = strings.TrimPrefix(key, "www.")
+
+	switch key {
+	case "mangadex.org":
+		return "mangadex"
+	case "mangaplus.shueisha.co.jp":
+		return "mangaplus"
+	case "mangafire.to":
+		return "mangafire"
+	default:
+		return key
+	}
 }
 
 func (r *Registry) List() []Descriptor {

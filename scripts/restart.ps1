@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    [switch]$NoPull,
+    [switch]$NoCache,
     [switch]$NoBrowser
 )
 
@@ -11,6 +13,12 @@ $deployScript = Join-Path $scriptDir "deploy.ps1"
 
 & $stopScript
 $deployParams = @{}
+if ($NoPull) {
+    $deployParams["NoPull"] = $true
+}
+if ($NoCache) {
+    $deployParams["NoCache"] = $true
+}
 if ($NoBrowser) {
     $deployParams["NoBrowser"] = $true
 }

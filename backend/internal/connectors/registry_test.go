@@ -55,3 +55,24 @@ func TestRegistryRegisterListHealth(t *testing.T) {
 		t.Fatalf("expected b healthy")
 	}
 }
+
+func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
+	r := connectors.NewRegistry()
+	if err := r.Register(&fakeConnector{key: "mangafire", name: "MangaFire", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register mangafire: %v", err)
+	}
+
+	tests := []string{
+		"mangafire",
+		" MangaFire ",
+		"mangafire.to",
+		"https://mangafire.to/manga/bukiyou-na-senpaii.2nw2",
+		"www.mangafire.to",
+	}
+
+	for _, key := range tests {
+		if _, ok := r.Get(key); !ok {
+			t.Fatalf("expected connector for key %q", key)
+		}
+	}
+}

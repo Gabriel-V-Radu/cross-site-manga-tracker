@@ -17,23 +17,29 @@ Current setup is local-first (single PC) with future-ready architecture for remo
    - `http://localhost:8080/health`
 
 ## Docker Run
-- `docker compose up --build`
+- `docker compose build --pull`
+- `docker compose up -d --force-recreate --remove-orphans`
 - Health check at `http://localhost:8080/health`
 - Dashboard at `http://localhost:8080/dashboard`
+- Docker uses `backend/data/app.sqlite` via bind mount (`./backend/data:/app/data`) so local and Docker runs share the same DB file.
 
 ## One-Click Deploy (Windows)
 - Double-click `deploy.cmd` from the repo root, or run:
    - `./scripts/deploy.ps1`
 - What it does:
-   - Builds and starts the full stack with Docker Compose
+   - Builds containers with `docker compose build --pull`
+   - Starts with `docker compose up -d --force-recreate --remove-orphans`
    - Waits for health check (`/health`)
    - Opens dashboard automatically (`/dashboard`)
+- Optional hard refresh build (bypass build cache):
+   - `./scripts/deploy.ps1 -NoCache`
 - Stop the app:
    - Double-click `stop.cmd`, or run `./scripts/stop.ps1`
 - Restart the app:
    - Double-click `restart.cmd`, or run `./scripts/restart.ps1`
+   - Hard refresh restart: `./scripts/restart.ps1 -NoCache`
 - Manual fallback:
-   - `docker compose down`
+   - `docker compose down --remove-orphans`
 
 ## Access Mode (Current)
 - The app is intentionally exposed only on `localhost` (`127.0.0.1:8080`).

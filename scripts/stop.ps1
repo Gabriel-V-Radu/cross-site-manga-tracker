@@ -18,7 +18,7 @@ try {
     Assert-CommandExists "docker"
 
     Write-Host "Stopping containers..."
-    docker compose down
+    docker compose down --remove-orphans
     Write-Host "App stopped."
 }
 finally {
