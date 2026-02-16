@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
@@ -30,6 +32,20 @@ func setupTestApp(t *testing.T) (*sql.DB, *fiber.App, func()) {
 
 	_, currentFile, _, _ := runtime.Caller(0)
 	baseDir := filepath.Dir(currentFile)
+	backendRoot := filepath.Clean(filepath.Join(baseDir, "..", "..", ".."))
+	originalWD, err := os.Getwd()
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(backendRoot); err != nil {
+		_ = db.Close()
+		t.Fatalf("set working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
 	migrationsPath := filepath.Join(baseDir, "..", "..", "..", "migrations")
 	if err := database.ApplyMigrations(db, migrationsPath); err != nil {
 		_ = db.Close()
@@ -157,4 +173,91 @@ func TestTrackersCRUD(t *testing.T) {
 
 func toString(value int) string {
 	return strconv.Itoa(value)
+}
+
+func TestDashboardReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
+	`,
+		"Behind Tracker", 1, "https://mangadex.org/title/behind", "reading", 8.0, 10.0,
+		"Caught Up Tracker", 1, "https://mangadex.org/title/caught-up", "reading", 10.0, 10.0,
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "Behind Tracker") {
+		t.Fatalf("expected reading filter response to include unfinished tracker")
+	}
+	if strings.Contains(html, "Caught Up Tracker") {
+		t.Fatalf("expected reading filter response to exclude caught-up tracker")
+	}
+}
+
+func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
+	`,
+		"API Behind Tracker", 1, "https://mangadex.org/title/api-behind", "reading", 12.0, 15.0,
+		"API Caught Up Tracker", 1, "https://mangadex.org/title/api-caught-up", "reading", 15.0, 15.0,
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/trackers?status=reading", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("api trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode api list response: %v", err)
+	}
+
+	items, ok := payload["items"].([]any)
+	if !ok {
+		t.Fatalf("items missing or invalid type")
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item in reading filter, got %d", len(items))
+	}
+
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first item has invalid type")
+	}
+	title, _ := item["title"].(string)
+	if title != "API Behind Tracker" {
+		t.Fatalf("expected API Behind Tracker, got %q", title)
+	}
 }

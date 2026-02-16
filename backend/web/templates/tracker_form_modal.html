@@ -91,11 +91,11 @@
             <label>
                 Status
                 <select name="status" required>
-                    <option value="reading" {{if and .Tracker (eq .Tracker.Status "reading")}}selected{{end}}>reading</option>
-                    <option value="completed" {{if and .Tracker (eq .Tracker.Status "completed")}}selected{{end}}>completed</option>
-                    <option value="on_hold" {{if and .Tracker (eq .Tracker.Status "on_hold")}}selected{{end}}>on_hold</option>
-                    <option value="dropped" {{if and .Tracker (eq .Tracker.Status "dropped")}}selected{{end}}>dropped</option>
-                    <option value="plan_to_read" {{if and .Tracker (eq .Tracker.Status "plan_to_read")}}selected{{end}}>plan_to_read</option>
+                    <option value="reading" {{if and .Tracker (eq .Tracker.Status "reading")}}selected{{end}}>Reading</option>
+                    <option value="completed" {{if and .Tracker (eq .Tracker.Status "completed")}}selected{{end}}>Completed</option>
+                    <option value="on_hold" {{if and .Tracker (eq .Tracker.Status "on_hold")}}selected{{end}}>On hold</option>
+                    <option value="dropped" {{if and .Tracker (eq .Tracker.Status "dropped")}}selected{{end}}>Dropped</option>
+                    <option value="plan_to_read" {{if and .Tracker (eq .Tracker.Status "plan_to_read")}}selected{{end}}>Plan to read</option>
                 </select>
             </label>
 
