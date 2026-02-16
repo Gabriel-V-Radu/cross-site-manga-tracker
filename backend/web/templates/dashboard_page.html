@@ -36,7 +36,7 @@
                     Status
                     <select name="status">
                         {{range .Statuses}}
-                        <option value="{{.}}" title="{{statusLabel .}}">{{statusLabel .}}</option>
+                        <option value="{{.}}" title="{{statusLabel .}}" {{if eq . "reading"}}selected{{end}}>{{statusLabel .}}</option>
                         {{end}}
                     </select>
                 </label>

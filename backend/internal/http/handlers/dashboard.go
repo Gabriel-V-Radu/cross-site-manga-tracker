@@ -110,7 +110,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
 
-	status := strings.TrimSpace(c.Query("status", "all"))
+	status := strings.TrimSpace(c.Query("status", "reading"))
 	statuses := make([]string, 0)
 	if status != "" && status != "all" {
 		statuses = append(statuses, status)
@@ -401,6 +401,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 	tracker.LastCheckedAt = existingTracker.LastCheckedAt
+	tracker.LatestReleaseAt = existingTracker.LatestReleaseAt
 
 	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
 	if err != nil {
