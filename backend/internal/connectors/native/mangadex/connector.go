@@ -127,8 +127,9 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 
 	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
+	feedLatestChapter, latestReleaseAt, _ := c.fetchLatestChapterFromFeed(ctx, titleID)
 	if latestChapter == nil {
-		latestChapter, _ = c.fetchLatestChapterFromFeed(ctx, titleID)
+		latestChapter = feedLatestChapter
 	}
 
 	return &connectors.MangaResult{
@@ -138,7 +139,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		URL:           trimmed,
 		CoverImageURL: pickCoverImageURL(payload.Data.ID, payload.Data.Relationships),
 		LatestChapter: latestChapter,
-		LastUpdatedAt: time.Now().UTC(),
+		LastUpdatedAt: latestReleaseAt,
 	}, nil
 }
 
@@ -190,7 +191,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 
 		latestChapter := parseChapterNumber(item.Attributes.LastChapter)
 		if latestChapter == nil {
-			latestChapter, _ = c.fetchLatestChapterFromFeed(ctx, item.ID)
+			latestChapter, _, _ = c.fetchLatestChapterFromFeed(ctx, item.ID)
 		}
 
 		items = append(items, connectors.MangaResult{
@@ -200,7 +201,6 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			URL:           "https://mangadex.org/title/" + item.ID,
 			CoverImageURL: pickCoverImageURL(item.ID, item.Relationships),
 			LatestChapter: latestChapter,
-			LastUpdatedAt: time.Now().UTC(),
 		})
 	}
 
@@ -264,9 +264,9 @@ func parseChapterNumber(raw string) *float64 {
 	return &parsed
 }
 
-func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID string) (*float64, error) {
+func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID string) (*float64, *time.Time, error) {
 	if strings.TrimSpace(mangaID) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	values := url.Values{}
@@ -283,25 +283,26 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 	feedURL := c.apiBaseURL + "/manga/" + mangaID + "/feed?" + values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create feed request: %w", err)
+		return nil, nil, fmt.Errorf("create feed request: %w", err)
 	}
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request feed: %w", err)
+		return nil, nil, fmt.Errorf("request feed: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
+		return nil, nil, fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
 	}
 
 	var payload mangaFeedResponse
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode feed response: %w", err)
+		return nil, nil, fmt.Errorf("decode feed response: %w", err)
 	}
 
 	var latest *float64
+	var latestReleaseAt *time.Time
 	for _, chapter := range payload.Data {
 		parsed := parseChapterNumber(chapter.Attributes.Chapter)
 		if parsed == nil {
@@ -309,10 +310,30 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 		}
 		if latest == nil || *parsed > *latest {
 			latest = parsed
+			latestReleaseAt = parseOptionalRFC3339Time(
+				chapter.Attributes.PublishAt,
+				chapter.Attributes.ReadableAt,
+				chapter.Attributes.CreatedAt,
+			)
 		}
 	}
 
-	return latest, nil
+	return latest, latestReleaseAt, nil
+}
+
+func parseOptionalRFC3339Time(values ...string) *time.Time {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, trimmed)
+		if err == nil {
+			utc := parsed.UTC()
+			return &utc
+		}
+	}
+	return nil
 }
 
 type mangaByIDResponse struct {
@@ -347,7 +368,10 @@ type mangaRelationship struct {
 type mangaFeedResponse struct {
 	Data []struct {
 		Attributes struct {
-			Chapter string `json:"chapter"`
+			Chapter    string `json:"chapter"`
+			PublishAt  string `json:"publishAt"`
+			ReadableAt string `json:"readableAt"`
+			CreatedAt  string `json:"createdAt"`
 		} `json:"attributes"`
 	} `json:"data"`
 }

@@ -187,16 +187,23 @@ func (c *Connector) mapItem(item map[string]any) (connectors.MangaResult, error)
 	}
 
 	result := connectors.MangaResult{
-		SourceKey:     c.Key(),
-		SourceItemID:  strings.TrimSpace(id),
-		Title:         strings.TrimSpace(title),
-		URL:           strings.TrimSpace(urlValue),
-		LastUpdatedAt: time.Now().UTC(),
+		SourceKey:    c.Key(),
+		SourceItemID: strings.TrimSpace(id),
+		Title:        strings.TrimSpace(title),
+		URL:          strings.TrimSpace(urlValue),
 	}
 
 	if rawChapter, exists := item[c.config.Response.LatestChapterField]; exists {
 		if chapter, ok := toFloat(rawChapter); ok {
 			result.LatestChapter = &chapter
+		}
+	}
+
+	if c.config.Response.LastUpdatedField != "" {
+		if rawUpdatedAt, exists := item[c.config.Response.LastUpdatedField]; exists {
+			if updatedAt, ok := toTime(rawUpdatedAt); ok {
+				result.LastUpdatedAt = &updatedAt
+			}
 		}
 	}
 
@@ -273,4 +280,39 @@ func toFloat(input any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func toTime(input any) (time.Time, bool) {
+	switch value := input.(type) {
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+			parsed, err := time.Parse(layout, trimmed)
+			if err == nil {
+				return parsed.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	case float64:
+		return fromUnixTimestamp(int64(value))
+	case int:
+		return fromUnixTimestamp(int64(value))
+	case int64:
+		return fromUnixTimestamp(value)
+	default:
+		return time.Time{}, false
+	}
+}
+
+func fromUnixTimestamp(value int64) (time.Time, bool) {
+	if value <= 0 {
+		return time.Time{}, false
+	}
+	if value > 1_000_000_000_000 {
+		value = value / 1000
+	}
+	return time.Unix(value, 0).UTC(), true
 }

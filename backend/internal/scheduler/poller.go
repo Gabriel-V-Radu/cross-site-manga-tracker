@@ -13,7 +13,7 @@ import (
 
 type pollRepository interface {
 	ListForPolling(statuses []string) ([]repository.PollingTracker, error)
-	UpdatePollingState(id int64, latestKnownChapter *float64, checkedAt time.Time) error
+	UpdatePollingState(id int64, latestKnownChapter *float64, latestReleaseAt *time.Time, checkedAt time.Time) error
 }
 
 type Poller struct {
@@ -66,6 +66,9 @@ func (p *Poller) Start(ctx context.Context) {
 	ticker := time.NewTicker(p.interval)
 	go func() {
 		defer ticker.Stop()
+		if err := p.RunOnce(ctx); err != nil {
+			p.logger.Warn("poller initial run failed", "error", err)
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -124,7 +127,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			latest = result.LatestChapter
 		}
 
-		if err := p.repo.UpdatePollingState(tracker.ID, latest, now); err != nil {
+		if err := p.repo.UpdatePollingState(tracker.ID, latest, result.LastUpdatedAt, now); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
 		}

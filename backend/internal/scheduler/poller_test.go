@@ -20,7 +20,7 @@ func (f *fakeRepo) ListForPolling(_ []string) ([]repository.PollingTracker, erro
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(_ int64, latestKnownChapter *float64, _ time.Time) error {
+func (f *fakeRepo) UpdatePollingState(_ int64, latestKnownChapter *float64, _ *time.Time, _ time.Time) error {
 	f.updatedCount++
 	f.updatedLatest = latestKnownChapter
 	return nil
@@ -38,7 +38,8 @@ func (f fakeConnector) SearchByTitle(context.Context, string, int) ([]connectors
 	return nil, nil
 }
 func (f fakeConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
-	return &connectors.MangaResult{SourceKey: f.Key(), SourceItemID: "a", Title: "T", URL: "u", LatestChapter: f.latest, LastUpdatedAt: time.Now()}, nil
+	now := time.Now().UTC()
+	return &connectors.MangaResult{SourceKey: f.Key(), SourceItemID: "a", Title: "T", URL: "u", LatestChapter: f.latest, LastUpdatedAt: &now}, nil
 }
 
 type fakeNotifier struct {

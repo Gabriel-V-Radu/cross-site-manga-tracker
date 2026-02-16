@@ -28,6 +28,7 @@ type Config struct {
 		TitleField         string `yaml:"title_field"`
 		URLField           string `yaml:"url_field"`
 		LatestChapterField string `yaml:"latest_chapter_field"`
+		LastUpdatedField   string `yaml:"last_updated_field"`
 	} `yaml:"response"`
 }
 

@@ -95,7 +95,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 
 	for _, title := range titles {
 		if title.TitleID == titleID {
-			latestChapter, _ := c.fetchLatestChapterByTitleID(ctx, title.TitleID)
+			latestChapter, latestReleaseAt, _ := c.fetchLatestChapterByTitleID(ctx, title.TitleID)
 			return &connectors.MangaResult{
 				SourceKey:     c.Key(),
 				SourceItemID:  title.TitleID,
@@ -103,7 +103,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 				URL:           "https://mangaplus.shueisha.co.jp/titles/" + title.TitleID,
 				CoverImageURL: strings.TrimSpace(title.PortraitImageURL),
 				LatestChapter: latestChapter,
-				LastUpdatedAt: time.Now().UTC(),
+				LastUpdatedAt: latestReleaseAt,
 			}, nil
 		}
 	}
@@ -135,7 +135,6 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 				Title:         title.Name,
 				URL:           "https://mangaplus.shueisha.co.jp/titles/" + title.TitleID,
 				CoverImageURL: strings.TrimSpace(title.PortraitImageURL),
-				LastUpdatedAt: time.Now().UTC(),
 			})
 		}
 	}
@@ -149,9 +148,10 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	}
 
 	for index := range results {
-		latestChapter, err := c.fetchLatestChapterByTitleID(ctx, results[index].SourceItemID)
+		latestChapter, latestReleaseAt, err := c.fetchLatestChapterByTitleID(ctx, results[index].SourceItemID)
 		if err == nil {
 			results[index].LatestChapter = latestChapter
+			results[index].LastUpdatedAt = latestReleaseAt
 		}
 	}
 
@@ -199,9 +199,9 @@ func updateMaxChapter(current *float64, candidate *float64) *float64 {
 	return current
 }
 
-func (c *Connector) fetchLatestChapterByTitleID(ctx context.Context, titleID string) (*float64, error) {
+func (c *Connector) fetchLatestChapterByTitleID(ctx context.Context, titleID string) (*float64, *time.Time, error) {
 	if strings.TrimSpace(titleID) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	values := url.Values{}
@@ -211,39 +211,64 @@ func (c *Connector) fetchLatestChapterByTitleID(ctx context.Context, titleID str
 	detailURL := c.apiBaseURL + "/title_detailV3?" + values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, detailURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create title detail request: %w", err)
+		return nil, nil, fmt.Errorf("create title detail request: %w", err)
 	}
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request title detail: %w", err)
+		return nil, nil, fmt.Errorf("request title detail: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("title detail returned status %d", res.StatusCode)
+		return nil, nil, fmt.Errorf("title detail returned status %d", res.StatusCode)
 	}
 
 	var payload mangaPlusTitleDetailResponse
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode title detail response: %w", err)
+		return nil, nil, fmt.Errorf("decode title detail response: %w", err)
 	}
 
 	var latest *float64
+	var latestReleaseAt *time.Time
 	for _, group := range payload.Success.TitleDetailView.ChapterListGroup {
-		latest = updateMaxChapter(latest, parseChapterValue(group.ChapterNumbers))
+		latest, latestReleaseAt = updateMaxChapterWithRelease(latest, latestReleaseAt, parseChapterValue(group.ChapterNumbers), parseUnixTime(group.StartTime))
 		for _, chapter := range group.FirstChapterList {
-			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+			latest, latestReleaseAt = updateMaxChapterWithRelease(latest, latestReleaseAt, parseChapterValue(chapter.Name), parseUnixTime(chapter.StartTime))
 		}
 		for _, chapter := range group.MidChapterList {
-			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+			latest, latestReleaseAt = updateMaxChapterWithRelease(latest, latestReleaseAt, parseChapterValue(chapter.Name), parseUnixTime(chapter.StartTime))
 		}
 		for _, chapter := range group.LastChapterList {
-			latest = updateMaxChapter(latest, parseChapterValue(chapter.Name))
+			latest, latestReleaseAt = updateMaxChapterWithRelease(latest, latestReleaseAt, parseChapterValue(chapter.Name), parseUnixTime(chapter.StartTime))
 		}
 	}
 
-	return latest, nil
+	return latest, latestReleaseAt, nil
+}
+
+func updateMaxChapterWithRelease(currentChapter *float64, currentRelease *time.Time, candidateChapter *float64, candidateRelease *time.Time) (*float64, *time.Time) {
+	if candidateChapter == nil {
+		return currentChapter, currentRelease
+	}
+	if currentChapter == nil || *candidateChapter > *currentChapter {
+		return candidateChapter, candidateRelease
+	}
+	if currentChapter != nil && *candidateChapter == *currentChapter && currentRelease == nil && candidateRelease != nil {
+		return currentChapter, candidateRelease
+	}
+	return currentChapter, currentRelease
+}
+
+func parseUnixTime(raw int64) *time.Time {
+	if raw <= 0 {
+		return nil
+	}
+	if raw > 1_000_000_000_000 {
+		raw = raw / 1000
+	}
+	parsed := time.Unix(raw, 0).UTC()
+	return &parsed
 }
 
 func (c *Connector) fetchAllTitles(ctx context.Context) ([]mangaPlusTitle, error) {
@@ -384,14 +409,18 @@ type mangaPlusTitleDetailResponse struct {
 		TitleDetailView struct {
 			ChapterListGroup []struct {
 				ChapterNumbers   string `json:"chapterNumbers"`
+				StartTime        int64  `json:"startTime"`
 				FirstChapterList []struct {
-					Name string `json:"name"`
+					Name      string `json:"name"`
+					StartTime int64  `json:"startTime"`
 				} `json:"firstChapterList"`
 				MidChapterList []struct {
-					Name string `json:"name"`
+					Name      string `json:"name"`
+					StartTime int64  `json:"startTime"`
 				} `json:"midChapterList"`
 				LastChapterList []struct {
-					Name string `json:"name"`
+					Name      string `json:"name"`
+					StartTime int64  `json:"startTime"`
 				} `json:"lastChapterList"`
 			} `json:"chapterListGroup"`
 		} `json:"titleDetailView"`

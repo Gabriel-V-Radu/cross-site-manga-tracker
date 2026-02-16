@@ -24,6 +24,7 @@ type Tracker struct {
 	LastReadChapter    *float64   `json:"lastReadChapter,omitempty"`
 	LastReadAt         *time.Time `json:"lastReadAt,omitempty"`
 	LatestKnownChapter *float64   `json:"latestKnownChapter,omitempty"`
+	LatestReleaseAt    *time.Time `json:"latestReleaseAt,omitempty"`
 	LastCheckedAt      *time.Time `json:"lastCheckedAt,omitempty"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`

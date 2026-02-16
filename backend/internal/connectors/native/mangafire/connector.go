@@ -26,8 +26,10 @@ var (
 	imgAltPattern      = regexp.MustCompile(`(?is)<img[^>]+alt=["']([^"']+)["']`)
 	htmlTagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
 	chapterURLPattern  = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
+	chapterDatePattern = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
 	metaTagPattern     = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
 	imageTagPattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
+	updatedTagPattern  = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property|name)=["'](?:og:updated_time|article:published_time|article:modified_time|datePublished|dateModified)["'][^>]*content=["']([^"']+)["']`)
 	posterImagePattern = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*poster[^"']*["'][^>]*>.*?<img[^>]+src=["']([^"']+)["']`)
 	sitemapLocPattern  = regexp.MustCompile(`(?is)<loc>([^<]+)</loc>`)
 )
@@ -122,7 +124,10 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		coverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(posterImagePattern, body)))
 	}
 	coverImageURL = c.absoluteURL(coverImageURL)
-	latestChapter := extractLatestChapter(body)
+	latestChapter, latestReleaseAt := extractLatestChapterAndReleaseAt(body)
+	if latestReleaseAt == nil {
+		latestReleaseAt = extractLatestReleaseAt(body)
+	}
 
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
@@ -131,7 +136,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		URL:           "https://mangafire.to/manga/" + sourceItemID,
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
-		LastUpdatedAt: time.Now().UTC(),
+		LastUpdatedAt: latestReleaseAt,
 	}, nil
 }
 
@@ -181,7 +186,6 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			URL:           "https://mangafire.to/manga/" + entry.ItemID,
 			CoverImageURL: c.absoluteURL(entry.CoverImageURL),
 			LatestChapter: nil,
-			LastUpdatedAt: time.Now().UTC(),
 		})
 		resultIDs[entry.ItemID] = struct{}{}
 
@@ -232,7 +236,6 @@ func (c *Connector) appendSitemapMatches(ctx context.Context, baseResults []conn
 			URL:           "https://mangafire.to/manga/" + entry.ItemID,
 			CoverImageURL: c.absoluteURL(entry.CoverImageURL),
 			LatestChapter: nil,
-			LastUpdatedAt: time.Now().UTC(),
 		}
 		c.enrichSearchResult(ctx, &candidate)
 
@@ -262,8 +265,18 @@ func (c *Connector) enrichSearchResult(ctx context.Context, result *connectors.M
 	if resolvedTitle != "" {
 		result.Title = resolvedTitle
 	}
-	if latest := extractLatestChapter(body); latest != nil {
-		result.LatestChapter = latest
+	latestChapter, latestReleaseAtByChapter := extractLatestChapterAndReleaseAt(body)
+	if latestChapter != nil {
+		result.LatestChapter = latestChapter
+	}
+	if latestReleaseAtByChapter != nil {
+		result.LastUpdatedAt = latestReleaseAtByChapter
+	}
+	if result.LastUpdatedAt == nil {
+		latestReleaseAt := extractLatestReleaseAt(body)
+		if latestReleaseAt != nil {
+			result.LastUpdatedAt = latestReleaseAt
+		}
 	}
 	if result.CoverImageURL == "" {
 		result.CoverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(imageTagPattern, body)))
@@ -363,6 +376,21 @@ func computeRetryDelay(attempt int, retryAfter string) time.Duration {
 	}
 }
 
+func extractLatestReleaseAt(body string) *time.Time {
+	raw := strings.TrimSpace(html.UnescapeString(firstSubmatch(updatedTagPattern, body)))
+	if raw == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05-07:00", "2006-01-02"} {
+		parsed, err := time.Parse(layout, raw)
+		if err == nil {
+			utc := parsed.UTC()
+			return &utc
+		}
+	}
+	return nil
+}
+
 type searchEntry struct {
 	ItemID        string
 	Title         string
@@ -444,20 +472,64 @@ func normalizeMangaPath(raw string) string {
 	return ""
 }
 
-func extractLatestChapter(body string) *float64 {
-	matches := chapterURLPattern.FindAllStringSubmatch(body, -1)
+func extractLatestChapterAndReleaseAt(body string) (*float64, *time.Time) {
+	matches := chapterURLPattern.FindAllStringSubmatchIndex(body, -1)
 	var latest *float64
+	var latestReleaseAt *time.Time
 	for _, match := range matches {
-		parsed, err := strconv.ParseFloat(match[1], 64)
+		if len(match) < 4 {
+			continue
+		}
+		chapterText := body[match[2]:match[3]]
+		parsed, err := strconv.ParseFloat(chapterText, 64)
 		if err != nil {
 			continue
 		}
 		if latest == nil || parsed > *latest {
 			value := parsed
 			latest = &value
+			latestReleaseAt = extractDateNearIndex(body, match[0], match[1])
 		}
 	}
-	return latest
+	return latest, latestReleaseAt
+}
+
+func extractDateNearIndex(body string, start int, end int) *time.Time {
+	if len(body) == 0 {
+		return nil
+	}
+	dateFromRaw := func(raw string) *time.Time {
+		if strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		parsed, err := time.Parse("Jan 2, 2006", raw)
+		if err != nil {
+			return nil
+		}
+		utc := parsed.UTC()
+		return &utc
+	}
+
+	afterRight := end + 800
+	if afterRight > len(body) {
+		afterRight = len(body)
+	}
+	afterSegment := body[end:afterRight]
+	rawAfter := chapterDatePattern.FindString(afterSegment)
+	if parsed := dateFromRaw(rawAfter); parsed != nil {
+		return parsed
+	}
+
+	beforeLeft := start - 500
+	if beforeLeft < 0 {
+		beforeLeft = 0
+	}
+	beforeSegment := body[beforeLeft:start]
+	beforeMatches := chapterDatePattern.FindAllString(beforeSegment, -1)
+	if len(beforeMatches) == 0 {
+		return nil
+	}
+	return dateFromRaw(beforeMatches[len(beforeMatches)-1])
 }
 
 func firstSubmatch(pattern *regexp.Regexp, text string) string {

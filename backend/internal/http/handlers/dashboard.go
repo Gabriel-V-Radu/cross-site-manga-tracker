@@ -47,21 +47,23 @@ type trackersPartialData struct {
 }
 
 type trackerCardView struct {
-	ID                    int64
-	Title                 string
-	Status                string
-	StatusLabel           string
-	SourceURL             string
-	CoverURL              string
-	LatestKnownChapter    string
-	LastCheckedAgo        string
-	LastReadChapter       string
-	LastReadAgo           string
-	UpdatedAtFormatted    string
-	LastCheckedFormatted  string
-	SourceItemID          *string
-	LatestKnownChapterRaw *float64
-	LastReadChapterRaw    *float64
+	ID                     int64
+	Title                  string
+	Status                 string
+	StatusLabel            string
+	SourceURL              string
+	CoverURL               string
+	LatestKnownChapter     string
+	LatestReleaseAgo       string
+	LastCheckedAgo         string
+	LastReadChapter        string
+	LastReadAgo            string
+	LatestReleaseFormatted string
+	UpdatedAtFormatted     string
+	LastCheckedFormatted   string
+	SourceItemID           *string
+	LatestKnownChapterRaw  *float64
+	LastReadChapterRaw     *float64
 }
 
 type trackerFormData struct {
@@ -98,7 +100,7 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	c.Set("Expires", "0")
 	data := dashboardPageData{
 		Statuses: []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:    []string{"latest_known_chapter", "updated_at"},
+		Sorts:    []string{"latest_known_chapter", "last_read_at"},
 	}
 	return h.render(c, "dashboard_page.html", data)
 }
@@ -142,16 +144,18 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	cards := make([]trackerCardView, 0, len(items))
 	for _, item := range items {
 		card := trackerCardView{
-			ID:                    item.ID,
-			Title:                 item.Title,
-			Status:                item.Status,
-			StatusLabel:           statusLabel(item.Status),
-			SourceURL:             item.SourceURL,
-			SourceItemID:          item.SourceItemID,
-			LatestKnownChapterRaw: item.LatestKnownChapter,
-			LastReadChapterRaw:    item.LastReadChapter,
-			UpdatedAtFormatted:    item.UpdatedAt.Format("2006-01-02 15:04"),
-			LastReadAgo:           "—",
+			ID:                     item.ID,
+			Title:                  item.Title,
+			Status:                 item.Status,
+			StatusLabel:            statusLabel(item.Status),
+			SourceURL:              item.SourceURL,
+			SourceItemID:           item.SourceItemID,
+			LatestKnownChapterRaw:  item.LatestKnownChapter,
+			LastReadChapterRaw:     item.LastReadChapter,
+			LatestReleaseAgo:       "—",
+			LatestReleaseFormatted: "—",
+			UpdatedAtFormatted:     item.UpdatedAt.Format("2006-01-02 15:04"),
+			LastReadAgo:            "—",
 		}
 
 		if item.LastReadAt != nil {
@@ -164,6 +168,14 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		} else {
 			card.LastCheckedFormatted = "—"
 			card.LastCheckedAgo = "—"
+		}
+
+		if item.LatestReleaseAt != nil {
+			card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
+			card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
+		} else if item.LastCheckedAt != nil {
+			card.LatestReleaseFormatted = item.LastCheckedAt.Format("2006-01-02 15:04")
+			card.LatestReleaseAgo = relativeTime(*item.LastCheckedAt)
 		}
 
 		if item.LatestKnownChapter != nil {
@@ -771,8 +783,8 @@ func statusLabel(value string) string {
 
 func sortLabel(value string) string {
 	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "updated_at":
-		return "Recently updated"
+	case "last_read_at":
+		return "Recently read"
 	case "title":
 		return "Title (A–Z)"
 	case "created_at":

@@ -45,10 +45,10 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
 	result, err := r.db.Exec(`
 		INSERT INTO trackers (
-			title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, last_checked_at, last_read_at
+			title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LastCheckedAt, tracker.LastReadChapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
 	if err != nil {
 		return nil, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -73,7 +73,7 @@ func (r *TrackerRepository) GetByID(id int64) (*models.Tracker, error) {
 	row := r.db.QueryRow(`
 		SELECT
 			id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, last_read_at, latest_known_chapter, last_checked_at,
+			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ?
@@ -95,8 +95,9 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		"title":                "title",
 		"created_at":           "created_at",
 		"updated_at":           "updated_at",
+		"last_read_at":         "last_read_at",
 		"last_checked_at":      "last_checked_at",
-		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(last_checked_at, updated_at, created_at) END",
+		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(latest_release_at, last_checked_at, updated_at, created_at) END",
 	}
 	sortField, ok := validSortFields[options.SortBy]
 	if !ok {
@@ -111,7 +112,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	query := `
 		SELECT
 			id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, last_read_at, latest_known_chapter, last_checked_at,
+			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 	`
@@ -174,6 +175,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 			last_read_chapter = ?,
 			last_read_at = CASE WHEN last_read_chapter IS NOT ? THEN CURRENT_TIMESTAMP ELSE last_read_at END,
 			latest_known_chapter = ?,
+			latest_release_at = ?,
 			last_checked_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
@@ -185,6 +187,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 			OR status IS NOT ?
 			OR last_read_chapter IS NOT ?
 			OR latest_known_chapter IS NOT ?
+			OR latest_release_at IS NOT ?
 			OR last_checked_at IS NOT ?
 		  )
 	`,
@@ -196,6 +199,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		tracker.LastReadChapter,
 		tracker.LastReadChapter,
 		tracker.LatestKnownChapter,
+		tracker.LatestReleaseAt,
 		tracker.LastCheckedAt,
 		id,
 		tracker.Title,
@@ -205,6 +209,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		tracker.Status,
 		tracker.LastReadChapter,
 		tracker.LatestKnownChapter,
+		tracker.LatestReleaseAt,
 		tracker.LastCheckedAt,
 	)
 	if err != nil {
@@ -411,12 +416,17 @@ func (r *TrackerRepository) ListForPolling(statuses []string) ([]PollingTracker,
 	return items, nil
 }
 
-func (r *TrackerRepository) UpdatePollingState(id int64, latestKnownChapter *float64, checkedAt time.Time) error {
+func (r *TrackerRepository) UpdatePollingState(id int64, latestKnownChapter *float64, latestReleaseAt *time.Time, checkedAt time.Time) error {
+	var latestReleaseValue any
+	if latestReleaseAt != nil {
+		latestReleaseValue = latestReleaseAt.UTC()
+	}
+
 	_, err := r.db.Exec(`
 		UPDATE trackers
-		SET latest_known_chapter = ?, last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
+		SET latest_known_chapter = ?, latest_release_at = COALESCE(?, latest_release_at), last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, latestKnownChapter, checkedAt.UTC(), id)
+	`, latestKnownChapter, latestReleaseValue, checkedAt.UTC(), id)
 	if err != nil {
 		return fmt.Errorf("update polling state: %w", err)
 	}
@@ -433,6 +443,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var lastReadChapter sql.NullFloat64
 	var lastReadAt sql.NullTime
 	var latestKnownChapter sql.NullFloat64
+	var latestReleaseAt sql.NullTime
 	var lastCheckedAt sql.NullTime
 
 	err := scanner.Scan(
@@ -445,6 +456,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&lastReadChapter,
 		&lastReadAt,
 		&latestKnownChapter,
+		&latestReleaseAt,
 		&lastCheckedAt,
 		&tracker.CreatedAt,
 		&tracker.UpdatedAt,
@@ -464,6 +476,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 	if latestKnownChapter.Valid {
 		tracker.LatestKnownChapter = &latestKnownChapter.Float64
+	}
+	if latestReleaseAt.Valid {
+		tracker.LatestReleaseAt = &latestReleaseAt.Time
 	}
 	if lastCheckedAt.Valid {
 		tracker.LastCheckedAt = &lastCheckedAt.Time

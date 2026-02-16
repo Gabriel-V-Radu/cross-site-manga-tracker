@@ -43,8 +43,8 @@ func TestMangaFireConnector(t *testing.T) {
   <meta property="og:image" content="https://cdn.example/onepiece-full.jpg">
 </head>
 <body>
-  <a href="/read/one-piecee.dkw/en/chapter-1172">Chapter 1172</a>
-  <a href="/read/one-piecee.dkw/en/chapter-1173">Chapter 1173</a>
+	<a href="/read/one-piecee.dkw/en/chapter-1172">Chapter 1172</a><span>Dec 22, 2025</span>
+	<a href="/read/one-piecee.dkw/en/chapter-1173">Chapter 1173</a><span>Jan 12, 2026</span>
 </body>
 </html>`))
 	})
@@ -86,6 +86,12 @@ func TestMangaFireConnector(t *testing.T) {
 	if resolved.CoverImageURL != "https://cdn.example/onepiece-full.jpg" {
 		t.Fatalf("unexpected cover image: %s", resolved.CoverImageURL)
 	}
+	if resolved.LastUpdatedAt == nil {
+		t.Fatalf("expected release date to be scraped")
+	}
+	if resolved.LastUpdatedAt.Format("2006-01-02") != "2026-01-12" {
+		t.Fatalf("expected release date 2026-01-12, got %s", resolved.LastUpdatedAt.Format("2006-01-02"))
+	}
 
 	results, err := connector.SearchByTitle(context.Background(), "one", 10)
 	if err != nil {
@@ -100,6 +106,9 @@ func TestMangaFireConnector(t *testing.T) {
 		case "one-piecee.dkw":
 			if item.LatestChapter == nil || *item.LatestChapter != 1173 {
 				t.Fatalf("expected One Piece latest chapter 1173, got %v", item.LatestChapter)
+			}
+			if item.LastUpdatedAt == nil || item.LastUpdatedAt.Format("2006-01-02") != "2026-01-12" {
+				t.Fatalf("expected One Piece release date 2026-01-12, got %v", item.LastUpdatedAt)
 			}
 		case "one-punch-mann.oo4":
 			if item.LatestChapter == nil || *item.LatestChapter != 264 {

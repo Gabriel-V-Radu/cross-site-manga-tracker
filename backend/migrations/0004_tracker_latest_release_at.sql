@@ -1,0 +1,1 @@
+ALTER TABLE trackers ADD COLUMN latest_release_at DATETIME;
