@@ -35,6 +35,9 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)
 	app.Static("/assets", "./web/assets")
+	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
+		return c.SendFile("./web/assets/favicon.svg")
+	})
 	app.Get("/", dashboard.Page)
 	app.Get("/dashboard", dashboard.Page)
 	app.Get("/dashboard/trackers", dashboard.TrackersPartial)

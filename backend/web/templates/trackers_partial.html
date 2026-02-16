@@ -4,12 +4,62 @@
     <p>Try a different filter, or add your first source entry.</p>
 </div>
 {{else}}
-<div class="{{if eq .ViewMode "list"}}cards-list{{else}}cards-grid{{end}}">
+{{if eq .ViewMode "list"}}
+<div class="cards-list">
+    {{range .Trackers}}
+    <article class="tracker-row tracker-card">
+        <div class="tracker-row__title-wrap">
+            <span class="tracker-row__check" aria-hidden="true"></span>
+            <span class="tracker-row__dot" aria-hidden="true"></span>
+            <h3>{{.Title}}</h3>
+        </div>
+
+        <div class="tracker-row__status">
+            <span class="badge badge--status" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
+        </div>
+
+        <div class="tracker-row__metric">
+            <span class="tracker-row__chapter">{{.LastReadChapter}}</span>
+            <span class="tracker-row__time">Read {{.LastReadAgo}}</span>
+        </div>
+
+        <div class="tracker-row__metric">
+            <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
+            <span class="tracker-row__time">Updated {{.LastCheckedAgo}}</span>
+        </div>
+
+        <div class="tracker-row__actions">
+            <button type="button"
+                    class="mini-btn"
+                    hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML">Set last read</button>
+            <a class="mini-btn mini-btn--highlight"
+               href="{{.SourceURL}}"
+               target="_blank"
+               rel="noopener noreferrer">Open</a>
+            <button type="button"
+                    class="mini-btn"
+                    hx-get="/dashboard/trackers/{{.ID}}/edit"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML">Edit</button>
+            <button type="button"
+                    class="mini-btn mini-btn--danger"
+                    hx-post="/dashboard/trackers/{{.ID}}/delete"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML"
+                    hx-confirm="Delete this tracker?">Delete</button>
+        </div>
+    </article>
+    {{end}}
+</div>
+{{else}}
+<div class="cards-grid">
     {{range .Trackers}}
     <article class="tracker-card">
         <header class="tracker-card__header">
             <h3>{{.Title}}</h3>
-            <span class="badge">{{.Status}}</span>
+            <span class="badge" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
         </header>
 
         <div class="tracker-card__cover">
@@ -67,4 +117,5 @@
     </article>
     {{end}}
 </div>
+{{end}}
 {{end}}

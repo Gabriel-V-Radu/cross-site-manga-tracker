@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,500;6..96,700&family=IBM+Plex+Sans+Condensed:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
     <link rel="stylesheet" href="/assets/dashboard.css">
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
 </head>
@@ -29,13 +30,13 @@
                   class="filters-grid">
                 <label>
                     Search
-                    <input type="text" name="q" placeholder="Title or URL">
+                    <input type="text" name="q" placeholder="Title">
                 </label>
                 <label>
                     Status
                     <select name="status">
                         {{range .Statuses}}
-                        <option value="{{.}}">{{.}}</option>
+                        <option value="{{.}}" title="{{statusLabel .}}">{{statusLabel .}}</option>
                         {{end}}
                     </select>
                 </label>
@@ -43,7 +44,7 @@
                     Sort
                     <select name="sort">
                         {{range .Sorts}}
-                        <option value="{{.}}">{{.}}</option>
+                        <option value="{{.}}" title="{{sortLabel .}}">{{sortLabel .}}</option>
                         {{end}}
                     </select>
                 </label>
@@ -60,12 +61,12 @@
             <div class="panel-actions">
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('tracker-filters').dispatchEvent(new Event('change'))">
+                        onclick="document.getElementById('view-input').value='grid'; document.body.dispatchEvent(new Event('trackersChanged'))">
                     Grid
                 </button>
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='list'; document.getElementById('tracker-filters').dispatchEvent(new Event('change'))">
+                        onclick="document.getElementById('view-input').value='list'; document.body.dispatchEvent(new Event('trackersChanged'))">
                     List
                 </button>
                 <button type="button"

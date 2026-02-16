@@ -22,6 +22,14 @@ func TestMangaDexConnector(t *testing.T) {
 					"title":       map[string]string{"en": "Test Title"},
 					"lastChapter": "42",
 				},
+				"relationships": []map[string]any{
+					{
+						"type": "cover_art",
+						"attributes": map[string]any{
+							"fileName": "test-cover.jpg",
+						},
+					},
+				},
 			},
 		})
 	})
@@ -70,6 +78,9 @@ func TestMangaDexConnector(t *testing.T) {
 	}
 	if resolved.LatestChapter == nil || *resolved.LatestChapter != 42 {
 		t.Fatalf("expected latest chapter 42, got %v", resolved.LatestChapter)
+	}
+	if resolved.CoverImageURL == "" {
+		t.Fatalf("expected cover image url to be populated")
 	}
 
 	results, err := connector.SearchByTitle(context.Background(), "alpha", 10)

@@ -98,7 +98,10 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("invalid mangadex title id")
 	}
 
-	apiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+"/manga/"+titleID, nil)
+	values := url.Values{}
+	values.Add("includes[]", "cover_art")
+	mangaURL := c.apiBaseURL + "/manga/" + titleID + "?" + values.Encode()
+	apiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, mangaURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create api request: %w", err)
 	}

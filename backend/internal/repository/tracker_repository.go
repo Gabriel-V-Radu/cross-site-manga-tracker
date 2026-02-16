@@ -45,10 +45,10 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
 	result, err := r.db.Exec(`
 		INSERT INTO trackers (
-			title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, last_checked_at
+			title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, last_checked_at, last_read_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LastCheckedAt)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LastCheckedAt, tracker.LastReadChapter)
 	if err != nil {
 		return nil, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -73,7 +73,7 @@ func (r *TrackerRepository) GetByID(id int64) (*models.Tracker, error) {
 	row := r.db.QueryRow(`
 		SELECT
 			id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, latest_known_chapter, last_checked_at,
+			last_read_chapter, last_read_at, latest_known_chapter, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ?
@@ -96,11 +96,11 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		"created_at":           "created_at",
 		"updated_at":           "updated_at",
 		"last_checked_at":      "last_checked_at",
-		"latest_known_chapter": "latest_known_chapter",
+		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(last_checked_at, updated_at, created_at) END",
 	}
 	sortField, ok := validSortFields[options.SortBy]
 	if !ok {
-		sortField = "updated_at"
+		sortField = validSortFields["latest_known_chapter"]
 	}
 
 	order := strings.ToUpper(options.Order)
@@ -111,7 +111,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	query := `
 		SELECT
 			id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, latest_known_chapter, last_checked_at,
+			last_read_chapter, last_read_at, latest_known_chapter, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 	`
@@ -120,9 +120,9 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	whereClauses := make([]string, 0)
 
 	if strings.TrimSpace(options.Query) != "" {
-		whereClauses = append(whereClauses, `(LOWER(title) LIKE ? OR LOWER(source_url) LIKE ?)`)
+		whereClauses = append(whereClauses, `LOWER(title) LIKE ?`)
 		queryLike := "%" + strings.ToLower(strings.TrimSpace(options.Query)) + "%"
-		args = append(args, queryLike, queryLike)
+		args = append(args, queryLike)
 	}
 
 	if len(options.Statuses) > 0 {
@@ -172,11 +172,41 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 			source_url = ?,
 			status = ?,
 			last_read_chapter = ?,
+			last_read_at = CASE WHEN last_read_chapter IS NOT ? THEN CURRENT_TIMESTAMP ELSE last_read_at END,
 			latest_known_chapter = ?,
 			last_checked_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LastCheckedAt, id)
+		  AND (
+			title IS NOT ?
+			OR source_id IS NOT ?
+			OR source_item_id IS NOT ?
+			OR source_url IS NOT ?
+			OR status IS NOT ?
+			OR last_read_chapter IS NOT ?
+			OR latest_known_chapter IS NOT ?
+			OR last_checked_at IS NOT ?
+		  )
+	`,
+		tracker.Title,
+		tracker.SourceID,
+		tracker.SourceItemID,
+		tracker.SourceURL,
+		tracker.Status,
+		tracker.LastReadChapter,
+		tracker.LastReadChapter,
+		tracker.LatestKnownChapter,
+		tracker.LastCheckedAt,
+		id,
+		tracker.Title,
+		tracker.SourceID,
+		tracker.SourceItemID,
+		tracker.SourceURL,
+		tracker.Status,
+		tracker.LastReadChapter,
+		tracker.LatestKnownChapter,
+		tracker.LastCheckedAt,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("update tracker: %w", err)
 	}
@@ -186,7 +216,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		return nil, fmt.Errorf("tracker update rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return nil, nil
+		return r.GetByID(id)
 	}
 
 	if err := r.UpsertTrackerSource(id, models.TrackerSource{
@@ -198,6 +228,28 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 	}
 
 	return r.GetByID(id)
+}
+
+func (r *TrackerRepository) UpdateLastReadChapter(id int64, lastReadChapter *float64) (bool, error) {
+	result, err := r.db.Exec(`
+		UPDATE trackers
+		SET
+			last_read_chapter = ?,
+			last_read_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		  AND last_read_chapter IS NOT ?
+	`, lastReadChapter, id, lastReadChapter)
+	if err != nil {
+		return false, fmt.Errorf("update last read chapter: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("last read update rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
 }
 
 func (r *TrackerRepository) ListTrackerSources(trackerID int64) ([]models.TrackerSource, error) {
@@ -379,6 +431,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var tracker models.Tracker
 	var sourceItemID sql.NullString
 	var lastReadChapter sql.NullFloat64
+	var lastReadAt sql.NullTime
 	var latestKnownChapter sql.NullFloat64
 	var lastCheckedAt sql.NullTime
 
@@ -390,6 +443,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&tracker.SourceURL,
 		&tracker.Status,
 		&lastReadChapter,
+		&lastReadAt,
 		&latestKnownChapter,
 		&lastCheckedAt,
 		&tracker.CreatedAt,
@@ -404,6 +458,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 	if lastReadChapter.Valid {
 		tracker.LastReadChapter = &lastReadChapter.Float64
+	}
+	if lastReadAt.Valid {
+		tracker.LastReadAt = &lastReadAt.Time
 	}
 	if latestKnownChapter.Valid {
 		tracker.LatestKnownChapter = &latestKnownChapter.Float64

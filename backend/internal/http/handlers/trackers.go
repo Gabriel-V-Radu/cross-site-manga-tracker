@@ -76,7 +76,7 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 
 	options := repository.TrackerListOptions{
 		Statuses: statuses,
-		SortBy:   c.Query("sort", "updated_at"),
+		SortBy:   c.Query("sort", "latest_known_chapter"),
 		Order:    c.Query("order", "desc"),
 	}
 

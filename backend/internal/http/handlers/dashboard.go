@@ -50,6 +50,7 @@ type trackerCardView struct {
 	ID                    int64
 	Title                 string
 	Status                string
+	StatusLabel           string
 	SourceURL             string
 	CoverURL              string
 	LatestKnownChapter    string
@@ -97,7 +98,7 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	c.Set("Expires", "0")
 	data := dashboardPageData{
 		Statuses: []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:    []string{"updated_at", "title", "created_at", "last_checked_at", "latest_known_chapter"},
+		Sorts:    []string{"latest_known_chapter", "updated_at"},
 	}
 	return h.render(c, "dashboard_page.html", data)
 }
@@ -120,7 +121,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	items, err := h.trackerRepo.List(repository.TrackerListOptions{
 		Statuses: statuses,
-		SortBy:   strings.TrimSpace(c.Query("sort", "updated_at")),
+		SortBy:   strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
 		Order:    strings.TrimSpace(c.Query("order", "desc")),
 		Query:    strings.TrimSpace(c.Query("q")),
 	})
@@ -144,12 +145,17 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 			ID:                    item.ID,
 			Title:                 item.Title,
 			Status:                item.Status,
+			StatusLabel:           statusLabel(item.Status),
 			SourceURL:             item.SourceURL,
 			SourceItemID:          item.SourceItemID,
 			LatestKnownChapterRaw: item.LatestKnownChapter,
 			LastReadChapterRaw:    item.LastReadChapter,
 			UpdatedAtFormatted:    item.UpdatedAt.Format("2006-01-02 15:04"),
-			LastReadAgo:           relativeTime(item.UpdatedAt),
+			LastReadAgo:           "—",
+		}
+
+		if item.LastReadAt != nil {
+			card.LastReadAgo = relativeTime(*item.LastReadAt)
 		}
 
 		if item.LastCheckedAt != nil {
@@ -345,6 +351,9 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
+	now := time.Now().UTC()
+	tracker.LastCheckedAt = &now
+
 	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to validate source")
@@ -367,10 +376,19 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
 	}
 
+	existingTracker, err := h.trackerRepo.GetByID(id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
+	}
+	if existingTracker == nil {
+		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
+	}
+
 	tracker, err := parseTrackerFromForm(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
+	tracker.LastCheckedAt = existingTracker.LastCheckedAt
 
 	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
 	if err != nil {
@@ -453,10 +471,8 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	}
 
 	if tracker.LatestKnownChapter != nil {
-		tracker.LastReadChapter = tracker.LatestKnownChapter
-		now := time.Now().UTC()
-		tracker.LastCheckedAt = &now
-		if _, err := h.trackerRepo.Update(id, tracker); err != nil {
+		_, err := h.trackerRepo.UpdateLastReadChapter(id, tracker.LatestKnownChapter)
+		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
 		}
 	}
@@ -500,7 +516,6 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		return nil, fmt.Errorf("Invalid latest known chapter")
 	}
 
-	now := time.Now().UTC()
 	return &models.Tracker{
 		Title:              title,
 		SourceID:           sourceID,
@@ -509,7 +524,6 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		Status:             status,
 		LastReadChapter:    lastRead,
 		LatestKnownChapter: latestKnown,
-		LastCheckedAt:      &now,
 	}, nil
 }
 
@@ -732,12 +746,59 @@ func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) e
 		"chapterInputValue": chapterInputValue,
 		"textInputValue":    textInputValue,
 		"toJSON":            toJSON,
+		"statusLabel":       statusLabel,
+		"sortLabel":         sortLabel,
 	}).ParseGlob("web/templates/*.html")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Template load error")
 	}
 	c.Type("html", "utf-8")
 	return tmpl.ExecuteTemplate(c.Response().BodyWriter(), templateName, data)
+}
+
+func statusLabel(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "all":
+		return "All statuses"
+	case "on_hold":
+		return "On hold"
+	case "plan_to_read":
+		return "Plan to read"
+	default:
+		return humanizeValueLabel(value)
+	}
+}
+
+func sortLabel(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "updated_at":
+		return "Recently updated"
+	case "title":
+		return "Title (A–Z)"
+	case "created_at":
+		return "Date added"
+	case "last_checked_at":
+		return "Last checked"
+	case "latest_known_chapter":
+		return "Latest chapter"
+	default:
+		return humanizeValueLabel(value)
+	}
+}
+
+func humanizeValueLabel(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	if normalized == "" {
+		return "—"
+	}
+	parts := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(normalized))
+	for index, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		parts[index] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 func toJSON(value any) string {
