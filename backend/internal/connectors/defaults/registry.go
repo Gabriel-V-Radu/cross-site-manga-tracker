@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/asuracomic"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangadex"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangaplus"
@@ -15,6 +16,7 @@ func NewRegistry(yamlConnectorsPath string) (*connectors.Registry, error) {
 	_ = registry.Register(mangadex.NewConnector())
 	_ = registry.Register(mangaplus.NewConnector())
 	_ = registry.Register(mangafire.NewConnector())
+	_ = registry.Register(asuracomic.NewConnector())
 
 	loaded, loadErr := yamlconnector.LoadFromDir(yamlConnectorsPath, nil)
 	for _, connector := range loaded {
