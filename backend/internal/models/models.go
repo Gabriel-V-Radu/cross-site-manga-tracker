@@ -14,8 +14,17 @@ type Source struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
+type Profile struct {
+	ID        int64     `json:"id"`
+	Key       string    `json:"key"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 type Tracker struct {
 	ID                 int64      `json:"id"`
+	ProfileID          int64      `json:"profileId"`
 	Title              string     `json:"title"`
 	SourceID           int64      `json:"sourceId"`
 	SourceItemID       *string    `json:"sourceItemId,omitempty"`

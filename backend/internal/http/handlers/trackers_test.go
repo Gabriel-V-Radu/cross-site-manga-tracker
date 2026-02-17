@@ -261,3 +261,63 @@ func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 		t.Fatalf("expected API Behind Tracker, got %q", title)
 	}
 }
+
+func TestTrackersAreIsolatedByProfile(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	createBody := map[string]any{
+		"title":              "Only Profile 1",
+		"sourceId":           1,
+		"sourceUrl":          "https://mangadex.org/title/isolated",
+		"status":             "reading",
+		"lastReadChapter":    1.0,
+		"latestKnownChapter": 2.0,
+	}
+	body, _ := json.Marshal(createBody)
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/trackers?profile=profile1", bytes.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes, err := app.Test(createReq)
+	if err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	if createRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createRes.StatusCode)
+	}
+
+	listProfile2Req := httptest.NewRequest(http.MethodGet, "/v1/trackers?profile=profile2", nil)
+	listProfile2Res, err := app.Test(listProfile2Req)
+	if err != nil {
+		t.Fatalf("list profile2 request failed: %v", err)
+	}
+	if listProfile2Res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", listProfile2Res.StatusCode)
+	}
+
+	var profile2Payload map[string]any
+	if err := json.NewDecoder(listProfile2Res.Body).Decode(&profile2Payload); err != nil {
+		t.Fatalf("decode profile2 list response: %v", err)
+	}
+	profile2Items := profile2Payload["items"].([]any)
+	if len(profile2Items) != 0 {
+		t.Fatalf("expected 0 items in profile2, got %d", len(profile2Items))
+	}
+
+	listProfile1Req := httptest.NewRequest(http.MethodGet, "/v1/trackers?profile=profile1", nil)
+	listProfile1Res, err := app.Test(listProfile1Req)
+	if err != nil {
+		t.Fatalf("list profile1 request failed: %v", err)
+	}
+	if listProfile1Res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", listProfile1Res.StatusCode)
+	}
+
+	var profile1Payload map[string]any
+	if err := json.NewDecoder(listProfile1Res.Body).Decode(&profile1Payload); err != nil {
+		t.Fatalf("decode profile1 list response: %v", err)
+	}
+	profile1Items := profile1Payload["items"].([]any)
+	if len(profile1Items) != 1 {
+		t.Fatalf("expected 1 item in profile1, got %d", len(profile1Items))
+	}
+}

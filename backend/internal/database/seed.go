@@ -36,6 +36,17 @@ func SeedDefaults(db *sql.DB) error {
 	}
 
 	_, err = tx.Exec(`
+		INSERT OR IGNORE INTO profiles (id, key, name)
+		VALUES
+			(1, 'profile1', 'Profile 1'),
+			(2, 'profile2', 'Profile 2');
+	`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("seed profiles: %w", err)
+	}
+
+	_, err = tx.Exec(`
 		INSERT OR IGNORE INTO settings (key, value)
 		VALUES
 			('polling_minutes', '30'),

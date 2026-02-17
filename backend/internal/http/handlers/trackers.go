@@ -34,14 +34,23 @@ type createTrackerRequest struct {
 type updateTrackerRequest = createTrackerRequest
 
 type TrackersHandler struct {
-	repo *repository.TrackerRepository
+	repo            *repository.TrackerRepository
+	profileResolver *profileContextResolver
 }
 
 func NewTrackersHandler(db *sql.DB) *TrackersHandler {
-	return &TrackersHandler{repo: repository.NewTrackerRepository(db)}
+	return &TrackersHandler{
+		repo:            repository.NewTrackerRepository(db),
+		profileResolver: newProfileContextResolver(db),
+	}
 }
 
 func (h *TrackersHandler) Create(c *fiber.Ctx) error {
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
 	var req createTrackerRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid json body"})
@@ -60,6 +69,8 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
 	}
 
+	tracker.ProfileID = profile.ID
+
 	created, err := h.repo.Create(tracker)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to create tracker"})
@@ -69,15 +80,22 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 }
 
 func (h *TrackersHandler) List(c *fiber.Ctx) error {
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
 	statuses := parseStatuses(c.Query("status"))
 	if err := validateStatuses(statuses); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 
 	options := repository.TrackerListOptions{
-		Statuses: statuses,
-		SortBy:   c.Query("sort", "latest_known_chapter"),
-		Order:    c.Query("order", "desc"),
+		ProfileID: profile.ID,
+		Statuses:  statuses,
+		SortBy:    c.Query("sort", "latest_known_chapter"),
+		Order:     c.Query("order", "desc"),
+		Query:     c.Query("q"),
 	}
 
 	trackers, err := h.repo.List(options)
@@ -89,12 +107,17 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 }
 
 func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid tracker id"})
 	}
 
-	tracker, err := h.repo.GetByID(id)
+	tracker, err := h.repo.GetByID(profile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to get tracker"})
 	}
@@ -106,6 +129,11 @@ func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
 }
 
 func (h *TrackersHandler) Update(c *fiber.Ctx) error {
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid tracker id"})
@@ -129,7 +157,9 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
 	}
 
-	updated, err := h.repo.Update(id, tracker)
+	tracker.ProfileID = profile.ID
+
+	updated, err := h.repo.Update(profile.ID, id, tracker)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to update tracker"})
 	}
@@ -141,12 +171,17 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 }
 
 func (h *TrackersHandler) Delete(c *fiber.Ctx) error {
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid tracker id"})
 	}
 
-	deleted, err := h.repo.Delete(id)
+	deleted, err := h.repo.Delete(profile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to delete tracker"})
 	}

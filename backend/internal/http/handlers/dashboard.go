@@ -21,11 +21,13 @@ import (
 )
 
 type DashboardHandler struct {
-	trackerRepo *repository.TrackerRepository
-	sourceRepo  *repository.SourceRepository
-	registry    *connectors.Registry
-	coverCache  map[string]coverCacheEntry
-	cacheMu     sync.RWMutex
+	trackerRepo     *repository.TrackerRepository
+	sourceRepo      *repository.SourceRepository
+	profileRepo     *repository.ProfileRepository
+	profileResolver *profileContextResolver
+	registry        *connectors.Registry
+	coverCache      map[string]coverCacheEntry
+	cacheMu         sync.RWMutex
 }
 
 type coverCacheEntry struct {
@@ -37,8 +39,11 @@ type coverCacheEntry struct {
 var mangafireMangaURLPattern = regexp.MustCompile(`(?i)https?://(?:www\.)?mangafire\.to/manga/[^\s"'<>]+`)
 
 type dashboardPageData struct {
-	Statuses []string
-	Sorts    []string
+	Statuses      []string
+	Sorts         []string
+	Profiles      []models.Profile
+	ActiveProfile models.Profile
+	RenameValue   string
 }
 
 type trackersPartialData struct {
@@ -87,25 +92,66 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		registry = connectors.NewRegistry()
 	}
 	return &DashboardHandler{
-		trackerRepo: repository.NewTrackerRepository(db),
-		sourceRepo:  repository.NewSourceRepository(db),
-		registry:    registry,
-		coverCache:  make(map[string]coverCacheEntry),
+		trackerRepo:     repository.NewTrackerRepository(db),
+		sourceRepo:      repository.NewSourceRepository(db),
+		profileRepo:     repository.NewProfileRepository(db),
+		profileResolver: newProfileContextResolver(db),
+		registry:        registry,
+		coverCache:      make(map[string]coverCacheEntry),
 	}
 }
 
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
 	data := dashboardPageData{
-		Statuses: []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:    []string{"latest_known_chapter", "last_read_at"},
+		Statuses:      []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
+		Sorts:         []string{"latest_known_chapter", "last_read_at"},
+		Profiles:      profiles,
+		ActiveProfile: *activeProfile,
+		RenameValue:   activeProfile.Name,
 	}
 	return h.render(c, "dashboard_page.html", data)
 }
 
+func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	name := strings.TrimSpace(c.FormValue("profile_name"))
+	if name == "" {
+		return c.Status(fiber.StatusBadRequest).SendString("Profile name is required")
+	}
+	if len(name) > 40 {
+		return c.Status(fiber.StatusBadRequest).SendString("Profile name must be 40 characters or less")
+	}
+
+	if _, err := h.profileRepo.Rename(activeProfile.ID, name); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to rename profile")
+	}
+
+	return c.Redirect("/dashboard?profile="+url.QueryEscape(activeProfile.Key), fiber.StatusSeeOther)
+}
+
 func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
@@ -122,10 +168,11 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	}
 
 	items, err := h.trackerRepo.List(repository.TrackerListOptions{
-		Statuses: statuses,
-		SortBy:   strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
-		Order:    strings.TrimSpace(c.Query("order", "desc")),
-		Query:    strings.TrimSpace(c.Query("q")),
+		ProfileID: activeProfile.ID,
+		Statuses:  statuses,
+		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
+		Order:     strings.TrimSpace(c.Query("order", "desc")),
+		Query:     strings.TrimSpace(c.Query("q")),
 	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
@@ -202,6 +249,10 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
+	if _, err := h.profileResolver.Resolve(c); err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
@@ -310,12 +361,17 @@ func extractMangaFireMangaURL(query string) (string, bool) {
 }
 
 func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
 	}
 
-	tracker, err := h.trackerRepo.GetByID(id)
+	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
 	}
@@ -328,7 +384,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
 	}
 
-	linkedSources, err := h.trackerRepo.ListTrackerSources(id)
+	linkedSources, err := h.trackerRepo.ListTrackerSources(activeProfile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sources")
 	}
@@ -358,10 +414,16 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	tracker, err := parseTrackerFromForm(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
+	tracker.ProfileID = activeProfile.ID
 
 	h.enrichTrackerFromSource(c.Context(), tracker)
 
@@ -425,12 +487,17 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 }
 
 func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
 	}
 
-	existingTracker, err := h.trackerRepo.GetByID(id)
+	existingTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
 	}
@@ -444,6 +511,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	}
 	tracker.LastCheckedAt = existingTracker.LastCheckedAt
 	tracker.LatestReleaseAt = existingTracker.LatestReleaseAt
+	tracker.ProfileID = activeProfile.ID
 
 	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
 	if err != nil {
@@ -453,7 +521,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Selected source does not exist")
 	}
 
-	updated, err := h.trackerRepo.Update(id, tracker)
+	updated, err := h.trackerRepo.Update(activeProfile.ID, id, tracker)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
 	}
@@ -485,7 +553,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 	}
 
-	if err := h.trackerRepo.ReplaceTrackerSources(id, uniqueSources); err != nil {
+	if err := h.trackerRepo.ReplaceTrackerSources(activeProfile.ID, id, uniqueSources); err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save linked sources")
 	}
 
@@ -494,12 +562,17 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
 	}
 
-	deleted, err := h.trackerRepo.Delete(id)
+	deleted, err := h.trackerRepo.Delete(activeProfile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to delete tracker")
 	}
@@ -512,12 +585,17 @@ func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
 	}
 
-	tracker, err := h.trackerRepo.GetByID(id)
+	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
 	}
@@ -526,7 +604,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	}
 
 	if tracker.LatestKnownChapter != nil {
-		_, err := h.trackerRepo.UpdateLastReadChapter(id, tracker.LatestKnownChapter)
+		_, err := h.trackerRepo.UpdateLastReadChapter(activeProfile.ID, id, tracker.LatestKnownChapter)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
 		}

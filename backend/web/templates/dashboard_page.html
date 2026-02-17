@@ -17,9 +17,23 @@
     <div class="grain"></div>
     <main class="shell">
         <header class="masthead">
-            <p class="kicker">Cross-Site Tracker</p>
-            <h1>Editorial Control Room</h1>
-            <p class="subtitle">Track updates across sources with sharp filters, fast edits, and a focused reading queue.</p>
+            <div class="masthead__copy">
+                <p class="kicker">Cross-Site Tracker</p>
+                <h1>Editorial Control Room</h1>
+                <p class="subtitle">Track updates across sources with sharp filters, fast edits, and a focused reading queue.</p>
+            </div>
+            <form class="profile-toolbar" method="post" action="/dashboard/profile/rename" id="profile-rename-form">
+                <label class="profile-toolbar__label profile-toolbar__label--profile">
+                    Profile
+                    <select name="profile" id="profile-switch" onchange="window.onProfileSwitch(this)">
+                        {{range .Profiles}}
+                        <option value="{{.Key}}" {{if eq .Key $.ActiveProfile.Key}}selected{{end}}>{{.Name}}</option>
+                        {{end}}
+                    </select>
+                </label>
+                <input type="hidden" name="profile_name" id="profile-rename-value" value="{{.RenameValue}}">
+                <button type="button" class="action-btn action-btn--accent" onclick="window.renameProfileOnce()">Rename Profile</button>
+            </form>
         </header>
 
         <section class="control-panel">
@@ -55,6 +69,7 @@
                         <option value="asc">asc</option>
                     </select>
                 </label>
+                <input type="hidden" name="profile" id="profile-filter" value="{{.ActiveProfile.Key}}">
                 <input type="hidden" name="view" id="view-input" value="grid">
             </form>
 
@@ -93,6 +108,73 @@
                 .replace(/\"/g, '&quot;')
                 .replace(/'/g, '&#39;');
         };
+
+        window.onProfileSwitch = function (select) {
+            if (!select) {
+                return;
+            }
+
+            var selectedProfile = (select.value || '').trim();
+            if (!selectedProfile) {
+                return;
+            }
+
+            var hiddenProfile = document.getElementById('profile-filter');
+            if (hiddenProfile) {
+                hiddenProfile.value = selectedProfile;
+            }
+
+            var renameForm = document.getElementById('profile-rename-form');
+            if (renameForm) {
+                renameForm.setAttribute('action', '/dashboard/profile/rename?profile=' + encodeURIComponent(selectedProfile));
+            }
+
+            if (window.history && window.history.replaceState) {
+                var nextURL = '/dashboard?profile=' + encodeURIComponent(selectedProfile);
+                window.history.replaceState({}, '', nextURL);
+            }
+
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        };
+
+        window.renameProfileOnce = function () {
+            var select = document.getElementById('profile-switch');
+            var hiddenInput = document.getElementById('profile-rename-value');
+            var form = document.getElementById('profile-rename-form');
+            if (!select || !hiddenInput || !form) {
+                return;
+            }
+
+            var currentName = select.options && select.selectedIndex >= 0
+                ? select.options[select.selectedIndex].text
+                : hiddenInput.value;
+
+            var nextName = window.prompt('Rename profile', currentName || '');
+            if (nextName === null) {
+                return;
+            }
+
+            nextName = String(nextName).trim();
+            if (!nextName) {
+                return;
+            }
+
+            hiddenInput.value = nextName;
+
+            var selectedProfile = (select.value || '').trim();
+            if (selectedProfile) {
+                form.setAttribute('action', '/dashboard/profile/rename?profile=' + encodeURIComponent(selectedProfile));
+            }
+
+            form.submit();
+        };
+
+        document.addEventListener('DOMContentLoaded', function () {
+            var select = document.getElementById('profile-switch');
+            if (select) {
+                window.onProfileSwitch(select);
+            }
+        });
 
         window.renderLinkedSources = function (form) {
             if (!form) {

@@ -40,6 +40,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	})
 	app.Get("/", dashboard.Page)
 	app.Get("/dashboard", dashboard.Page)
+	app.Post("/dashboard/profile/rename", dashboard.RenameProfileFromForm)
 	app.Get("/dashboard/trackers", dashboard.TrackersPartial)
 	app.Get("/dashboard/trackers/search", dashboard.SearchSourceTitles)
 	app.Get("/dashboard/trackers/empty-modal", dashboard.EmptyModal)

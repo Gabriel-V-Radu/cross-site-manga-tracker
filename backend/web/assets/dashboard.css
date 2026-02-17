@@ -44,6 +44,13 @@ body {
     padding: 28px 30px;
     position: relative;
     overflow: hidden;
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.masthead__copy {
+    min-width: 0;
 }
 
 .masthead::before {
@@ -77,6 +84,38 @@ h1 {
     margin: 0;
     max-width: 70ch;
     color: var(--ink-soft);
+}
+
+.profile-toolbar {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    gap: 6px;
+    align-items: end;
+    min-width: 0;
+    max-width: 420px;
+    width: 100%;
+}
+
+.profile-toolbar__label {
+    display: grid;
+    gap: 4px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-soft);
+    min-width: 0;
+}
+
+.profile-toolbar__label--profile {
+    flex: 1 1 auto;
+}
+
+.profile-toolbar select,
+.profile-toolbar input {
+    font-size: 12px;
+    height: 36px;
+    padding: 7px 10px;
 }
 
 .control-panel {
@@ -651,6 +690,14 @@ input:focus, select:focus {
 }
 
 @media (max-width: 1120px) {
+    .masthead {
+        flex-direction: column;
+    }
+
+    .profile-toolbar {
+        max-width: 100%;
+    }
+
     .control-panel {
         grid-template-columns: 1fr;
     }
@@ -683,6 +730,16 @@ input:focus, select:focus {
 @media (max-width: 640px) {
     .shell {
         padding: 24px 14px 40px;
+    }
+
+    .profile-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .profile-toolbar__label--profile {
+        flex: 1 1 auto;
     }
 
     .filters-grid,

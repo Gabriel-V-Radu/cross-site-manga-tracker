@@ -10,10 +10,11 @@ import (
 )
 
 type TrackerListOptions struct {
-	Statuses []string
-	SortBy   string
-	Order    string
-	Query    string
+	ProfileID int64
+	Statuses  []string
+	SortBy    string
+	Order     string
+	Query     string
 }
 
 type TrackerRepository struct {
@@ -45,10 +46,10 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
 	result, err := r.db.Exec(`
 		INSERT INTO trackers (
-			title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
+			profile_id, title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+	`, tracker.ProfileID, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
 	if err != nil {
 		return nil, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -58,7 +59,7 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("get tracker last insert id: %w", err)
 	}
 
-	if err := r.ReplaceTrackerSources(id, []models.TrackerSource{{
+	if err := r.ReplaceTrackerSources(tracker.ProfileID, id, []models.TrackerSource{{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
@@ -66,18 +67,18 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("create tracker sources: %w", err)
 	}
 
-	return r.GetByID(id)
+	return r.GetByID(tracker.ProfileID, id)
 }
 
-func (r *TrackerRepository) GetByID(id int64) (*models.Tracker, error) {
+func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker, error) {
 	row := r.db.QueryRow(`
 		SELECT
-			id, title, source_id, source_item_id, source_url, status,
+			id, profile_id, title, source_id, source_item_id, source_url, status,
 			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
-		WHERE id = ?
-	`, id)
+		WHERE id = ? AND profile_id = ?
+	`, id, profileID)
 
 	tracker, err := scanTracker(row)
 	if err != nil {
@@ -111,14 +112,17 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 
 	query := `
 		SELECT
-			id, title, source_id, source_item_id, source_url, status,
+			id, profile_id, title, source_id, source_item_id, source_url, status,
 			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 	`
 
-	args := make([]any, 0)
-	whereClauses := make([]string, 0)
+	args := make([]any, 0, 1)
+	whereClauses := make([]string, 0, 1)
+
+	whereClauses = append(whereClauses, `profile_id = ?`)
+	args = append(args, options.ProfileID)
 
 	if strings.TrimSpace(options.Query) != "" {
 		whereClauses = append(whereClauses, `LOWER(title) LIKE ?`)
@@ -176,7 +180,7 @@ func containsStatus(statuses []string, expected string) bool {
 	return false
 }
 
-func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.Tracker, error) {
+func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
 	result, err := r.db.Exec(`
 		UPDATE trackers
 		SET
@@ -192,6 +196,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 			last_checked_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
+		  AND profile_id = ?
 		  AND (
 			title IS NOT ?
 			OR source_id IS NOT ?
@@ -215,6 +220,7 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		tracker.LatestReleaseAt,
 		tracker.LastCheckedAt,
 		id,
+		profileID,
 		tracker.Title,
 		tracker.SourceID,
 		tracker.SourceItemID,
@@ -234,10 +240,10 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		return nil, fmt.Errorf("tracker update rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return r.GetByID(id)
+		return r.GetByID(profileID, id)
 	}
 
-	if err := r.UpsertTrackerSource(id, models.TrackerSource{
+	if err := r.UpsertTrackerSource(profileID, id, models.TrackerSource{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
@@ -245,10 +251,10 @@ func (r *TrackerRepository) Update(id int64, tracker *models.Tracker) (*models.T
 		return nil, fmt.Errorf("upsert primary tracker source: %w", err)
 	}
 
-	return r.GetByID(id)
+	return r.GetByID(profileID, id)
 }
 
-func (r *TrackerRepository) UpdateLastReadChapter(id int64, lastReadChapter *float64) (bool, error) {
+func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, lastReadChapter *float64) (bool, error) {
 	result, err := r.db.Exec(`
 		UPDATE trackers
 		SET
@@ -256,8 +262,9 @@ func (r *TrackerRepository) UpdateLastReadChapter(id int64, lastReadChapter *flo
 			last_read_at = CURRENT_TIMESTAMP,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
+		  AND profile_id = ?
 		  AND last_read_chapter IS NOT ?
-	`, lastReadChapter, id, lastReadChapter)
+	`, lastReadChapter, id, profileID, lastReadChapter)
 	if err != nil {
 		return false, fmt.Errorf("update last read chapter: %w", err)
 	}
@@ -270,7 +277,7 @@ func (r *TrackerRepository) UpdateLastReadChapter(id int64, lastReadChapter *flo
 	return rowsAffected > 0, nil
 }
 
-func (r *TrackerRepository) ListTrackerSources(trackerID int64) ([]models.TrackerSource, error) {
+func (r *TrackerRepository) ListTrackerSources(profileID int64, trackerID int64) ([]models.TrackerSource, error) {
 	rows, err := r.db.Query(`
 		SELECT
 			ts.id,
@@ -282,10 +289,12 @@ func (r *TrackerRepository) ListTrackerSources(trackerID int64) ([]models.Tracke
 			ts.created_at,
 			ts.updated_at
 		FROM tracker_sources ts
+		INNER JOIN trackers t ON t.id = ts.tracker_id
 		INNER JOIN sources s ON s.id = ts.source_id
 		WHERE ts.tracker_id = ?
+		  AND t.profile_id = ?
 		ORDER BY s.name ASC, ts.id ASC
-	`, trackerID)
+	`, trackerID, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list tracker sources: %w", err)
 	}
@@ -320,13 +329,17 @@ func (r *TrackerRepository) ListTrackerSources(trackerID int64) ([]models.Tracke
 	return items, nil
 }
 
-func (r *TrackerRepository) ReplaceTrackerSources(trackerID int64, sources []models.TrackerSource) error {
+func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int64, sources []models.TrackerSource) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin replace tracker sources tx: %w", err)
 	}
 
-	if _, err := tx.Exec(`DELETE FROM tracker_sources WHERE tracker_id = ?`, trackerID); err != nil {
+	if _, err := tx.Exec(`
+		DELETE FROM tracker_sources
+		WHERE tracker_id = ?
+		  AND EXISTS (SELECT 1 FROM trackers t WHERE t.id = ? AND t.profile_id = ?)
+	`, trackerID, trackerID, profileID); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("delete tracker sources: %w", err)
 	}
@@ -351,8 +364,16 @@ func (r *TrackerRepository) ReplaceTrackerSources(trackerID int64, sources []mod
 	return nil
 }
 
-func (r *TrackerRepository) UpsertTrackerSource(trackerID int64, source models.TrackerSource) error {
+func (r *TrackerRepository) UpsertTrackerSource(profileID int64, trackerID int64, source models.TrackerSource) error {
 	if source.SourceID <= 0 || strings.TrimSpace(source.SourceURL) == "" {
+		return nil
+	}
+
+	var exists int
+	if err := r.db.QueryRow(`SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&exists); err != nil {
+		return fmt.Errorf("check tracker ownership: %w", err)
+	}
+	if exists == 0 {
 		return nil
 	}
 
@@ -371,8 +392,8 @@ func (r *TrackerRepository) UpsertTrackerSource(trackerID int64, source models.T
 	return nil
 }
 
-func (r *TrackerRepository) Delete(id int64) (bool, error) {
-	result, err := r.db.Exec(`DELETE FROM trackers WHERE id = ?`, id)
+func (r *TrackerRepository) Delete(profileID int64, id int64) (bool, error) {
+	result, err := r.db.Exec(`DELETE FROM trackers WHERE id = ? AND profile_id = ?`, id, profileID)
 	if err != nil {
 		return false, fmt.Errorf("delete tracker: %w", err)
 	}
@@ -461,6 +482,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 
 	err := scanner.Scan(
 		&tracker.ID,
+		&tracker.ProfileID,
 		&tracker.Title,
 		&tracker.SourceID,
 		&sourceItemID,

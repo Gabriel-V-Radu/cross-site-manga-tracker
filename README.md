@@ -45,6 +45,18 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 - The app is intentionally exposed only on `localhost` (`127.0.0.1:8080`).
 - This keeps usage single-PC for now.
 
+## Profiles (No Login)
+- The app now supports two local profiles with separate tracker libraries:
+   - `profile1`
+   - `profile2`
+- Dashboard switching:
+   - Open `http://localhost:8080/dashboard` and use the **Profile** dropdown.
+   - Or open directly with query string: `http://localhost:8080/dashboard?profile=profile1` (or `profile2`).
+- API usage (profile-aware):
+   - Query parameter: `/v1/trackers?profile=profile1`
+   - Header: `X-Profile-Key: profile1` or `X-Profile-ID: 1`
+- A cookie stores the active profile in the browser for convenience.
+
 ## Notes
 - Migrations are auto-applied from `backend/migrations/`.
 - SQLite database file defaults to `backend/data/app.sqlite` locally.
