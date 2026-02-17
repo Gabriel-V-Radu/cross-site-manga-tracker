@@ -116,6 +116,8 @@ func normalizeConnectorKey(raw string) string {
 		return "mangafire"
 	case "asuracomic.net":
 		return "asuracomic"
+	case "flamecomics.xyz":
+		return "flamecomics"
 	default:
 		return key
 	}

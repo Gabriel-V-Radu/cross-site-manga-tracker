@@ -21,6 +21,7 @@ func SeedDefaults(db *sql.DB) error {
 		{key: "mangaplus", name: "MangaPlus", kind: "native", enabled: true},
 		{key: "mangafire", name: "MangaFire", kind: "native", enabled: true},
 		{key: "asuracomic", name: "AsuraComic", kind: "native", enabled: true},
+		{key: "flamecomics", name: "FlameComics", kind: "native", enabled: true},
 	}
 
 	for _, source := range defaultSources {

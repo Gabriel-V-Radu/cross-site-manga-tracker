@@ -64,6 +64,9 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	if err := r.Register(&fakeConnector{key: "asuracomic", name: "AsuraComic", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register asuracomic: %v", err)
 	}
+	if err := r.Register(&fakeConnector{key: "flamecomics", name: "FlameComics", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register flamecomics: %v", err)
+	}
 
 	tests := []string{
 		"mangafire",
@@ -90,6 +93,20 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	for _, key := range asuraTests {
 		if _, ok := r.Get(key); !ok {
 			t.Fatalf("expected asuracomic connector for key %q", key)
+		}
+	}
+
+	flameTests := []string{
+		"flamecomics",
+		"FlameComics",
+		"flamecomics.xyz",
+		"https://flamecomics.xyz/series/83",
+		"www.flamecomics.xyz",
+	}
+
+	for _, key := range flameTests {
+		if _, ok := r.Get(key); !ok {
+			t.Fatalf("expected flamecomics connector for key %q", key)
 		}
 	}
 }
