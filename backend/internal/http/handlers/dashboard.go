@@ -526,36 +526,22 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	tracker.LatestReleaseAt = existingTracker.LatestReleaseAt
 	tracker.ProfileID = activeProfile.ID
 
-	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to validate source")
-	}
-	if !exists {
-		return c.Status(fiber.StatusBadRequest).SendString("Selected source does not exist")
-	}
-
-	updated, err := h.trackerRepo.Update(activeProfile.ID, id, tracker)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
-	}
-	if updated == nil {
-		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
-	}
-
 	linkedSources, err := parseLinkedSourcesFromForm(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
-	mergedSources := make([]models.TrackerSource, 0, len(linkedSources)+1)
-	mergedSources = append(mergedSources, models.TrackerSource{
+	primaryFromForm := models.TrackerSource{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
-	})
-	mergedSources = append(mergedSources, linkedSources...)
+}
 
-	uniqueSources := dedupeTrackerSources(mergedSources)
+	uniqueSources := dedupeTrackerSources(linkedSources)
+	if len(uniqueSources) == 0 {
+		uniqueSources = dedupeTrackerSources([]models.TrackerSource{primaryFromForm})
+	}
+
 	for _, source := range uniqueSources {
 		exists, err := h.trackerRepo.SourceExists(source.SourceID)
 		if err != nil {
@@ -564,6 +550,25 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		if !exists {
 			return c.Status(fiber.StatusBadRequest).SendString("One of the linked sources does not exist")
 		}
+	}
+
+	primarySource, latestKnownChapter, latestReleaseAt := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
+	tracker.SourceID = primarySource.SourceID
+	tracker.SourceItemID = primarySource.SourceItemID
+	tracker.SourceURL = primarySource.SourceURL
+	if latestKnownChapter != nil {
+		tracker.LatestKnownChapter = latestKnownChapter
+	}
+	if latestReleaseAt != nil {
+		tracker.LatestReleaseAt = latestReleaseAt
+	}
+
+	updated, err := h.trackerRepo.Update(activeProfile.ID, id, tracker)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
+	}
+	if updated == nil {
+		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
 	}
 
 	if err := h.trackerRepo.ReplaceTrackerSources(activeProfile.ID, id, uniqueSources); err != nil {
@@ -757,6 +762,85 @@ func dedupeTrackerSources(items []models.TrackerSource) []models.TrackerSource {
 		out = append(out, item)
 	}
 	return out
+}
+
+func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time) {
+	if len(sources) == 0 {
+		return models.TrackerSource{}, nil, nil
+	}
+
+	bestIndex := 0
+	var bestChapter *float64
+	var bestReleaseAt *time.Time
+
+	for idx := range sources {
+		source := &sources[idx]
+		resolved, err := h.resolveLinkedSource(parent, source.SourceID, source.SourceURL)
+		if err != nil || resolved == nil {
+			continue
+		}
+
+		resolvedItemID := strings.TrimSpace(resolved.SourceItemID)
+		if source.SourceItemID == nil && resolvedItemID != "" {
+			source.SourceItemID = &resolvedItemID
+		}
+
+		if resolved.LatestChapter == nil {
+			continue
+		}
+
+		resolvedChapter := *resolved.LatestChapter
+		if bestChapter == nil || resolvedChapter > *bestChapter {
+			bestIndex = idx
+			bestChapter = &resolvedChapter
+			if resolved.LastUpdatedAt != nil {
+				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
+				bestReleaseAt = &resolvedReleaseAt
+			} else {
+				bestReleaseAt = nil
+			}
+			continue
+		}
+
+		if bestChapter != nil && resolvedChapter == *bestChapter && resolved.LastUpdatedAt != nil {
+			if bestReleaseAt == nil || resolved.LastUpdatedAt.After(*bestReleaseAt) {
+				bestIndex = idx
+				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
+				bestReleaseAt = &resolvedReleaseAt
+			}
+		}
+	}
+
+	return sources[bestIndex], bestChapter, bestReleaseAt
+}
+
+func (h *DashboardHandler) resolveLinkedSource(parent context.Context, sourceID int64, sourceURL string) (*connectors.MangaResult, error) {
+	if sourceID <= 0 || strings.TrimSpace(sourceURL) == "" {
+		return nil, fmt.Errorf("source is incomplete")
+	}
+
+	source, err := h.sourceRepo.GetByID(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil || !source.Enabled {
+		return nil, fmt.Errorf("source unavailable")
+	}
+
+	connector, ok := h.registry.Get(source.Key)
+	if !ok {
+		return nil, fmt.Errorf("connector unavailable")
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	resolved, err := connector.ResolveByURL(ctx, strings.TrimSpace(sourceURL))
+	if err != nil {
+		return nil, err
+	}
+
+	return resolved, nil
 }
 
 func formatChapterLabel(chapter float64) string {

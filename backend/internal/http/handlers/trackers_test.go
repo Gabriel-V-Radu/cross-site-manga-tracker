@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -319,5 +320,95 @@ func TestTrackersAreIsolatedByProfile(t *testing.T) {
 	profile1Items := profile1Payload["items"].([]any)
 	if len(profile1Items) != 1 {
 		t.Fatalf("expected 1 item in profile1, got %d", len(profile1Items))
+	}
+}
+
+func TestEditTrackerDeletingOriginalLinkedSourcePromotesRemainingSource(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, 1, "Linked Source Switch", 1, "https://mangadex.org/title/original", "reading", 5.0, 10.0)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	trackerID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("tracker id: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+		VALUES (?, ?, ?, ?), (?, ?, ?, ?)
+	`,
+		trackerID, 1, "original", "https://mangadex.org/title/original",
+		trackerID, 2, "replacement", "https://mangaplus.shueisha.co.jp/titles/100",
+	)
+	if err != nil {
+		t.Fatalf("seed tracker sources: %v", err)
+	}
+
+	linkedJSON := `[{"sourceId":2,"sourceItemId":"replacement","sourceUrl":"https://mangaplus.shueisha.co.jp/titles/100"}]`
+	form := url.Values{}
+	form.Set("title", "Linked Source Switch")
+	form.Set("source_id", "1")
+	form.Set("source_url", "https://mangadex.org/title/original")
+	form.Set("status", "reading")
+	form.Set("last_read_chapter", "5")
+	form.Set("latest_known_chapter", "10")
+	form.Set("linked_sources_json", linkedJSON)
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/trackers/"+strconv.FormatInt(trackerID, 10), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard update request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	row := db.QueryRow(`SELECT source_id, source_url FROM trackers WHERE id = ?`, trackerID)
+	var sourceID int64
+	var sourceURL string
+	if err := row.Scan(&sourceID, &sourceURL); err != nil {
+		t.Fatalf("load updated tracker: %v", err)
+	}
+
+	if sourceID != 2 {
+		t.Fatalf("expected tracker source_id to switch to linked source 2, got %d", sourceID)
+	}
+	if sourceURL != "https://mangaplus.shueisha.co.jp/titles/100" {
+		t.Fatalf("expected tracker source_url to switch to linked source URL, got %s", sourceURL)
+	}
+
+	rows, err := db.Query(`SELECT source_id, source_url FROM tracker_sources WHERE tracker_id = ? ORDER BY source_id ASC`, trackerID)
+	if err != nil {
+		t.Fatalf("query tracker_sources: %v", err)
+	}
+	defer rows.Close()
+
+	type trackerSourceRow struct {
+		sourceID  int64
+		sourceURL string
+	}
+	items := make([]trackerSourceRow, 0)
+	for rows.Next() {
+		var item trackerSourceRow
+		if err := rows.Scan(&item.sourceID, &item.sourceURL); err != nil {
+			t.Fatalf("scan tracker source row: %v", err)
+		}
+		items = append(items, item)
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 linked source after deletion, got %d", len(items))
+	}
+	if items[0].sourceID != 2 {
+		t.Fatalf("expected remaining linked source id 2, got %d", items[0].sourceID)
 	}
 }
