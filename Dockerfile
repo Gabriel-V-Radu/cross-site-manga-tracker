@@ -6,7 +6,7 @@ WORKDIR /app/backend
 RUN go mod download
 
 COPY backend/ .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /cross-site-tracker-api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -o /cross-site-tracker-api ./cmd/api
 
 FROM alpine:3.21
 WORKDIR /app
