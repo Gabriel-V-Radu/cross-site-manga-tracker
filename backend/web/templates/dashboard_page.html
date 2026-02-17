@@ -299,6 +299,11 @@
                 setField('input[name="source_url"]', sourceUrl);
                 setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
                 setField('input[name="latest_known_chapter"]', String(incomingLatest));
+
+                var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
+                if (latestReleaseField && typeof button.dataset.latestReleaseAt !== 'undefined') {
+                    latestReleaseField.value = button.dataset.latestReleaseAt || '';
+                }
             }
 
             window.renderLinkedSources(form);
@@ -332,6 +337,11 @@
             setField('input[name="source_url"]', button.dataset.url || '');
             setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
             setField('input[name="latest_known_chapter"]', button.dataset.latestChapter || '');
+
+            var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
+            if (latestReleaseField) {
+                latestReleaseField.value = button.dataset.latestReleaseAt || '';
+            }
         };
 
         document.body.addEventListener('htmx:afterSwap', function (event) {

@@ -15,6 +15,7 @@
             data-source-id="{{$.SourceID}}"
             data-source-name="{{$.SourceName}}"
             data-latest-chapter="{{chapterInputValue .LatestChapter}}"
+            data-latest-release-at="{{timeInputValue .LastUpdatedAt}}"
             onclick="{{if eq $.Intent "link"}}window.addTrackerLinkedSource(this){{else}}window.applyTrackerSearchResult(this){{end}}">
         <span class="search-result-thumb">
             {{if .CoverImageURL}}

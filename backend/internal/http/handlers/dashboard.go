@@ -363,6 +363,8 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
+	h.enrichTrackerFromSource(c.Context(), tracker)
+
 	now := time.Now().UTC()
 	tracker.LastCheckedAt = &now
 
@@ -380,6 +382,46 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 
 	c.Set("HX-Trigger", `{"trackersChanged":true}`)
 	return h.render(c, "empty_modal.html", nil)
+}
+
+func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, tracker *models.Tracker) {
+	if tracker == nil || strings.TrimSpace(tracker.SourceURL) == "" || tracker.SourceID <= 0 {
+		return
+	}
+
+	source, err := h.sourceRepo.GetByID(tracker.SourceID)
+	if err != nil || source == nil || !source.Enabled {
+		return
+	}
+
+	connector, ok := h.registry.Get(source.Key)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	resolved, err := connector.ResolveByURL(ctx, tracker.SourceURL)
+	if err != nil || resolved == nil {
+		return
+	}
+
+	if tracker.SourceItemID == nil {
+		resolvedItemID := strings.TrimSpace(resolved.SourceItemID)
+		if resolvedItemID != "" {
+			tracker.SourceItemID = &resolvedItemID
+		}
+	}
+
+	if tracker.LatestKnownChapter == nil && resolved.LatestChapter != nil {
+		tracker.LatestKnownChapter = resolved.LatestChapter
+	}
+
+	if resolved.LastUpdatedAt != nil {
+		updatedAt := resolved.LastUpdatedAt.UTC()
+		tracker.LatestReleaseAt = &updatedAt
+	}
 }
 
 func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
@@ -529,6 +571,11 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		return nil, fmt.Errorf("Invalid latest known chapter")
 	}
 
+	latestReleaseAt, err := parseOptionalRFC3339Time(c.FormValue("latest_release_at"))
+	if err != nil {
+		return nil, fmt.Errorf("Invalid latest release date")
+	}
+
 	return &models.Tracker{
 		Title:              title,
 		SourceID:           sourceID,
@@ -537,6 +584,7 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		Status:             status,
 		LastReadChapter:    lastRead,
 		LatestKnownChapter: latestKnown,
+		LatestReleaseAt:    latestReleaseAt,
 	}, nil
 }
 
@@ -550,6 +598,19 @@ func parseOptionalFloat(raw string) (*float64, error) {
 		return nil, err
 	}
 	return &value, nil
+}
+
+func parseOptionalRFC3339Time(raw string) (*time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	value, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return nil, err
+	}
+	utc := value.UTC()
+	return &utc, nil
 }
 
 func parseLinkedSourcesFromForm(c *fiber.Ctx) ([]models.TrackerSource, error) {
@@ -626,6 +687,13 @@ func textInputValue(value *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*value)
+}
+
+func timeInputValue(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func relativeTime(value time.Time) string {
@@ -758,6 +826,7 @@ func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) e
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"chapterInputValue": chapterInputValue,
 		"textInputValue":    textInputValue,
+		"timeInputValue":    timeInputValue,
 		"toJSON":            toJSON,
 		"statusLabel":       statusLabel,
 		"sortLabel":         sortLabel,
