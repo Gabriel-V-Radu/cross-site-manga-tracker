@@ -28,3 +28,7 @@ type Connector interface {
 	ResolveByURL(ctx context.Context, rawURL string) (*MangaResult, error)
 	SearchByTitle(ctx context.Context, title string, limit int) ([]MangaResult, error)
 }
+
+type ChapterURLResolver interface {
+	ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error)
+}

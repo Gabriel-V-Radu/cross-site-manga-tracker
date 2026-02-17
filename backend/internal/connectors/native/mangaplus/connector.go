@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -156,6 +157,83 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	}
 
 	return results, nil
+}
+
+func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter")
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if !c.isAllowedHost(parsed.Hostname()) {
+		return "", fmt.Errorf("url does not belong to mangaplus")
+	}
+
+	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	if len(segments) < 2 || segments[0] != "titles" {
+		return "", fmt.Errorf("mangaplus url must match /titles/{id}")
+	}
+
+	titleID := strings.TrimSpace(segments[1])
+	if _, err := strconv.Atoi(titleID); err != nil {
+		return "", fmt.Errorf("invalid mangaplus title id")
+	}
+
+	values := url.Values{}
+	values.Set("title_id", titleID)
+	values.Set("format", "json")
+
+	detailURL := c.apiBaseURL + "/title_detailV3?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, detailURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create title detail request: %w", err)
+	}
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request title detail: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", fmt.Errorf("title detail returned status %d", res.StatusCode)
+	}
+
+	var payload mangaPlusTitleDetailResponse
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode title detail response: %w", err)
+	}
+
+	for _, group := range payload.Success.TitleDetailView.ChapterListGroup {
+		for _, chapterItem := range group.FirstChapterList {
+			if !chapterMatchesValue(chapterItem.Name, chapter) || chapterItem.ChapterID <= 0 {
+				continue
+			}
+			return "https://mangaplus.shueisha.co.jp/viewer/" + strconv.Itoa(chapterItem.ChapterID), nil
+		}
+		for _, chapterItem := range group.MidChapterList {
+			if !chapterMatchesValue(chapterItem.Name, chapter) || chapterItem.ChapterID <= 0 {
+				continue
+			}
+			return "https://mangaplus.shueisha.co.jp/viewer/" + strconv.Itoa(chapterItem.ChapterID), nil
+		}
+		for _, chapterItem := range group.LastChapterList {
+			if !chapterMatchesValue(chapterItem.Name, chapter) || chapterItem.ChapterID <= 0 {
+				continue
+			}
+			return "https://mangaplus.shueisha.co.jp/viewer/" + strconv.Itoa(chapterItem.ChapterID), nil
+		}
+	}
+
+	return "", fmt.Errorf("chapter %.3f not found", chapter)
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
@@ -411,18 +489,29 @@ type mangaPlusTitleDetailResponse struct {
 				ChapterNumbers   string `json:"chapterNumbers"`
 				StartTime        int64  `json:"startTime"`
 				FirstChapterList []struct {
+					ChapterID int    `json:"chapterId"`
 					Name      string `json:"name"`
 					StartTime int64  `json:"startTime"`
 				} `json:"firstChapterList"`
 				MidChapterList []struct {
+					ChapterID int    `json:"chapterId"`
 					Name      string `json:"name"`
 					StartTime int64  `json:"startTime"`
 				} `json:"midChapterList"`
 				LastChapterList []struct {
+					ChapterID int    `json:"chapterId"`
 					Name      string `json:"name"`
 					StartTime int64  `json:"startTime"`
 				} `json:"lastChapterList"`
 			} `json:"chapterListGroup"`
 		} `json:"titleDetailView"`
 	} `json:"success"`
+}
+
+func chapterMatchesValue(raw string, chapter float64) bool {
+	parsed := parseChapterValue(raw)
+	if parsed == nil {
+		return false
+	}
+	return math.Abs(*parsed-chapter) <= 1e-9
 }

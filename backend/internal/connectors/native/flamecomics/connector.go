@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,6 +24,7 @@ var (
 	titleTagPattern               = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
 	metaImagePattern              = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content=["']([^\"]+)["']`)
 	chapterBySeriesPattern        = regexp.MustCompile(`(?i)/series/(\d+)/[a-z0-9]+`)
+	chapterAnchorPattern          = regexp.MustCompile(`(?is)<a[^>]+href=["']((?:https?://[^"']+)?/series/(\d+)/[^"']+)["'][^>]*>(.*?)</a>`)
 	chapterNumberPattern          = regexp.MustCompile(`(?i)Chapter(?:\s|<!--\s*-->|&nbsp;)+([0-9]+(?:\.[0-9]+)?)`)
 	fullDateTimePattern           = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?`)
 	htmlTagPattern                = regexp.MustCompile(`(?is)<[^>]+>`)
@@ -154,6 +156,87 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	}
 
 	return results, nil
+}
+
+func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter")
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if !c.isAllowedHost(parsed.Hostname()) {
+		return "", fmt.Errorf("url does not belong to flamecomics")
+	}
+
+	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	if len(segments) < 2 || segments[0] != "series" {
+		return "", fmt.Errorf("flamecomics url must match /series/{id}")
+	}
+
+	seriesID := strings.TrimSpace(segments[1])
+	if !seriesIDPattern.MatchString(seriesID) {
+		return "", fmt.Errorf("invalid flamecomics series id")
+	}
+
+	body, err := c.fetchPage(ctx, c.baseURL+"/series/"+seriesID)
+	if err != nil {
+		return "", fmt.Errorf("fetch series page: %w", err)
+	}
+
+	matches := chapterAnchorPattern.FindAllStringSubmatchIndex(body, -1)
+	for _, match := range matches {
+		if len(match) < 8 {
+			continue
+		}
+
+		hrefRaw := strings.TrimSpace(html.UnescapeString(body[match[2]:match[3]]))
+		candidateSeriesID := strings.TrimSpace(body[match[4]:match[5]])
+		innerHTML := body[match[6]:match[7]]
+		if candidateSeriesID != seriesID || hrefRaw == "" {
+			continue
+		}
+
+		chapterRaw := firstSubmatch(chapterNumberPattern, innerHTML)
+		if chapterRaw == "" {
+			segmentEnd := match[1] + 500
+			if segmentEnd > len(body) {
+				segmentEnd = len(body)
+			}
+			if match[0] < segmentEnd {
+				segment := body[match[0]:segmentEnd]
+				chapterRaw = firstSubmatch(chapterNumberPattern, segment)
+			}
+		}
+		if chapterRaw == "" {
+			continue
+		}
+
+		parsedChapter, parseErr := strconv.ParseFloat(strings.TrimSpace(chapterRaw), 64)
+		if parseErr != nil {
+			continue
+		}
+		if math.Abs(parsedChapter-chapter) > 1e-9 {
+			continue
+		}
+
+		if strings.HasPrefix(hrefRaw, "http://") || strings.HasPrefix(hrefRaw, "https://") {
+			return hrefRaw, nil
+		}
+		if strings.HasPrefix(hrefRaw, "/") {
+			return "https://flamecomics.xyz" + hrefRaw, nil
+		}
+		return "https://flamecomics.xyz/" + hrefRaw, nil
+	}
+
+	return "", fmt.Errorf("chapter %.3f not found", chapter)
 }
 
 type seriesEntry struct {

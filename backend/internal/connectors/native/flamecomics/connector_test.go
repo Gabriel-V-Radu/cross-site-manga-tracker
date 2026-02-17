@@ -79,3 +79,31 @@ func TestFlameComicsConnectorResolveAndSearch(t *testing.T) {
 		t.Fatalf("expected source id 83 in search, got %s", results[0].SourceItemID)
 	}
 }
+
+func TestFlameComicsResolveChapterURLWithNestedAnchorMarkup(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/series/22", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<body>
+  <a href="/series/22/2dd2ff4ef56a0e99"><span class="chapter-label">Chapter 13</span><span> November 21, 2024 8:49 AM</span></a>
+  <a href="/series/22/75a51e16b796ed2d"><span>Chapter 12</span><span> November 21, 2024 8:49 AM</span></a>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"flamecomics.xyz"}, &http.Client{Timeout: 5 * time.Second})
+
+	chapterURL, err := conn.ResolveChapterURL(context.Background(), "https://flamecomics.xyz/series/22", 13)
+	if err != nil {
+		t.Fatalf("resolve chapter url failed: %v", err)
+	}
+
+	if chapterURL != "https://flamecomics.xyz/series/22/2dd2ff4ef56a0e99" {
+		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+}

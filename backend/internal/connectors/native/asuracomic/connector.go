@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -147,6 +148,38 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	}
 
 	return results, nil
+}
+
+func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter float64) (string, error) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter")
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if !c.isAllowedHost(parsed.Hostname()) {
+		return "", fmt.Errorf("url does not belong to asuracomic")
+	}
+
+	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	if len(segments) < 2 || segments[0] != "series" {
+		return "", fmt.Errorf("asuracomic url must match /series/{id}")
+	}
+
+	seriesID := strings.TrimSpace(segments[1])
+	if seriesID == "" || !isValidSeriesID(seriesID) {
+		return "", fmt.Errorf("invalid asuracomic series id")
+	}
+
+	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
+	return "https://asuracomic.net/series/" + seriesID + "/chapter/" + chapterSegment, nil
 }
 
 func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {

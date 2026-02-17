@@ -276,6 +276,23 @@ input:focus, select:focus {
     padding: 4px 11px;
 }
 
+.tracker-row__chapter-link {
+    text-decoration: none;
+    transition: transform 130ms ease, border-color 130ms ease, box-shadow 130ms ease;
+}
+
+.tracker-row__chapter-link:hover {
+    transform: translateY(-1px);
+    border-color: rgba(157, 177, 209, 0.65);
+    box-shadow: 0 10px 16px -14px rgba(0, 0, 0, 0.9);
+}
+
+.tracker-row__chapter-link--compact {
+    font-size: 0.94rem;
+    line-height: 1.05;
+    padding: 3px 9px;
+}
+
 .tracker-row__chapter--accent {
     color: #98beff;
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -206,6 +207,46 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	}
 
 	return results, nil
+}
+
+func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter float64) (string, error) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter")
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if !c.isAllowedHost(parsed.Hostname()) {
+		return "", fmt.Errorf("url does not belong to mangafire")
+	}
+
+	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	if len(segments) < 2 {
+		return "", fmt.Errorf("mangafire url must include manga id")
+	}
+
+	var sourceItemID string
+	if segments[0] == "manga" {
+		sourceItemID = strings.TrimSpace(segments[1])
+	} else if segments[0] == "read" {
+		sourceItemID = strings.TrimSpace(segments[1])
+	} else {
+		return "", fmt.Errorf("unsupported mangafire path")
+	}
+
+	if sourceItemID == "" {
+		return "", fmt.Errorf("invalid mangafire manga id")
+	}
+
+	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
+	return "https://mangafire.to/read/" + sourceItemID + "/en/chapter-" + chapterSegment, nil
 }
 
 func (c *Connector) appendSitemapMatches(ctx context.Context, baseResults []connectors.MangaResult, query string, queryTokens []string, significantQueryTokens []string, limit int, existing map[string]struct{}) ([]connectors.MangaResult, error) {

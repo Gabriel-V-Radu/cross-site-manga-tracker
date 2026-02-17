@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -207,6 +208,86 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	return items, nil
 }
 
+func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", fmt.Errorf("invalid chapter")
+	}
+
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("url is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if !c.isAllowedHost(parsed.Hostname()) {
+		return "", fmt.Errorf("url does not belong to mangadex")
+	}
+
+	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	if len(segments) < 2 || segments[0] != "title" {
+		return "", fmt.Errorf("mangadex url must match /title/{id}")
+	}
+
+	titleID := strings.TrimSpace(segments[1])
+	if !titleIDPattern.MatchString(titleID) {
+		return "", fmt.Errorf("invalid mangadex title id")
+	}
+
+	values := url.Values{}
+	values.Set("limit", "500")
+	values.Set("offset", "0")
+	values.Set("order[chapter]", "desc")
+	values.Set("includeExternalUrl", "0")
+	values.Add("translatedLanguage[]", "en")
+	values.Add("contentRating[]", "safe")
+	values.Add("contentRating[]", "suggestive")
+	values.Add("contentRating[]", "erotica")
+	values.Add("contentRating[]", "pornographic")
+
+	feedURL := c.apiBaseURL + "/manga/" + titleID + "/feed?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create feed request: %w", err)
+	}
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request feed: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
+	}
+
+	var payload mangaFeedResponse
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode feed response: %w", err)
+	}
+
+	for _, chapterItem := range payload.Data {
+		parsedChapter := parseChapterNumber(chapterItem.Attributes.Chapter)
+		if parsedChapter == nil {
+			continue
+		}
+		if math.Abs(*parsedChapter-chapter) > 1e-9 {
+			continue
+		}
+
+		chapterID := strings.TrimSpace(chapterItem.ID)
+		if chapterID == "" {
+			continue
+		}
+
+		return "https://mangadex.org/chapter/" + chapterID, nil
+	}
+
+	return "", fmt.Errorf("chapter %.3f not found", chapter)
+}
+
 func (c *Connector) isAllowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	for _, allowed := range c.allowedHost {
@@ -367,6 +448,7 @@ type mangaRelationship struct {
 
 type mangaFeedResponse struct {
 	Data []struct {
+		ID         string `json:"id"`
 		Attributes struct {
 			Chapter    string `json:"chapter"`
 			PublishAt  string `json:"publishAt"`

@@ -57,6 +57,8 @@ type trackerCardView struct {
 	Status                 string
 	StatusLabel            string
 	SourceURL              string
+	LatestKnownChapterURL  string
+	LastReadChapterURL     string
 	CoverURL               string
 	LatestKnownChapter     string
 	LatestReleaseAgo       string
@@ -196,6 +198,8 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 			Status:                 item.Status,
 			StatusLabel:            statusLabel(item.Status),
 			SourceURL:              item.SourceURL,
+			LatestKnownChapterURL:  item.SourceURL,
+			LastReadChapterURL:     item.SourceURL,
 			SourceItemID:           item.SourceItemID,
 			LatestKnownChapterRaw:  item.LatestKnownChapter,
 			LastReadChapterRaw:     item.LastReadChapter,
@@ -238,6 +242,15 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		}
 
 		sourceKey := sourceKeyByID[item.SourceID]
+
+		if item.LatestKnownChapter != nil {
+			card.LatestKnownChapterURL = h.resolveChapterURL(c.Context(), sourceKey, item.SourceURL, *item.LatestKnownChapter)
+		}
+
+		if item.LastReadChapter != nil {
+			card.LastReadChapterURL = h.resolveChapterURL(c.Context(), sourceKey, item.SourceURL, *item.LastReadChapter)
+		}
+
 		if coverURL, coverErr := h.fetchCoverURL(c.Context(), sourceKey, item.SourceURL, item.SourceItemID); coverErr == nil {
 			card.CoverURL = coverURL
 		}
@@ -803,6 +816,43 @@ func relativeTime(value time.Time) string {
 	}
 	years := int(delta / (365 * 24 * time.Hour))
 	return fmt.Sprintf("%d years ago", years)
+}
+
+func (h *DashboardHandler) resolveChapterURL(parent context.Context, sourceKey, sourceURL string, chapter float64) string {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return ""
+	}
+
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return trimmedSourceURL
+	}
+
+	connector, ok := h.registry.Get(trimmedSourceKey)
+	if !ok {
+		return trimmedSourceURL
+	}
+
+	resolver, ok := connector.(connectors.ChapterURLResolver)
+	if !ok {
+		return trimmedSourceURL
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	chapterURL, err := resolver.ResolveChapterURL(ctx, trimmedSourceURL, chapter)
+	if err != nil {
+		return trimmedSourceURL
+	}
+
+	chapterURL = strings.TrimSpace(chapterURL)
+	if chapterURL == "" {
+		return trimmedSourceURL
+	}
+
+	return chapterURL
 }
 
 func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sourceURL string, sourceItemID *string) (string, error) {

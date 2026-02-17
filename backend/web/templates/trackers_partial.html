@@ -17,12 +17,26 @@
         </div>
 
         <div class="tracker-row__metric">
+            {{if .LastReadChapterRaw}}
+            <a class="tracker-row__chapter tracker-row__chapter-link"
+                    href="{{.LastReadChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.LastReadChapter}}</a>
+            {{else}}
             <span class="tracker-row__chapter">{{.LastReadChapter}}</span>
+            {{end}}
             <span class="tracker-row__time">Read {{.LastReadAgo}}</span>
         </div>
 
         <div class="tracker-row__metric">
+            {{if .LatestKnownChapterRaw}}
+            <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
+                    href="{{.LatestKnownChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
+            {{else}}
             <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
+            {{end}}
             <span class="tracker-row__time">Released {{.LatestReleaseAgo}}</span>
         </div>
 
@@ -71,7 +85,14 @@
         <div class="tracker-card__stats">
             <div class="stat-row">
                 <span class="stat-label">Latest Known Chapter:</span>
+                {{if .LatestKnownChapterRaw}}
+                     <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
+                         href="{{.LatestKnownChapterURL}}"
+                   target="_blank"
+                   rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
+                {{else}}
                 <span class="stat-value">{{.LatestKnownChapter}}</span>
+                {{end}}
             </div>
             <div class="stat-row">
                 <span class="stat-label">Release Date:</span>
@@ -79,7 +100,14 @@
             </div>
             <div class="stat-row">
                 <span class="stat-label">Last Read Chapter:</span>
+                {{if .LastReadChapterRaw}}
+                     <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
+                         href="{{.LastReadChapterURL}}"
+                   target="_blank"
+                   rel="noopener noreferrer">{{.LastReadChapter}}</a>
+                {{else}}
                 <span class="stat-value">{{.LastReadChapter}}</span>
+                {{end}}
             </div>
             <div class="stat-row">
                 <span class="stat-label">Read Date:</span>
