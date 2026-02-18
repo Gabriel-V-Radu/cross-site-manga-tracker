@@ -250,6 +250,46 @@ input:focus, select:focus {
     box-shadow: 0 0 0 2px rgba(154, 168, 196, 0.18);
 }
 
+.search-input-wrap {
+    position: relative;
+    display: block;
+}
+
+.search-input-wrap input {
+    padding-right: 28px;
+}
+
+.search-clear-btn {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    transform: translateY(-51%);
+    width: 18px;
+    height: 18px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font: inherit;
+    font-size: 18px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    appearance: none;
+    z-index: 2;
+}
+
+.search-clear-btn:hover {
+    color: var(--ink);
+}
+
+.search-clear-btn[hidden] {
+    display: none;
+}
+
 .panel-actions {
     display: flex;
     gap: 10px;
@@ -286,6 +326,14 @@ input:focus, select:focus {
 .pagination {
     display: flex;
     justify-content: center;
+}
+
+.pagination--top {
+    margin-bottom: 16px;
+}
+
+.pagination--bottom {
+    margin-top: 16px;
 }
 
 .pagination__group {

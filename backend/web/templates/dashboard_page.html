@@ -43,7 +43,14 @@
                   class="filters-grid">
                 <label>
                     Search
-                    <input type="text" id="dashboard-search-input" name="q" placeholder="Title">
+                    <span class="search-input-wrap">
+                        <input type="text" id="dashboard-search-input" name="q" placeholder="Title">
+                        <button type="button"
+                                id="dashboard-search-clear"
+                                class="search-clear-btn"
+                                hidden
+                                aria-label="Clear search">x</button>
+                    </span>
                 </label>
                 <label>
                     Status
@@ -247,13 +254,41 @@
 
                 var searchInput = filtersForm.querySelector('input[name="q"]');
                 if (searchInput) {
+                    var searchClearButton = document.getElementById('dashboard-search-clear');
+                    var syncSearchClearButton = function () {
+                        if (!searchClearButton) {
+                            return;
+                        }
+                        searchClearButton.hidden = !searchInput.value;
+                    };
+
                     searchInput.addEventListener('input', function () {
                         var inputPage = document.getElementById('page-input');
                         if (inputPage) {
                             inputPage.value = '1';
                         }
+                        syncSearchClearButton();
                         scheduleSearchRefresh();
                     });
+
+                    syncSearchClearButton();
+
+                    if (searchClearButton) {
+                        searchClearButton.addEventListener('click', function () {
+                            if (!searchInput.value) {
+                                return;
+                            }
+
+                            searchInput.value = '';
+                            var clearPageInput = document.getElementById('page-input');
+                            if (clearPageInput) {
+                                clearPageInput.value = '1';
+                            }
+                            syncSearchClearButton();
+                            searchInput.focus();
+                            dispatchTrackersChanged();
+                        });
+                    }
                 }
             }
         });

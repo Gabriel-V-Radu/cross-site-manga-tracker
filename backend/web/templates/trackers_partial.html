@@ -4,6 +4,39 @@
     <p>Try a different filter, or add your first source entry.</p>
 </div>
 {{else}}
+{{if gt .TotalPages 1}}
+<div class="pagination pagination--top">
+    <div class="pagination__group" role="navigation" aria-label="Pagination">
+        <button type="button"
+                class="pagination-btn js-page-btn"
+                data-page-value="{{.PrevPage}}"
+                {{if not .HasPrevPage}}disabled{{end}}>
+            &#8249;
+        </button>
+
+        {{range .PageNumbers}}
+        {{if eq . 0}}
+        <span class="pagination-ellipsis" aria-hidden="true">&hellip;</span>
+        {{else}}
+        <button type="button"
+                class="pagination-btn {{if eq . $.Page}}pagination-btn--active {{end}}js-page-btn"
+                data-page-value="{{.}}"
+                {{if eq . $.Page}}aria-current="page"{{end}}>
+            {{.}}
+        </button>
+        {{end}}
+        {{end}}
+
+        <button type="button"
+                class="pagination-btn js-page-btn"
+                data-page-value="{{.NextPage}}"
+                {{if not .HasNextPage}}disabled{{end}}>
+            &#8250;
+        </button>
+    </div>
+</div>
+{{end}}
+
 {{if eq .ViewMode "list"}}
 <div id="cards-container-list" class="cards-list">
     {{range .Trackers}}
@@ -19,7 +52,7 @@
 {{end}}
 
 {{if gt .TotalPages 1}}
-<div class="pagination" style="margin-top:16px;">
+<div class="pagination pagination--bottom">
     <div class="pagination__group" role="navigation" aria-label="Pagination">
         <button type="button"
                 class="pagination-btn js-page-btn"
