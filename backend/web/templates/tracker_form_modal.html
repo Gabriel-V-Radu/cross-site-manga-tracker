@@ -37,6 +37,7 @@
                        hx-get="/dashboard/trackers/search"
                        hx-target="#source-search-results"
                        hx-trigger="keyup changed delay:350ms"
+                       hx-sync="this:replace"
                        hx-include="[name='source_id'], #source-search-input"
                        hx-indicator="#source-search-loading">
             </label>
@@ -71,6 +72,7 @@
                        hx-get="/dashboard/trackers/search"
                        hx-target="#linked-search-results"
                        hx-trigger="keyup changed delay:350ms"
+                       hx-sync="this:replace"
                        hx-vals='{"intent":"link"}'
                        hx-include="#linked-source-id, #linked-search-input"
                        hx-params="not source_id,q"
