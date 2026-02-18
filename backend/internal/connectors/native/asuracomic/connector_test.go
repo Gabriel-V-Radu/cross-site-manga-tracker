@@ -144,3 +144,60 @@ func TestAsuraComicConnectorSupportsBareChapterPathPattern(t *testing.T) {
 		t.Fatalf("expected latest chapter release date 2026-02-11, got %v", resolved.LastUpdatedAt)
 	}
 }
+
+func TestAsuraComicConnectorSearchSupportsSeriesHrefWithoutLeadingSlash(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/series", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("name") != "solo leveling" {
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+			return
+		}
+
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<body>
+  <a href="series/solo-leveling-ragnarok-c739e802">Solo Leveling: Ragnarok</a>
+  <a href="series/solo-leveling-26b0cf1b">Solo Leveling</a>
+</body>
+</html>`))
+	})
+
+	mux.HandleFunc("/series/solo-leveling-ragnarok-c739e802", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Solo Leveling: Ragnarok - Asura Scans">
+</head>
+<body>
+  <a href="/series/solo-leveling-ragnarok-c739e802/chapter/68">Chapter 68</a>
+</body>
+</html>`))
+	})
+
+	mux.HandleFunc("/series/solo-leveling-26b0cf1b", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Solo Leveling - Asura Scans">
+</head>
+<body>
+  <a href="/series/solo-leveling-26b0cf1b/chapter/200">Chapter 200</a>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	results, err := conn.SearchByTitle(context.Background(), "solo leveling", 10)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+}

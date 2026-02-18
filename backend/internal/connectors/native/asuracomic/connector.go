@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	seriesHrefPattern          = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/series/([a-z0-9-]+)["']`)
+	seriesHrefPattern          = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/?series/([a-z0-9-]+)["']`)
 	htmlTagPattern             = regexp.MustCompile(`(?is)<[^>]+>`)
 	whitespacePattern          = regexp.MustCompile(`\s+`)
 	chapterHrefPattern         = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
@@ -298,7 +298,7 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 	if seriesID == "" {
 		return ""
 	}
-	pattern := regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/series/` + regexp.QuoteMeta(seriesID) + `["'][^>]*>(.*?)</a>`)
+	pattern := regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/?series/` + regexp.QuoteMeta(seriesID) + `["'][^>]*>(.*?)</a>`)
 	matches := pattern.FindAllStringSubmatch(body, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
