@@ -1806,38 +1806,77 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		return "", fmt.Errorf("cover not found")
 	}
 
-	connector, ok := h.registry.Get(trimmedSourceKey)
-	if !ok {
-		h.setCachedCover(cacheKey, "", false, 30*time.Minute)
-		return "", fmt.Errorf("connector not found")
-	}
-
 	resolvedURL := strings.TrimSpace(sourceURL)
 	if resolvedURL == "" {
 		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
 		return "", fmt.Errorf("missing source url")
 	}
 
+	tryKeys := make([]string, 0, 2)
+	tryKeys = append(tryKeys, trimmedSourceKey)
+
+	if fallbackKey := inferSourceKeyFromURL(resolvedURL); fallbackKey != "" && fallbackKey != trimmedSourceKey {
+		tryKeys = append(tryKeys, fallbackKey)
+	}
+
+	for _, key := range tryKeys {
+		coverURL, err := h.resolveCoverFromConnector(parent, key, resolvedURL)
+		if err != nil {
+			continue
+		}
+		if coverURL == "" {
+			continue
+		}
+
+		h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
+		return coverURL, nil
+	}
+
+	h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+	return "", fmt.Errorf("cover not found")
+}
+
+func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sourceKey, sourceURL string) (string, error) {
+	connector, ok := h.registry.Get(strings.TrimSpace(sourceKey))
+	if !ok {
+		return "", fmt.Errorf("connector not found")
+	}
+
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 
-	result, err := connector.ResolveByURL(ctx, resolvedURL)
+	result, err := connector.ResolveByURL(ctx, sourceURL)
 	if err != nil {
-		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
-		return "", fmt.Errorf("resolve source url: %w", err)
+		return "", err
+	}
+	if result == nil {
+		return "", fmt.Errorf("empty result")
 	}
 
-	coverURL := ""
-	if result != nil {
-		coverURL = strings.TrimSpace(result.CoverImageURL)
-	}
-	if coverURL == "" {
-		h.setCachedCover(cacheKey, "", false, 30*time.Minute)
-		return "", fmt.Errorf("cover not found")
+	return strings.TrimSpace(result.CoverImageURL), nil
+}
+
+func inferSourceKeyFromURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
 	}
 
-	h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
-	return coverURL, nil
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	switch {
+	case strings.Contains(host, "mangadex"):
+		return "mangadex"
+	case strings.Contains(host, "mangafire"):
+		return "mangafire"
+	case strings.Contains(host, "mangaplus") || strings.Contains(host, "shueisha"):
+		return "mangaplus"
+	case strings.Contains(host, "asura"):
+		return "asuracomic"
+	case strings.Contains(host, "flame"):
+		return "flamecomics"
+	default:
+		return ""
+	}
 }
 
 func buildCoverCacheKey(sourceKey, sourceURL string, sourceItemID *string) string {
