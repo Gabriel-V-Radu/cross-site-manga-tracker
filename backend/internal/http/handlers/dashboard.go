@@ -172,10 +172,10 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		registry:           registry,
 		coverCache:         make(map[string]coverCacheEntry),
 		coverInFlight:      make(map[string]bool),
-		coverFetchSem:      make(chan struct{}, 4),
+		coverFetchSem:      make(chan struct{}, 8),
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
-		chapterURLFetchSem: make(chan struct{}, 6),
+		chapterURLFetchSem: make(chan struct{}, 10),
 	}
 }
 
