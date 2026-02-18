@@ -21,15 +21,17 @@
 <div class="panel-actions" style="margin-top:16px; justify-content:flex-end;">
     {{if .HasPrevPage}}
     <button type="button"
-            class="action-btn"
-            onclick="var pageInput=document.getElementById('page-input'); if(pageInput){ pageInput.value=String(Math.max(1, {{.Page}} - 1)); } document.body.dispatchEvent(new Event('trackersChanged'));">
+            class="action-btn js-page-btn"
+            data-page-target="{{.Page}}"
+            data-page-delta="-1">
         Previous
     </button>
     {{end}}
     {{if .HasNextPage}}
     <button type="button"
-            class="action-btn action-btn--accent"
-            onclick="var pageInput=document.getElementById('page-input'); if(pageInput){ pageInput.value=String({{.Page}} + 1); } document.body.dispatchEvent(new Event('trackersChanged'));">
+            class="action-btn action-btn--accent js-page-btn"
+            data-page-target="{{.Page}}"
+            data-page-delta="1">
         Next
     </button>
     {{end}}

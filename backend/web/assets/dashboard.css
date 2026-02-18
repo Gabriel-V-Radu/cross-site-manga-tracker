@@ -283,6 +283,84 @@ input:focus, select:focus {
     margin-top: 24px;
 }
 
+.trackers-loading__label {
+    margin: 0 0 10px;
+    color: var(--ink-soft);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+}
+
+.trackers-loading__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+}
+
+.tracker-card--skeleton {
+    pointer-events: none;
+}
+
+.tracker-row--skeleton {
+    pointer-events: none;
+}
+
+.skeleton {
+    border-radius: 8px;
+    background: linear-gradient(90deg, rgba(55, 72, 96, 0.45) 0%, rgba(77, 97, 126, 0.55) 50%, rgba(55, 72, 96, 0.45) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-wave 1.15s ease-in-out infinite;
+}
+
+.skeleton--title {
+    width: 70%;
+    height: 18px;
+    margin-bottom: 12px;
+}
+
+.skeleton--cover {
+    width: 100%;
+    aspect-ratio: 1440 / 2048;
+    margin-bottom: 12px;
+}
+
+.skeleton--line {
+    width: 100%;
+    height: 12px;
+    margin-top: 8px;
+}
+
+.skeleton--line-short {
+    width: 64%;
+}
+
+.skeleton--title-wide {
+    width: min(420px, 88%);
+}
+
+.skeleton--badge {
+    width: 86px;
+    height: 24px;
+    border-radius: 999px;
+}
+
+.skeleton--chip {
+    width: 92px;
+    height: 30px;
+    border-radius: 999px;
+}
+
+.skeleton--btn {
+    width: 78px;
+    height: 30px;
+    border-radius: 8px;
+}
+
+@keyframes skeleton-wave {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .cards-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

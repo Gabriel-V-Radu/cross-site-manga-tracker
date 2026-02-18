@@ -39,7 +39,7 @@
             <form id="tracker-filters"
                   hx-get="/dashboard/trackers"
                   hx-target="#trackers-zone"
-                                hx-trigger="change, keyup changed delay:300ms from:input[name='q'], load, trackersChanged from:body"
+                hx-trigger="change, keyup changed delay:300ms from:input[name='q'], load, trackersChanged from:body"
                   class="filters-grid">
                 <label>
                     Search
@@ -254,6 +254,86 @@
             }
 
             dropdown.removeAttribute('open');
+        });
+
+        document.addEventListener('click', function (event) {
+            var button = event.target && event.target.closest ? event.target.closest('.js-page-btn') : null;
+            if (!button) {
+                return;
+            }
+
+            var base = Number(button.getAttribute('data-page-target') || '1');
+            var delta = Number(button.getAttribute('data-page-delta') || '0');
+            var nextPage = Math.max(1, base + delta);
+            var pageInput = document.getElementById('page-input');
+            if (pageInput) {
+                pageInput.value = String(nextPage);
+            }
+
+            window.__scrollTrackersToTop = true;
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        });
+
+        window.renderTrackersSkeleton = function (viewMode) {
+            var trackersZone = document.getElementById('trackers-zone');
+            if (!trackersZone) {
+                return;
+            }
+
+            var mode = (viewMode === 'list') ? 'list' : 'grid';
+            var itemCount = 6;
+            var items = [];
+
+            for (var i = 0; i < itemCount; i += 1) {
+                if (mode === 'list') {
+                    items.push('' +
+                        '<article class="tracker-row tracker-card tracker-row--skeleton">' +
+                            '<div class="tracker-row__title-wrap"><div class="skeleton skeleton--title skeleton--title-wide"></div></div>' +
+                            '<div class="tracker-row__status"><div class="skeleton skeleton--badge"></div></div>' +
+                            '<div class="tracker-row__metric"><div class="skeleton skeleton--chip"></div><div class="skeleton skeleton--line skeleton--line-short"></div></div>' +
+                            '<div class="tracker-row__metric"><div class="skeleton skeleton--chip"></div><div class="skeleton skeleton--line skeleton--line-short"></div></div>' +
+                            '<div class="tracker-row__actions"><div class="skeleton skeleton--btn"></div><div class="skeleton skeleton--btn"></div><div class="skeleton skeleton--btn"></div></div>' +
+                        '</article>');
+                    continue;
+                }
+
+                items.push('' +
+                    '<article class="tracker-card tracker-card--skeleton">' +
+                        '<div class="skeleton skeleton--title"></div>' +
+                        '<div class="skeleton skeleton--cover"></div>' +
+                        '<div class="skeleton skeleton--line"></div>' +
+                        '<div class="skeleton skeleton--line skeleton--line-short"></div>' +
+                    '</article>');
+            }
+
+            trackersZone.innerHTML = '' +
+                '<p class="trackers-loading__label">Loading trackers…</p>' +
+                '<div class="' + (mode === 'list' ? 'cards-list' : 'cards-grid') + '">' + items.join('') + '</div>';
+        };
+
+        document.body.addEventListener('htmx:beforeRequest', function (event) {
+            var detail = event && event.detail;
+            if (!detail || !detail.target || detail.target.id !== 'trackers-zone') {
+                return;
+            }
+
+            var viewInput = document.getElementById('view-input');
+            var mode = viewInput && viewInput.value ? viewInput.value : 'grid';
+            window.renderTrackersSkeleton(mode);
+        });
+
+        document.body.addEventListener('htmx:afterSwap', function (event) {
+            if (!event || !event.target || event.target.id !== 'trackers-zone') {
+                return;
+            }
+
+            if (window.__scrollTrackersToTop) {
+                var trackersZone = document.getElementById('trackers-zone');
+                if (trackersZone) {
+                    trackersZone.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+                window.__scrollTrackersToTop = false;
+            }
         });
 
         window.renderLinkedSources = function (form) {
