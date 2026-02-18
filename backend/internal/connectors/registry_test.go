@@ -67,6 +67,9 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	if err := r.Register(&fakeConnector{key: "flamecomics", name: "FlameComics", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register flamecomics: %v", err)
 	}
+	if err := r.Register(&fakeConnector{key: "webtoons", name: "WEBTOON", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register webtoons: %v", err)
+	}
 
 	tests := []string{
 		"mangafire",
@@ -107,6 +110,20 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	for _, key := range flameTests {
 		if _, ok := r.Get(key); !ok {
 			t.Fatalf("expected flamecomics connector for key %q", key)
+		}
+	}
+
+	webtoonsTests := []string{
+		"webtoons",
+		"WebToons",
+		"webtoons.com",
+		"https://www.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208",
+		"https://m.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208",
+	}
+
+	for _, key := range webtoonsTests {
+		if _, ok := r.Get(key); !ok {
+			t.Fatalf("expected webtoons connector for key %q", key)
 		}
 	}
 }

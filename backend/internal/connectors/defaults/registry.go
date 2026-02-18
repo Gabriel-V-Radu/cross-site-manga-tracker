@@ -9,6 +9,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangadex"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangaplus"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/webtoons"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/yamlconnector"
 )
 
@@ -19,6 +20,7 @@ func NewRegistry(yamlConnectorsPath string) (*connectors.Registry, error) {
 	_ = registry.Register(mangafire.NewConnector())
 	_ = registry.Register(asuracomic.NewConnector())
 	_ = registry.Register(flamecomics.NewConnector())
+	_ = registry.Register(webtoons.NewConnector())
 
 	loaded, loadErr := yamlconnector.LoadFromDir(yamlConnectorsPath, nil)
 	for _, connector := range loaded {

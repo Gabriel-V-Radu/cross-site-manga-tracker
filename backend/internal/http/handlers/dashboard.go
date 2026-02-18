@@ -1102,7 +1102,7 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 		}
 	}
 
-	if tracker.LatestKnownChapter == nil && resolved.LatestChapter != nil {
+	if (tracker.LatestKnownChapter == nil || *tracker.LatestKnownChapter <= 0) && resolved.LatestChapter != nil {
 		tracker.LatestKnownChapter = resolved.LatestChapter
 	}
 
@@ -1798,6 +1798,8 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "asuracomic"
 	case strings.Contains(host, "flame"):
 		return "flamecomics"
+	case strings.Contains(host, "webtoons"):
+		return "webtoons"
 	default:
 		return ""
 	}
