@@ -31,6 +31,7 @@ type DashboardHandler struct {
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}
+	mangafireCoverSem  chan struct{}
 	chapterURLCache    map[string]chapterURLCacheEntry
 	chapterURLCacheMu  sync.RWMutex
 	chapterURLFetchMu  sync.Mutex
@@ -176,6 +177,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		coverCache:         make(map[string]coverCacheEntry),
 		coverInFlight:      make(map[string]bool),
 		coverFetchSem:      make(chan struct{}, 8),
+		mangafireCoverSem:  make(chan struct{}, 1),
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 10),
@@ -659,9 +661,18 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 	h.coverFetchMu.Unlock()
 
 	go func() {
-		h.coverFetchSem <- struct{}{}
+		isMangafire := strings.EqualFold(strings.TrimSpace(sourceKey), "mangafire")
+		if isMangafire {
+			h.mangafireCoverSem <- struct{}{}
+		} else {
+			h.coverFetchSem <- struct{}{}
+		}
 		defer func() {
-			<-h.coverFetchSem
+			if isMangafire {
+				<-h.mangafireCoverSem
+			} else {
+				<-h.coverFetchSem
+			}
 			h.coverFetchMu.Lock()
 			delete(h.coverInFlight, cacheKey)
 			h.coverFetchMu.Unlock()
@@ -683,6 +694,10 @@ func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL strin
 
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
+		return trimmedSourceURL, false
+	}
+
+	if strings.EqualFold(trimmedSourceKey, "mangafire") {
 		return trimmedSourceURL, false
 	}
 
@@ -1742,7 +1757,18 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		return coverURL, nil
 	}
 
-	h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+	missTTL := 2 * time.Minute
+	if strings.EqualFold(trimmedSourceKey, "mangafire") {
+		missTTL = 25 * time.Second
+	}
+	for _, detail := range errorsByKey {
+		lower := strings.ToLower(detail)
+		if strings.Contains(lower, "429") || strings.Contains(lower, "deadline") {
+			missTTL = 25 * time.Second
+			break
+		}
+	}
+	h.setCachedCover(cacheKey, "", false, missTTL)
 	slog.Warn("cover resolution failed",
 		"cacheKey", cacheKey,
 		"sourceURL", resolvedURL,
@@ -1759,7 +1785,11 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 		return "", fmt.Errorf("connector not found")
 	}
 
-	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	resolveTimeout := 8 * time.Second
+	if strings.EqualFold(strings.TrimSpace(sourceKey), "mangafire") {
+		resolveTimeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
 	defer cancel()
 
 	result, err := connector.ResolveByURL(ctx, sourceURL)
