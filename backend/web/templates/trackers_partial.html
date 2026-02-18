@@ -60,6 +60,11 @@
             return;
         }
 
+        if (window.__pendingTrackersRefreshTimer) {
+            window.clearTimeout(window.__pendingTrackersRefreshTimer);
+            window.__pendingTrackersRefreshTimer = null;
+        }
+
         if (!window.__coverRefreshAttempts) {
             window.__coverRefreshAttempts = {};
         }
@@ -72,7 +77,8 @@
 
         window.__coverRefreshAttempts[refreshKey] = attempts + 1;
         var delayMs = Math.min(3000, 600 + (attempts * 200));
-        window.setTimeout(function () {
+        window.__pendingTrackersRefreshTimer = window.setTimeout(function () {
+            window.__pendingTrackersRefreshTimer = null;
             window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
         }, delayMs);
@@ -81,6 +87,11 @@
 {{else}}
 <script>
     (function () {
+        if (window.__pendingTrackersRefreshTimer) {
+            window.clearTimeout(window.__pendingTrackersRefreshTimer);
+            window.__pendingTrackersRefreshTimer = null;
+        }
+
         var refreshKey = "{{.RefreshKey}}";
         if (!refreshKey || !window.__coverRefreshAttempts) {
             return;

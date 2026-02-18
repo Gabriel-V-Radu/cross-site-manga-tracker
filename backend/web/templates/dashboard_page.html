@@ -39,11 +39,11 @@
             <form id="tracker-filters"
                   hx-get="/dashboard/trackers"
                   hx-target="#trackers-zone"
-                hx-trigger="change, keyup changed delay:300ms from:input[name='q'], load, trackersChanged from:body"
+                  hx-trigger="load, trackersChanged from:body"
                   class="filters-grid">
                 <label>
                     Search
-                    <input type="text" name="q" placeholder="Title">
+                    <input type="text" id="dashboard-search-input" name="q" placeholder="Title">
                 </label>
                 <label>
                     Status
@@ -202,23 +202,56 @@
 
             var filtersForm = document.getElementById('tracker-filters');
             if (filtersForm) {
-                filtersForm.addEventListener('change', function (event) {
-                    if (!event || !event.target || event.target.name === 'page') {
+                var dispatchTrackersChanged = function () {
+                    if (!document || !document.body) {
                         return;
                     }
-                    var pageInput = document.getElementById('page-input');
-                    if (pageInput) {
-                        pageInput.value = '1';
+                    document.body.dispatchEvent(new Event('trackersChanged'));
+                };
+
+                var searchDebounceTimer = null;
+                var scheduleSearchRefresh = function () {
+                    if (searchDebounceTimer) {
+                        window.clearTimeout(searchDebounceTimer);
                     }
+                    searchDebounceTimer = window.setTimeout(function () {
+                        searchDebounceTimer = null;
+                        dispatchTrackersChanged();
+                    }, 300);
+                };
+
+                filtersForm.addEventListener('change', function (event) {
+                    var target = event && event.target;
+                    if (!target || target.name === 'page') {
+                        return;
+                    }
+
+                    var shouldRefresh = false;
+                    if (target.tagName === 'SELECT') {
+                        shouldRefresh = true;
+                    } else if (target.name === 'tags') {
+                        shouldRefresh = true;
+                    }
+
+                    if (!shouldRefresh) {
+                        return;
+                    }
+
+                    var changedPageInput = document.getElementById('page-input');
+                    if (changedPageInput) {
+                        changedPageInput.value = '1';
+                    }
+                    dispatchTrackersChanged();
                 });
 
                 var searchInput = filtersForm.querySelector('input[name="q"]');
                 if (searchInput) {
                     searchInput.addEventListener('input', function () {
-                        var pageInput = document.getElementById('page-input');
-                        if (pageInput) {
-                            pageInput.value = '1';
+                        var inputPage = document.getElementById('page-input');
+                        if (inputPage) {
+                            inputPage.value = '1';
                         }
+                        scheduleSearchRefresh();
                     });
                 }
             }
@@ -255,6 +288,17 @@
 
             dropdown.removeAttribute('open');
         });
+
+        var cancelPendingTrackersRefresh = function () {
+            if (!window.__pendingTrackersRefreshTimer) {
+                return;
+            }
+            window.clearTimeout(window.__pendingTrackersRefreshTimer);
+            window.__pendingTrackersRefreshTimer = null;
+        };
+
+        document.addEventListener('pointerdown', cancelPendingTrackersRefresh, true);
+        document.addEventListener('keydown', cancelPendingTrackersRefresh, true);
 
         document.addEventListener('click', function (event) {
             var button = event.target && event.target.closest ? event.target.closest('.js-page-btn') : null;
