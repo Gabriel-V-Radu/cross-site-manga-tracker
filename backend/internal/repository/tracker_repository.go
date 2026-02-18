@@ -208,11 +208,18 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 
 	if len(options.Statuses) > 0 {
 		placeholders := make([]string, 0, len(options.Statuses))
+		hasReading := false
 		for _, status := range options.Statuses {
+			if strings.EqualFold(strings.TrimSpace(status), "reading") {
+				hasReading = true
+			}
 			placeholders = append(placeholders, "?")
 			args = append(args, status)
 		}
 		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
+		if hasReading {
+			whereClauses = append(whereClauses, `(status <> 'reading' OR latest_known_chapter IS NULL OR last_read_chapter IS NULL OR last_read_chapter < latest_known_chapter)`)
+		}
 	}
 
 	if len(options.TagNames) > 0 {

@@ -177,7 +177,7 @@ func toString(value int) string {
 	return strconv.Itoa(value)
 }
 
-func TestDashboardReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
+func TestDashboardReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
@@ -211,8 +211,8 @@ func TestDashboardReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	if !strings.Contains(html, "Behind Tracker") {
 		t.Fatalf("expected reading filter response to include unfinished tracker")
 	}
-	if !strings.Contains(html, "Caught Up Tracker") {
-		t.Fatalf("expected reading filter response to include caught-up tracker")
+	if strings.Contains(html, "Caught Up Tracker") {
+		t.Fatalf("expected reading filter response to exclude caught-up tracker")
 	}
 }
 
@@ -388,7 +388,7 @@ func TestNewTrackerModalRenders(t *testing.T) {
 	}
 }
 
-func TestAPIReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
+func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
@@ -422,8 +422,8 @@ func TestAPIReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	if !ok {
 		t.Fatalf("items missing or invalid type")
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 items in reading filter, got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item in reading filter, got %d", len(items))
 	}
 
 	titles := map[string]bool{}
@@ -439,8 +439,8 @@ func TestAPIReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	if !titles["API Behind Tracker"] {
 		t.Fatalf("expected API Behind Tracker in reading filter response")
 	}
-	if !titles["API Caught Up Tracker"] {
-		t.Fatalf("expected API Caught Up Tracker in reading filter response")
+	if titles["API Caught Up Tracker"] {
+		t.Fatalf("expected API Caught Up Tracker to be excluded from reading filter response")
 	}
 }
 
