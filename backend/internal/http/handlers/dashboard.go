@@ -60,6 +60,13 @@ type trackersPartialData struct {
 	ViewMode string
 }
 
+type trackerOOBResponseData struct {
+	ViewMode        string
+	ReplaceCard     *trackerCardView
+	PrependCard     *trackerCardView
+	DeleteTrackerID int64
+}
+
 type trackerCardView struct {
 	ID                     int64
 	Title                  string
@@ -367,10 +374,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		statuses = append(statuses, status)
 	}
 
-	viewMode := strings.TrimSpace(c.Query("view", "grid"))
-	if viewMode != "grid" && viewMode != "list" {
-		viewMode = "grid"
-	}
+	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
 	items, err := h.trackerRepo.List(repository.TrackerListOptions{
 		ProfileID: activeProfile.ID,
@@ -394,6 +398,20 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		sourceKeyByID[source.ID] = source.Key
 	}
 
+	cards := h.buildTrackerCards(c, items, sourceKeyByID)
+
+	return h.render(c, "trackers_partial.html", trackersPartialData{Trackers: cards, ViewMode: viewMode})
+}
+
+func normalizeViewMode(raw string) string {
+	viewMode := strings.TrimSpace(raw)
+	if viewMode != "grid" && viewMode != "list" {
+		return "grid"
+	}
+	return viewMode
+}
+
+func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) []trackerCardView {
 	cards := make([]trackerCardView, 0, len(items))
 	for _, item := range items {
 		tagViews := toTrackerTagView(item.Tags)
@@ -468,7 +486,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		cards = append(cards, card)
 	}
 
-	return h.render(c, "trackers_partial.html", trackersPartialData{Trackers: cards, ViewMode: viewMode})
+	return cards
 }
 
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
@@ -745,6 +763,8 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
 
+	viewMode := normalizeViewMode(c.FormValue("view_mode", "grid"))
+
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
@@ -832,8 +852,28 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tracker tags")
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
-	return h.render(c, "empty_modal.html", nil)
+	fullTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	if err != nil || fullTracker == nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	sourceKeyByID, err := h.listSourceKeys()
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID)
+	if len(cards) == 0 {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
+		ViewMode:    viewMode,
+		ReplaceCard: &cards[0],
+	})
 }
 
 func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
@@ -855,8 +895,7 @@ func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
-	return h.render(c, "empty_modal.html", nil)
+	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{DeleteTrackerID: id})
 }
 
 func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
@@ -864,6 +903,8 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
+
+	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -885,8 +926,42 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		}
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
-	return h.render(c, "empty_modal.html", nil)
+	updatedTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	if err != nil || updatedTracker == nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	sourceKeyByID, err := h.listSourceKeys()
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID)
+	if len(cards) == 0 {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
+		ViewMode:    viewMode,
+		ReplaceCard: &cards[0],
+	})
+}
+
+func (h *DashboardHandler) listSourceKeys() (map[int64]string, error) {
+	sources, err := h.sourceRepo.ListEnabled()
+	if err != nil {
+		return nil, err
+	}
+
+	sourceKeyByID := make(map[int64]string, len(sources))
+	for _, source := range sources {
+		sourceKeyByID[source.ID] = source.Key
+	}
+
+	return sourceKeyByID, nil
 }
 
 func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {

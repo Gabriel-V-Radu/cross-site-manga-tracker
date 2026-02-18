@@ -1,0 +1,150 @@
+{{define "tracker_card_list"}}
+<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card">
+    <div class="tracker-row__title-wrap">
+        <h3>{{.Title}}</h3>
+    </div>
+
+    <div class="tracker-row__status">
+        <span class="badge badge--status" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .LastReadChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter-link"
+                href="{{.LastReadChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.LastReadChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter">{{.LastReadChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Read {{.LastReadAgo}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .LatestKnownChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
+                href="{{.LatestKnownChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Released {{.LatestReleaseAgo}}</span>
+    </div>
+
+    <div class="tracker-row__actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Open</a>
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{end}}
+
+{{define "tracker_card_grid"}}
+<article id="tracker-card-{{.ID}}" class="tracker-card">
+    <header class="tracker-card__header">
+        <h3>{{.Title}}</h3>
+        <span class="badge" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
+    </header>
+
+    <div class="tracker-card__cover">
+        {{if .CoverURL}}
+        <img src="{{.CoverURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
+        {{else}}
+        <div class="tracker-card__cover-title">{{.Title}}</div>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__tags{{if gt .HiddenTagCount 0}} tracker-card__tags--more{{end}}">
+        {{range .Tags}}
+        <span class="tracker-tag-chip">
+            {{if .IconPath}}
+            <img class="tracker-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}" loading="lazy">
+            {{end}}
+            {{.Name}}
+        </span>
+        {{end}}
+        {{if gt .HiddenTagCount 0}}
+        <span class="tracker-tag-chip tracker-tag-chip--more">...</span>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__stats">
+        <div class="stat-row">
+            <span class="stat-label">Latest Known Chapter:</span>
+            {{if .LatestKnownChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.LatestKnownChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.LatestKnownChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Release Date:</span>
+            <span class="stat-value">{{.LatestReleaseAgo}}</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Last Read Chapter:</span>
+            {{if .LastReadChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.LastReadChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.LastReadChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.LastReadChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Read Date:</span>
+            <span class="stat-value">{{.LastReadAgo}}</span>
+        </div>
+    </div>
+
+    <div class="card-actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Highlight</a>
+    </div>
+
+    <div class="card-actions card-actions--secondary">
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{end}}

@@ -215,6 +215,34 @@ func TestDashboardReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	}
 }
 
+func TestNewTrackerModalRenders(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers/new", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("new tracker modal request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read new tracker modal body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "<form class=\"tracker-form\"") {
+		t.Fatalf("expected new tracker modal to include tracker form")
+	}
+	if !strings.Contains(html, "name=\"view_mode\"") {
+		t.Fatalf("expected new tracker modal to include view_mode hidden input")
+	}
+}
+
 func TestAPIReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()

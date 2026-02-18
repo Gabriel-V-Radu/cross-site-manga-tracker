@@ -1,0 +1,336 @@
+{{if gt .DeleteTrackerID 0}}
+<div hx-swap-oob="delete:#tracker-card-{{.DeleteTrackerID}}"></div>
+{{end}}
+
+{{if .ReplaceCard}}
+{{if .DeleteTrackerID}}
+<script>
+    (function () {
+        var node = document.getElementById('tracker-card-{{.DeleteTrackerID}}');
+        if (!node && document && document.body) {
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        }
+    })();
+</script>
+{{end}}
+{{if eq .ViewMode "list"}}
+<article id="tracker-card-{{.ReplaceCard.ID}}" class="tracker-row tracker-card" hx-swap-oob="outerHTML:#tracker-card-{{.ReplaceCard.ID}}">
+    <div class="tracker-row__title-wrap">
+        <h3>{{.ReplaceCard.Title}}</h3>
+    </div>
+
+    <div class="tracker-row__status">
+        <span class="badge badge--status" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .ReplaceCard.LastReadChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter-link"
+                href="{{.ReplaceCard.LastReadChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.ReplaceCard.LastReadChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter">{{.ReplaceCard.LastReadChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Read {{.ReplaceCard.LastReadAgo}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .ReplaceCard.LatestKnownChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
+                href="{{.ReplaceCard.LatestKnownChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.ReplaceCard.LatestKnownChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter tracker-row__chapter--accent">{{.ReplaceCard.LatestKnownChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Released {{.ReplaceCard.LatestReleaseAgo}}</span>
+    </div>
+
+    <div class="tracker-row__actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.ReplaceCard.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.ReplaceCard.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Open</a>
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.ReplaceCard.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.ReplaceCard.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{else}}
+<article id="tracker-card-{{.ReplaceCard.ID}}" class="tracker-card" hx-swap-oob="outerHTML:#tracker-card-{{.ReplaceCard.ID}}">
+    <header class="tracker-card__header">
+        <h3>{{.ReplaceCard.Title}}</h3>
+        <span class="badge" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
+    </header>
+
+    <div class="tracker-card__cover">
+        {{if .ReplaceCard.CoverURL}}
+        <img src="{{.ReplaceCard.CoverURL}}" alt="{{.ReplaceCard.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
+        {{else}}
+        <div class="tracker-card__cover-title">{{.ReplaceCard.Title}}</div>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__tags{{if gt .ReplaceCard.HiddenTagCount 0}} tracker-card__tags--more{{end}}">
+        {{range .ReplaceCard.Tags}}
+        <span class="tracker-tag-chip">
+            {{if .IconPath}}
+            <img class="tracker-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}" loading="lazy">
+            {{end}}
+            {{.Name}}
+        </span>
+        {{end}}
+        {{if gt .ReplaceCard.HiddenTagCount 0}}
+        <span class="tracker-tag-chip tracker-tag-chip--more">...</span>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__stats">
+        <div class="stat-row">
+            <span class="stat-label">Latest Known Chapter:</span>
+            {{if .ReplaceCard.LatestKnownChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.ReplaceCard.LatestKnownChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.ReplaceCard.LatestKnownChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.ReplaceCard.LatestKnownChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Release Date:</span>
+            <span class="stat-value">{{.ReplaceCard.LatestReleaseAgo}}</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Last Read Chapter:</span>
+            {{if .ReplaceCard.LastReadChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.ReplaceCard.LastReadChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.ReplaceCard.LastReadChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.ReplaceCard.LastReadChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Read Date:</span>
+            <span class="stat-value">{{.ReplaceCard.LastReadAgo}}</span>
+        </div>
+    </div>
+
+    <div class="card-actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.ReplaceCard.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.ReplaceCard.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Highlight</a>
+    </div>
+
+    <div class="card-actions card-actions--secondary">
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.ReplaceCard.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.ReplaceCard.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{end}}
+{{end}}
+
+{{if .ReplaceCard}}
+<script>
+    (function () {
+        var node = document.getElementById('tracker-card-{{.ReplaceCard.ID}}');
+        if (!node && document && document.body) {
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        }
+    })();
+</script>
+{{end}}
+{{if .PrependCard}}
+{{if eq .ViewMode "list"}}
+<article id="tracker-card-{{.PrependCard.ID}}" class="tracker-row tracker-card" hx-swap-oob="afterbegin:#cards-container-list">
+    <div class="tracker-row__title-wrap">
+        <h3>{{.PrependCard.Title}}</h3>
+    </div>
+
+    <div class="tracker-row__status">
+        <span class="badge badge--status" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .PrependCard.LastReadChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter-link"
+                href="{{.PrependCard.LastReadChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.PrependCard.LastReadChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter">{{.PrependCard.LastReadChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Read {{.PrependCard.LastReadAgo}}</span>
+    </div>
+
+    <div class="tracker-row__metric">
+        {{if .PrependCard.LatestKnownChapterRaw}}
+        <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
+                href="{{.PrependCard.LatestKnownChapterURL}}"
+           target="_blank"
+           rel="noopener noreferrer">{{.PrependCard.LatestKnownChapter}}</a>
+        {{else}}
+        <span class="tracker-row__chapter tracker-row__chapter--accent">{{.PrependCard.LatestKnownChapter}}</span>
+        {{end}}
+        <span class="tracker-row__time">Released {{.PrependCard.LatestReleaseAgo}}</span>
+    </div>
+
+    <div class="tracker-row__actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.PrependCard.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.PrependCard.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Open</a>
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.PrependCard.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.PrependCard.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{else}}
+<article id="tracker-card-{{.PrependCard.ID}}" class="tracker-card" hx-swap-oob="afterbegin:#cards-container-grid">
+    <header class="tracker-card__header">
+        <h3>{{.PrependCard.Title}}</h3>
+        <span class="badge" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
+    </header>
+
+    <div class="tracker-card__cover">
+        {{if .PrependCard.CoverURL}}
+        <img src="{{.PrependCard.CoverURL}}" alt="{{.PrependCard.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
+        {{else}}
+        <div class="tracker-card__cover-title">{{.PrependCard.Title}}</div>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__tags{{if gt .PrependCard.HiddenTagCount 0}} tracker-card__tags--more{{end}}">
+        {{range .PrependCard.Tags}}
+        <span class="tracker-tag-chip">
+            {{if .IconPath}}
+            <img class="tracker-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}" loading="lazy">
+            {{end}}
+            {{.Name}}
+        </span>
+        {{end}}
+        {{if gt .PrependCard.HiddenTagCount 0}}
+        <span class="tracker-tag-chip tracker-tag-chip--more">...</span>
+        {{end}}
+    </div>
+
+    <div class="tracker-card__stats">
+        <div class="stat-row">
+            <span class="stat-label">Latest Known Chapter:</span>
+            {{if .PrependCard.LatestKnownChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.PrependCard.LatestKnownChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.PrependCard.LatestKnownChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.PrependCard.LatestKnownChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Release Date:</span>
+            <span class="stat-value">{{.PrependCard.LatestReleaseAgo}}</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Last Read Chapter:</span>
+            {{if .PrependCard.LastReadChapterRaw}}
+                 <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
+                     href="{{.PrependCard.LastReadChapterURL}}"
+               target="_blank"
+               rel="noopener noreferrer">{{.PrependCard.LastReadChapter}}</a>
+            {{else}}
+            <span class="stat-value">{{.PrependCard.LastReadChapter}}</span>
+            {{end}}
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Read Date:</span>
+            <span class="stat-value">{{.PrependCard.LastReadAgo}}</span>
+        </div>
+    </div>
+
+    <div class="card-actions">
+        <button type="button"
+                class="mini-btn"
+                hx-post="/dashboard/trackers/{{.PrependCard.ID}}/set-last-read"
+            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Set last read</button>
+        <a class="mini-btn mini-btn--highlight"
+           href="{{.PrependCard.SourceURL}}"
+           target="_blank"
+           rel="noopener noreferrer">Highlight</a>
+    </div>
+
+    <div class="card-actions card-actions--secondary">
+        <button type="button"
+                class="mini-btn"
+                hx-get="/dashboard/trackers/{{.PrependCard.ID}}/edit"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML">Edit</button>
+        <button type="button"
+                class="mini-btn mini-btn--danger"
+                hx-post="/dashboard/trackers/{{.PrependCard.ID}}/delete"
+                hx-target="#modal-zone"
+                hx-swap="innerHTML"
+                hx-confirm="Delete this tracker?">Delete</button>
+    </div>
+</article>
+{{end}}
+{{end}}
+{{if .PrependCard}}
+<script>
+    (function () {
+        var listContainer = document.getElementById('cards-container-list');
+        var gridContainer = document.getElementById('cards-container-grid');
+        if (!listContainer && !gridContainer && document && document.body) {
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        }
+    })();
+</script>
+{{end}}
