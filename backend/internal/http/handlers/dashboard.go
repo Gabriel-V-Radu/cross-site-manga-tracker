@@ -8,7 +8,6 @@ import (
 	"html/template"
 	"math"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,8 +40,6 @@ type coverCacheEntry struct {
 	Found     bool
 	ExpiresAt time.Time
 }
-
-var mangafireMangaURLPattern = regexp.MustCompile(`(?i)https?://(?:www\.)?mangafire\.to/manga/[^\s"'<>]+`)
 
 var allowedTagIconKeys = map[string]bool{
 	"icon_1": true,
@@ -643,18 +640,39 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	defer cancel()
 
 	if source.Key == "mangafire" {
-		if mangaURL, ok := extractMangaFireMangaURL(query); ok {
-			resolved, resolveErr := connector.ResolveByURL(ctx, mangaURL)
-			if resolveErr == nil && resolved != nil {
-				return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
-					Items:      []connectors.MangaResult{*resolved},
-					Query:      query,
-					SourceID:   source.ID,
-					SourceName: source.Name,
-					Intent:     intent,
-				})
-			}
+		mangaURL, ok := extractMangaFireMangaURL(query)
+		if !ok {
+			return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
+				Query:      query,
+				SourceID:   source.ID,
+				SourceName: source.Name,
+				Intent:     intent,
+				Error:      "MangaFire search requires a full manga URL (https://mangafire.to/manga/{id})",
+			})
 		}
+
+		resolved, resolveErr := connector.ResolveByURL(ctx, mangaURL)
+		if resolveErr != nil || resolved == nil {
+			message := "Failed to resolve MangaFire URL"
+			if resolveErr != nil {
+				message = "Failed to resolve MangaFire URL: " + resolveErr.Error()
+			}
+			return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
+				Query:      query,
+				SourceID:   source.ID,
+				SourceName: source.Name,
+				Intent:     intent,
+				Error:      message,
+			})
+		}
+
+		return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
+			Items:      []connectors.MangaResult{*resolved},
+			Query:      query,
+			SourceID:   source.ID,
+			SourceName: source.Name,
+			Intent:     intent,
+		})
 	}
 
 	results, err := connector.SearchByTitle(ctx, query, 8)
@@ -671,28 +689,21 @@ func extractMangaFireMangaURL(query string) (string, bool) {
 		return "", false
 	}
 
-	if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
-		parsed, err := url.Parse(trimmed)
-		if err != nil {
-			return "", false
-		}
-		if strings.EqualFold(parsed.Hostname(), "mangafire.to") || strings.EqualFold(parsed.Hostname(), "www.mangafire.to") {
-			if strings.HasPrefix(strings.ToLower(parsed.Path), "/manga/") {
-				parsed.RawQuery = ""
-				parsed.Fragment = ""
-				return parsed.String(), true
-			}
-		}
-	}
-
-	match := mangafireMangaURLPattern.FindString(trimmed)
-	if match == "" {
+	if !strings.HasPrefix(strings.ToLower(trimmed), "http://") && !strings.HasPrefix(strings.ToLower(trimmed), "https://") {
 		return "", false
 	}
-	parsed, err := url.Parse(match)
+
+	parsed, err := url.Parse(trimmed)
 	if err != nil {
 		return "", false
 	}
+	if !strings.EqualFold(parsed.Hostname(), "mangafire.to") && !strings.EqualFold(parsed.Hostname(), "www.mangafire.to") {
+		return "", false
+	}
+	if !strings.HasPrefix(strings.ToLower(parsed.Path), "/manga/") {
+		return "", false
+	}
+
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), true
