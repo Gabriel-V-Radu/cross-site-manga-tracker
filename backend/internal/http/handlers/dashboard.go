@@ -696,10 +696,6 @@ func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL strin
 		return trimmedSourceURL, false
 	}
 
-	if strings.EqualFold(trimmedSourceKey, "mangafire") {
-		return trimmedSourceURL, false
-	}
-
 	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
 	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
 		if found {
