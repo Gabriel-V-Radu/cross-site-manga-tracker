@@ -144,10 +144,6 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 			args = append(args, status)
 		}
 		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
-
-		if containsStatus(options.Statuses, "reading") {
-			whereClauses = append(whereClauses, `(status <> 'reading' OR last_read_chapter IS NULL OR latest_known_chapter IS NULL OR ABS(last_read_chapter - latest_known_chapter) > 1e-9)`)
-		}
 	}
 
 	if len(options.TagNames) > 0 {
@@ -206,15 +202,6 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	}
 
 	return trackers, nil
-}
-
-func containsStatus(statuses []string, expected string) bool {
-	for _, status := range statuses {
-		if status == expected {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {

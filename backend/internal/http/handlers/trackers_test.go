@@ -176,7 +176,7 @@ func toString(value int) string {
 	return strconv.Itoa(value)
 }
 
-func TestDashboardReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
+func TestDashboardReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
@@ -210,12 +210,12 @@ func TestDashboardReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 	if !strings.Contains(html, "Behind Tracker") {
 		t.Fatalf("expected reading filter response to include unfinished tracker")
 	}
-	if strings.Contains(html, "Caught Up Tracker") {
-		t.Fatalf("expected reading filter response to exclude caught-up tracker")
+	if !strings.Contains(html, "Caught Up Tracker") {
+		t.Fatalf("expected reading filter response to include caught-up tracker")
 	}
 }
 
-func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
+func TestAPIReadingFilterIncludesCaughtUpTrackers(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
@@ -249,17 +249,25 @@ func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 	if !ok {
 		t.Fatalf("items missing or invalid type")
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item in reading filter, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items in reading filter, got %d", len(items))
 	}
 
-	item, ok := items[0].(map[string]any)
-	if !ok {
-		t.Fatalf("first item has invalid type")
+	titles := map[string]bool{}
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("item has invalid type")
+		}
+		title, _ := item["title"].(string)
+		titles[title] = true
 	}
-	title, _ := item["title"].(string)
-	if title != "API Behind Tracker" {
-		t.Fatalf("expected API Behind Tracker, got %q", title)
+
+	if !titles["API Behind Tracker"] {
+		t.Fatalf("expected API Behind Tracker in reading filter response")
+	}
+	if !titles["API Caught Up Tracker"] {
+		t.Fatalf("expected API Caught Up Tracker in reading filter response")
 	}
 }
 
@@ -525,6 +533,29 @@ func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
 	}
 	if !strings.Contains(html, "/assets/tag-icons/icon-star-gold.svg") {
 		t.Fatalf("expected tracker card to render tag icon overlay")
+	}
+
+	reqMulti := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading&tags=favorite&tags=priority", nil)
+	resMulti, err := app.Test(reqMulti)
+	if err != nil {
+		t.Fatalf("dashboard trackers multi-tag request failed: %v", err)
+	}
+	if resMulti.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resMulti.Body)
+		t.Fatalf("expected 200 for multi-tag query, got %d (body: %s)", resMulti.StatusCode, string(body))
+	}
+
+	bodyMulti, err := io.ReadAll(resMulti.Body)
+	if err != nil {
+		t.Fatalf("read multi-tag response body: %v", err)
+	}
+	htmlMulti := string(bodyMulti)
+
+	if !strings.Contains(htmlMulti, "Tagged Match") {
+		t.Fatalf("expected multi-tag query to include fully tagged tracker")
+	}
+	if strings.Contains(htmlMulti, "Tagged Partial") {
+		t.Fatalf("expected multi-tag query to exclude partially tagged tracker")
 	}
 }
 
