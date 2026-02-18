@@ -339,29 +339,31 @@ input:focus, select:focus {
 .pagination__group {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 6px;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--card);
-    padding: 8px 10px;
+    padding: 6px 8px;
     max-width: 100%;
-    overflow-x: auto;
+    overflow-x: hidden;
 }
 
 .pagination-btn {
-    min-width: 34px;
-    height: 32px;
+    min-width: 26px;
+    height: 24px;
     border: 0;
     background: transparent;
     color: var(--ink-soft);
     font: inherit;
-    font-size: 1.2rem;
+    font-size: 0.92rem;
     line-height: 1;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 8px;
+    border-radius: 6px;
     transition: color 120ms ease, background-color 120ms ease;
 }
 
@@ -381,13 +383,13 @@ input:focus, select:focus {
 }
 
 .pagination-ellipsis {
-    min-width: 20px;
-    height: 32px;
+    min-width: 14px;
+    height: 24px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     color: var(--ink-soft);
-    font-size: 1rem;
+    font-size: 0.82rem;
     line-height: 1;
     user-select: none;
 }
@@ -1279,5 +1281,22 @@ input:focus, select:focus {
     .tracker-tag-row {
         grid-template-columns: 1fr;
         align-items: stretch;
+    }
+
+    .pagination__group {
+        gap: 4px;
+        padding: 5px 6px;
+    }
+
+    .pagination-btn {
+        min-width: 22px;
+        height: 22px;
+        font-size: 0.82rem;
+    }
+
+    .pagination-ellipsis {
+        min-width: 10px;
+        height: 22px;
+        font-size: 0.74rem;
     }
 }
