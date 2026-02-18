@@ -132,6 +132,7 @@ type trackerTagIconView struct {
 
 type trackerFormData struct {
 	Mode          string
+	ViewMode      string
 	Tracker       *models.Tracker
 	Sources       []models.Source
 	LinkedSources []models.TrackerSource
@@ -835,6 +836,7 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
+	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
@@ -848,6 +850,7 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:          "create",
+		ViewMode:      viewMode,
 		Sources:       sources,
 		LinkedSources: []models.TrackerSource{},
 		ProfileTags:   profileTags,
@@ -971,6 +974,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
+	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -1018,6 +1022,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:          "edit",
+		ViewMode:      viewMode,
 		Tracker:       tracker,
 		Sources:       sources,
 		LinkedSources: linkedSources,
@@ -1137,7 +1142,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
 
-	viewMode := normalizeViewMode(c.FormValue("view_mode", "grid"))
+	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {

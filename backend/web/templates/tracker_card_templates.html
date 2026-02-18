@@ -46,6 +46,7 @@
         <button type="button"
                 class="mini-btn"
                 hx-get="/dashboard/trackers/{{.ID}}/edit"
+                hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Edit</button>
         <button type="button"
@@ -137,6 +138,7 @@
         <button type="button"
                 class="mini-btn"
                 hx-get="/dashboard/trackers/{{.ID}}/edit"
+                hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Edit</button>
         <button type="button"

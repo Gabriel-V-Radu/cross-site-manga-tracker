@@ -6,12 +6,12 @@
         </header>
 
         <form class="tracker-form"
-              hx-post="{{if eq .Mode "edit"}}/dashboard/trackers/{{.Tracker.ID}}{{else}}/dashboard/trackers{{end}}"
+              hx-post="{{if eq .Mode "edit"}}/dashboard/trackers/{{.Tracker.ID}}{{else}}/dashboard/trackers{{end}}?view={{if .ViewMode}}{{.ViewMode}}{{else}}grid{{end}}"
               hx-target="#modal-zone"
               hx-swap="innerHTML"
               hx-indicator="#tracker-save-loading"
               hx-on:submit="var view=document.getElementById('view-input'); var viewInput=this.querySelector('input[name=view_mode]'); if(viewInput){ viewInput.value = (view && view.value) ? view.value : 'grid'; }">
-            <input type="hidden" name="view_mode" value="grid">
+            <input type="hidden" name="view_mode" value="{{if .ViewMode}}{{.ViewMode}}{{else}}grid{{end}}">
             <label>
                 Title
                 <input type="text" name="title" value="{{if .Tracker}}{{.Tracker.Title}}{{end}}" required>

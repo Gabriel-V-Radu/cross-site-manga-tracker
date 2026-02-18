@@ -110,6 +110,7 @@
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/trackers/new"
+                        hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                         hx-target="#modal-zone"
                         hx-swap="innerHTML">
                     + Add Tracker
