@@ -453,7 +453,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		sourceKeyByID[source.ID] = source.Key
 	}
 
-	cards, pendingCovers := h.buildTrackerCards(c, items, sourceKeyByID, refreshKey)
+	cards, pendingCovers := h.buildTrackerCards(items, sourceKeyByID, refreshKey)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
 		Trackers:      cards,
@@ -535,7 +535,7 @@ func buildPageNumbers(totalPages int, currentPage int) []int {
 	return pages
 }
 
-func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string, pageKey string) ([]trackerCardView, bool) {
+func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyByID map[int64]string, pageKey string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
 	pendingCovers := false
 	for _, item := range items {
@@ -1206,7 +1206,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceKeyByID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -1280,7 +1280,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceKeyByID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -1383,56 +1383,6 @@ func parseOptionalRFC3339Time(raw string) (*time.Time, error) {
 	return &utc, nil
 }
 
-type trackerTagPayload struct {
-	Name    string  `json:"name"`
-	IconKey *string `json:"iconKey"`
-}
-
-func parseTrackerTagsFromForm(c *fiber.Ctx) ([]trackerTagPayload, error) {
-	raw := strings.TrimSpace(c.FormValue("tags_json"))
-	if raw == "" {
-		return []trackerTagPayload{}, nil
-	}
-
-	var payload []trackerTagPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, fmt.Errorf("Invalid tags payload")
-	}
-
-	uniqueByName := make(map[string]bool, len(payload))
-	out := make([]trackerTagPayload, 0, len(payload))
-	for _, item := range payload {
-		name := strings.TrimSpace(item.Name)
-		if name == "" {
-			continue
-		}
-		if len(name) > 40 {
-			return nil, fmt.Errorf("Tag names must be 40 characters or less")
-		}
-
-		normalizedName := strings.ToLower(name)
-		if uniqueByName[normalizedName] {
-			continue
-		}
-
-		var iconKey *string
-		if item.IconKey != nil {
-			trimmedIcon := strings.TrimSpace(*item.IconKey)
-			if trimmedIcon != "" {
-				if !allowedTagIconKeys[trimmedIcon] {
-					return nil, fmt.Errorf("Invalid tag icon")
-				}
-				iconKey = &trimmedIcon
-			}
-		}
-
-		uniqueByName[normalizedName] = true
-		out = append(out, trackerTagPayload{Name: name, IconKey: iconKey})
-	}
-
-	return out, nil
-}
-
 func parseTagIDsFromForm(c *fiber.Ctx) ([]int64, error) {
 	rawValues := c.Context().PostArgs().PeekMulti("tag_ids")
 	if len(rawValues) == 0 {
@@ -1513,41 +1463,6 @@ func dedupeTrackerSources(items []models.TrackerSource) []models.TrackerSource {
 		out = append(out, item)
 	}
 	return out
-}
-
-func (h *DashboardHandler) resolveTagPayloadToIDs(profileID int64, payload []trackerTagPayload) ([]int64, error) {
-	if len(payload) == 0 {
-		return []int64{}, nil
-	}
-
-	iconToTag := make(map[string]string, 3)
-	for _, item := range payload {
-		if item.IconKey == nil {
-			continue
-		}
-		iconKey := strings.TrimSpace(*item.IconKey)
-		if iconKey == "" {
-			continue
-		}
-		if existing, taken := iconToTag[iconKey]; taken {
-			return nil, fmt.Errorf("Icon %s is already assigned to %s", iconKey, existing)
-		}
-		iconToTag[iconKey] = item.Name
-	}
-
-	ids := make([]int64, 0, len(payload))
-	for _, item := range payload {
-		tag, err := h.trackerRepo.UpsertProfileTag(profileID, item.Name, item.IconKey)
-		if err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "unique") && item.IconKey != nil {
-				return nil, fmt.Errorf("One selected icon is already used by another tag")
-			}
-			return nil, fmt.Errorf("Failed to save tag %q", item.Name)
-		}
-		ids = append(ids, tag.ID)
-	}
-
-	return ids, nil
 }
 
 func parseTagNames(raw string) []string {
@@ -1680,7 +1595,7 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 			continue
 		}
 
-		if bestChapter != nil && resolvedChapter == *bestChapter && resolved.LastUpdatedAt != nil {
+		if resolvedChapter == *bestChapter && resolved.LastUpdatedAt != nil {
 			if bestReleaseAt == nil || resolved.LastUpdatedAt.After(*bestReleaseAt) {
 				bestIndex = idx
 				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
@@ -1778,43 +1693,6 @@ func relativeTime(value time.Time) string {
 	}
 	years := int(delta / (365 * 24 * time.Hour))
 	return fmt.Sprintf("%d years ago", years)
-}
-
-func (h *DashboardHandler) resolveChapterURL(parent context.Context, sourceKey, sourceURL string, chapter float64) string {
-	trimmedSourceURL := strings.TrimSpace(sourceURL)
-	if trimmedSourceURL == "" {
-		return ""
-	}
-
-	trimmedSourceKey := strings.TrimSpace(sourceKey)
-	if trimmedSourceKey == "" {
-		return trimmedSourceURL
-	}
-
-	connector, ok := h.registry.Get(trimmedSourceKey)
-	if !ok {
-		return trimmedSourceURL
-	}
-
-	resolver, ok := connector.(connectors.ChapterURLResolver)
-	if !ok {
-		return trimmedSourceURL
-	}
-
-	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
-	defer cancel()
-
-	chapterURL, err := resolver.ResolveChapterURL(ctx, trimmedSourceURL, chapter)
-	if err != nil {
-		return trimmedSourceURL
-	}
-
-	chapterURL = strings.TrimSpace(chapterURL)
-	if chapterURL == "" {
-		return trimmedSourceURL
-	}
-
-	return chapterURL
 }
 
 func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sourceURL string, sourceItemID *string) (string, error) {
