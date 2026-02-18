@@ -82,6 +82,20 @@
             {{end}}
         </div>
 
+        <div class="tracker-card__tags{{if gt .HiddenTagCount 0}} tracker-card__tags--more{{end}}">
+            {{range .Tags}}
+            <span class="tracker-tag-chip">
+                {{if .IconPath}}
+                <img class="tracker-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}" loading="lazy">
+                {{end}}
+                {{.Name}}
+            </span>
+            {{end}}
+            {{if gt .HiddenTagCount 0}}
+            <span class="tracker-tag-chip tracker-tag-chip--more">...</span>
+            {{end}}
+        </div>
+
         <div class="tracker-card__stats">
             <div class="stat-row">
                 <span class="stat-label">Latest Known Chapter:</span>

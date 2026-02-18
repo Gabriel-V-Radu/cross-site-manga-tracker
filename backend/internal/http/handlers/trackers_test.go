@@ -412,3 +412,93 @@ func TestEditTrackerDeletingOriginalLinkedSourcePromotesRemainingSource(t *testi
 		t.Fatalf("expected remaining linked source id 2, got %d", items[0].sourceID)
 	}
 }
+
+func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+	`,
+		1, "Tagged Match", 1, "https://mangadex.org/title/tagged-match", "reading", 3.0, 10.0,
+		1, "Tagged Partial", 1, "https://mangadex.org/title/tagged-partial", "reading", 1.0, 8.0,
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	_, err = result.LastInsertId()
+	if err != nil {
+		t.Fatalf("last tracker id: %v", err)
+	}
+
+	var firstTrackerID int64
+	if err := db.QueryRow(`SELECT id FROM trackers WHERE profile_id = ? AND title = ?`, 1, "Tagged Match").Scan(&firstTrackerID); err != nil {
+		t.Fatalf("load first tracker id: %v", err)
+	}
+
+	var secondTrackerID int64
+	if err := db.QueryRow(`SELECT id FROM trackers WHERE profile_id = ? AND title = ?`, 1, "Tagged Partial").Scan(&secondTrackerID); err != nil {
+		t.Fatalf("load second tracker id: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO custom_tags (profile_id, name, icon_key)
+		VALUES (?, ?, ?), (?, ?, ?)
+	`,
+		1, "favorite", "icon_1",
+		1, "priority", nil,
+	)
+	if err != nil {
+		t.Fatalf("seed custom tags: %v", err)
+	}
+
+	var favoriteTagID int64
+	if err := db.QueryRow(`SELECT id FROM custom_tags WHERE profile_id = ? AND name = ?`, 1, "favorite").Scan(&favoriteTagID); err != nil {
+		t.Fatalf("load favorite tag id: %v", err)
+	}
+
+	var priorityTagID int64
+	if err := db.QueryRow(`SELECT id FROM custom_tags WHERE profile_id = ? AND name = ?`, 1, "priority").Scan(&priorityTagID); err != nil {
+		t.Fatalf("load priority tag id: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO tracker_tags (tracker_id, tag_id)
+		VALUES (?, ?), (?, ?), (?, ?)
+	`,
+		firstTrackerID, favoriteTagID,
+		firstTrackerID, priorityTagID,
+		secondTrackerID, favoriteTagID,
+	)
+	if err != nil {
+		t.Fatalf("seed tracker tags: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading&tags=favorite,priority", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "Tagged Match") {
+		t.Fatalf("expected AND tag filter response to include fully tagged tracker")
+	}
+	if strings.Contains(html, "Tagged Partial") {
+		t.Fatalf("expected AND tag filter response to exclude partially tagged tracker")
+	}
+	if !strings.Contains(html, "/assets/tag-icons/icon-star-gold.svg") {
+		t.Fatalf("expected tracker card to render tag icon overlay")
+	}
+}

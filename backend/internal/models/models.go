@@ -23,20 +23,31 @@ type Profile struct {
 }
 
 type Tracker struct {
-	ID                 int64      `json:"id"`
-	ProfileID          int64      `json:"profileId"`
-	Title              string     `json:"title"`
-	SourceID           int64      `json:"sourceId"`
-	SourceItemID       *string    `json:"sourceItemId,omitempty"`
-	SourceURL          string     `json:"sourceUrl"`
-	Status             string     `json:"status"`
-	LastReadChapter    *float64   `json:"lastReadChapter,omitempty"`
-	LastReadAt         *time.Time `json:"lastReadAt,omitempty"`
-	LatestKnownChapter *float64   `json:"latestKnownChapter,omitempty"`
-	LatestReleaseAt    *time.Time `json:"latestReleaseAt,omitempty"`
-	LastCheckedAt      *time.Time `json:"lastCheckedAt,omitempty"`
-	CreatedAt          time.Time  `json:"createdAt"`
-	UpdatedAt          time.Time  `json:"updatedAt"`
+	ID                 int64       `json:"id"`
+	ProfileID          int64       `json:"profileId"`
+	Title              string      `json:"title"`
+	SourceID           int64       `json:"sourceId"`
+	SourceItemID       *string     `json:"sourceItemId,omitempty"`
+	SourceURL          string      `json:"sourceUrl"`
+	Status             string      `json:"status"`
+	LastReadChapter    *float64    `json:"lastReadChapter,omitempty"`
+	LastReadAt         *time.Time  `json:"lastReadAt,omitempty"`
+	LatestKnownChapter *float64    `json:"latestKnownChapter,omitempty"`
+	LatestReleaseAt    *time.Time  `json:"latestReleaseAt,omitempty"`
+	LastCheckedAt      *time.Time  `json:"lastCheckedAt,omitempty"`
+	Tags               []CustomTag `json:"tags,omitempty"`
+	CreatedAt          time.Time   `json:"createdAt"`
+	UpdatedAt          time.Time   `json:"updatedAt"`
+}
+
+type CustomTag struct {
+	ID        int64     `json:"id"`
+	ProfileID int64     `json:"profileId"`
+	Name      string    `json:"name"`
+	IconKey   *string   `json:"iconKey,omitempty"`
+	IconPath  *string   `json:"iconPath,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type TrackerSource struct {

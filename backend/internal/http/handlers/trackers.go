@@ -93,6 +93,7 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 	options := repository.TrackerListOptions{
 		ProfileID: profile.ID,
 		Statuses:  statuses,
+		TagNames:  parseTagNames(c.Query("tags")),
 		SortBy:    c.Query("sort", "latest_known_chapter"),
 		Order:     c.Query("order", "desc"),
 		Query:     c.Query("q"),

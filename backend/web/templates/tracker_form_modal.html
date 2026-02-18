@@ -112,6 +112,24 @@
                 </label>
             </div>
 
+            <hr>
+            <h3>Tags</h3>
+            <p class="search-message">Select existing tags for this manga.</p>
+            <div class="tracker-tags-list">
+                {{if eq (len .ProfileTags) 0}}
+                <p class="search-message">No tags available. Create tags from the Profile Menu.</p>
+                {{else}}
+                {{range .ProfileTags}}
+                <label class="tracker-tag-check">
+                    <span class="tracker-tag-check__input-wrap">
+                        <input type="checkbox" name="tag_ids" value="{{.ID}}" {{if hasTagID $.TrackerTags .ID}}checked{{end}}>
+                    </span>
+                    <span class="tracker-tag-chip">{{.Name}}</span>
+                </label>
+                {{end}}
+                {{end}}
+            </div>
+
             <div class="modal-actions">
                 <button type="button" class="action-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">Cancel</button>
                 <button type="submit" class="action-btn action-btn--accent">Save</button>

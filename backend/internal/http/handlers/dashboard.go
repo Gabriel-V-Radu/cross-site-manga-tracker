@@ -38,12 +38,21 @@ type coverCacheEntry struct {
 
 var mangafireMangaURLPattern = regexp.MustCompile(`(?i)https?://(?:www\.)?mangafire\.to/manga/[^\s"'<>]+`)
 
+var allowedTagIconKeys = map[string]bool{
+	"icon_1": true,
+	"icon_2": true,
+	"icon_3": true,
+}
+
+var tagIconKeysOrdered = []string{"icon_1", "icon_2", "icon_3"}
+
 type dashboardPageData struct {
 	Statuses      []string
 	Sorts         []string
 	Profiles      []models.Profile
 	ActiveProfile models.Profile
 	RenameValue   string
+	ProfileTags   []models.CustomTag
 }
 
 type trackersPartialData struct {
@@ -56,6 +65,9 @@ type trackerCardView struct {
 	Title                  string
 	Status                 string
 	StatusLabel            string
+	Tags                   []trackerTagView
+	HiddenTagCount         int
+	TagIcons               []trackerTagIconView
 	SourceURL              string
 	LatestKnownChapterURL  string
 	LastReadChapterURL     string
@@ -73,11 +85,26 @@ type trackerCardView struct {
 	LastReadChapterRaw     *float64
 }
 
+type trackerTagView struct {
+	ID       int64
+	Name     string
+	IconKey  *string
+	IconPath *string
+}
+
+type trackerTagIconView struct {
+	TagName  string
+	IconPath string
+}
+
 type trackerFormData struct {
 	Mode          string
 	Tracker       *models.Tracker
 	Sources       []models.Source
 	LinkedSources []models.TrackerSource
+	ProfileTags   []models.CustomTag
+	TrackerTags   []models.CustomTag
+	TagIconKeys   []string
 }
 
 type trackerSearchResultsData struct {
@@ -87,6 +114,16 @@ type trackerSearchResultsData struct {
 	SourceID   int64
 	SourceName string
 	Intent     string
+}
+
+type profileMenuData struct {
+	Profiles          []models.Profile
+	ActiveProfile     models.Profile
+	RenameValue       string
+	ProfileTags       []models.CustomTag
+	TagIconKeys       []string
+	AvailableIconKeys []string
+	Message           string
 }
 
 func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHandler {
@@ -114,6 +151,11 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
 	}
 
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
@@ -123,6 +165,7 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 		Profiles:      profiles,
 		ActiveProfile: *activeProfile,
 		RenameValue:   activeProfile.Name,
+		ProfileTags:   profileTags,
 	}
 	return h.render(c, "dashboard_page.html", data)
 }
@@ -146,6 +189,148 @@ func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 	}
 
 	return c.Redirect("/dashboard?profile="+url.QueryEscape(activeProfile.Key), fiber.StatusSeeOther)
+}
+
+func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
+	return h.render(c, "profile_menu_modal.html", profileMenuData{
+		Profiles:          profiles,
+		ActiveProfile:     *activeProfile,
+		RenameValue:       activeProfile.Name,
+		ProfileTags:       profileTags,
+		TagIconKeys:       tagIconKeysOrdered,
+		AvailableIconKeys: availableTagIconKeys(profileTags),
+	})
+}
+
+func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
+	profileKey := strings.TrimSpace(c.FormValue("profile"))
+	if profileKey == "" {
+		return c.Status(fiber.StatusBadRequest).SendString("Profile is required")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
+	for _, profile := range profiles {
+		if profile.Key == profileKey {
+			return c.Redirect("/dashboard?profile="+url.QueryEscape(profileKey), fiber.StatusSeeOther)
+		}
+	}
+
+	return c.Status(fiber.StatusBadRequest).SendString("Selected profile does not exist")
+}
+
+func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	tagName := strings.TrimSpace(c.FormValue("tag_name"))
+	if tagName == "" {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag name is required")
+	}
+	if len(tagName) > 40 {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag name must be 40 characters or less")
+	}
+
+	var iconKey *string
+	if rawIcon := strings.TrimSpace(c.FormValue("icon_key")); rawIcon != "" {
+		if !allowedTagIconKeys[rawIcon] {
+			return c.Status(fiber.StatusBadRequest).SendString("Invalid icon")
+		}
+		iconKey = &rawIcon
+	}
+
+	if _, err := h.trackerRepo.CreateProfileTag(activeProfile.ID, tagName, iconKey); err != nil {
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "unique") {
+			if iconKey != nil {
+				return c.Status(fiber.StatusBadRequest).SendString("That icon is already used by another tag")
+			}
+			return c.Status(fiber.StatusBadRequest).SendString("A tag with that name already exists")
+		}
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tag")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
+	c.Set("HX-Trigger", `{"trackersChanged":true}`)
+	return h.render(c, "profile_menu_modal.html", profileMenuData{
+		Profiles:          profiles,
+		ActiveProfile:     *activeProfile,
+		RenameValue:       activeProfile.Name,
+		ProfileTags:       profileTags,
+		TagIconKeys:       tagIconKeysOrdered,
+		AvailableIconKeys: availableTagIconKeys(profileTags),
+		Message:           "Tag saved",
+	})
+}
+
+func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
+	if err != nil || tagID <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid tag")
+	}
+
+	deleted, err := h.trackerRepo.DeleteProfileTag(activeProfile.ID, tagID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to delete tag")
+	}
+	if !deleted {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
+	c.Set("HX-Trigger", `{"trackersChanged":true}`)
+	return h.render(c, "profile_menu_modal.html", profileMenuData{
+		Profiles:          profiles,
+		ActiveProfile:     *activeProfile,
+		RenameValue:       activeProfile.Name,
+		ProfileTags:       profileTags,
+		TagIconKeys:       tagIconKeysOrdered,
+		AvailableIconKeys: availableTagIconKeys(profileTags),
+		Message:           "Tag deleted",
+	})
 }
 
 func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
@@ -172,6 +357,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	items, err := h.trackerRepo.List(repository.TrackerListOptions{
 		ProfileID: activeProfile.ID,
 		Statuses:  statuses,
+		TagNames:  parseTagNamesFromQuery(c),
 		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
 		Order:     strings.TrimSpace(c.Query("order", "desc")),
 		Query:     strings.TrimSpace(c.Query("q")),
@@ -192,11 +378,17 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	cards := make([]trackerCardView, 0, len(items))
 	for _, item := range items {
+		tagViews := toTrackerTagView(item.Tags)
+		displayTags, hiddenTagCount := prioritizeTrackerTags(tagViews, 3)
+
 		card := trackerCardView{
 			ID:                     item.ID,
 			Title:                  item.Title,
 			Status:                 item.Status,
 			StatusLabel:            statusLabel(item.Status),
+			Tags:                   displayTags,
+			HiddenTagCount:         hiddenTagCount,
+			TagIcons:               toTrackerTagIcons(item.Tags),
 			SourceURL:              item.SourceURL,
 			LatestKnownChapterURL:  item.SourceURL,
 			LastReadChapterURL:     item.SourceURL,
@@ -262,7 +454,8 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
-	if _, err := h.profileResolver.Resolve(c); err != nil {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
 
@@ -270,10 +463,19 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
 	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:          "create",
 		Sources:       sources,
 		LinkedSources: []models.TrackerSource{},
+		ProfileTags:   profileTags,
+		TrackerTags:   []models.CustomTag{},
+		TagIconKeys:   tagIconKeysOrdered,
 	})
 }
 
@@ -418,11 +620,19 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		})
 	}
 
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:          "edit",
 		Tracker:       tracker,
 		Sources:       sources,
 		LinkedSources: linkedSources,
+		ProfileTags:   profileTags,
+		TrackerTags:   tracker.Tags,
+		TagIconKeys:   tagIconKeysOrdered,
 	})
 }
 
@@ -451,8 +661,20 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Selected source does not exist")
 	}
 
-	if _, err := h.trackerRepo.Create(tracker); err != nil {
+	created, err := h.trackerRepo.Create(tracker)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to create tracker")
+	}
+
+	tagIDs, err := parseTagIDsFromForm(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	if created != nil {
+		if err := h.trackerRepo.ReplaceTrackerTags(activeProfile.ID, created.ID, tagIDs); err != nil {
+			return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tracker tags")
+		}
 	}
 
 	c.Set("HX-Trigger", `{"trackersChanged":true}`)
@@ -535,7 +757,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
-}
+	}
 
 	uniqueSources := dedupeTrackerSources(linkedSources)
 	if len(uniqueSources) == 0 {
@@ -563,6 +785,14 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		tracker.LatestReleaseAt = latestReleaseAt
 	}
 
+	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to validate source")
+	}
+	if !exists {
+		return c.Status(fiber.StatusBadRequest).SendString("Selected source does not exist")
+	}
+
 	updated, err := h.trackerRepo.Update(activeProfile.ID, id, tracker)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
@@ -573,6 +803,15 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 
 	if err := h.trackerRepo.ReplaceTrackerSources(activeProfile.ID, id, uniqueSources); err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save linked sources")
+	}
+
+	tagIDs, err := parseTagIDsFromForm(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	if err := h.trackerRepo.ReplaceTrackerTags(activeProfile.ID, id, tagIDs); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tracker tags")
 	}
 
 	c.Set("HX-Trigger", `{"trackersChanged":true}`)
@@ -709,6 +948,83 @@ func parseOptionalRFC3339Time(raw string) (*time.Time, error) {
 	return &utc, nil
 }
 
+type trackerTagPayload struct {
+	Name    string  `json:"name"`
+	IconKey *string `json:"iconKey"`
+}
+
+func parseTrackerTagsFromForm(c *fiber.Ctx) ([]trackerTagPayload, error) {
+	raw := strings.TrimSpace(c.FormValue("tags_json"))
+	if raw == "" {
+		return []trackerTagPayload{}, nil
+	}
+
+	var payload []trackerTagPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, fmt.Errorf("Invalid tags payload")
+	}
+
+	uniqueByName := make(map[string]bool, len(payload))
+	out := make([]trackerTagPayload, 0, len(payload))
+	for _, item := range payload {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		if len(name) > 40 {
+			return nil, fmt.Errorf("Tag names must be 40 characters or less")
+		}
+
+		normalizedName := strings.ToLower(name)
+		if uniqueByName[normalizedName] {
+			continue
+		}
+
+		var iconKey *string
+		if item.IconKey != nil {
+			trimmedIcon := strings.TrimSpace(*item.IconKey)
+			if trimmedIcon != "" {
+				if !allowedTagIconKeys[trimmedIcon] {
+					return nil, fmt.Errorf("Invalid tag icon")
+				}
+				iconKey = &trimmedIcon
+			}
+		}
+
+		uniqueByName[normalizedName] = true
+		out = append(out, trackerTagPayload{Name: name, IconKey: iconKey})
+	}
+
+	return out, nil
+}
+
+func parseTagIDsFromForm(c *fiber.Ctx) ([]int64, error) {
+	rawValues := c.Context().PostArgs().PeekMulti("tag_ids")
+	if len(rawValues) == 0 {
+		return []int64{}, nil
+	}
+
+	ids := make([]int64, 0, len(rawValues))
+	seen := make(map[int64]bool, len(rawValues))
+	for _, raw := range rawValues {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(trimmed, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("Invalid tag selection")
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	return ids, nil
+}
+
 func parseLinkedSourcesFromForm(c *fiber.Ctx) ([]models.TrackerSource, error) {
 	raw := strings.TrimSpace(c.FormValue("linked_sources_json"))
 	if raw == "" {
@@ -762,6 +1078,133 @@ func dedupeTrackerSources(items []models.TrackerSource) []models.TrackerSource {
 		out = append(out, item)
 	}
 	return out
+}
+
+func (h *DashboardHandler) resolveTagPayloadToIDs(profileID int64, payload []trackerTagPayload) ([]int64, error) {
+	if len(payload) == 0 {
+		return []int64{}, nil
+	}
+
+	iconToTag := make(map[string]string, 3)
+	for _, item := range payload {
+		if item.IconKey == nil {
+			continue
+		}
+		iconKey := strings.TrimSpace(*item.IconKey)
+		if iconKey == "" {
+			continue
+		}
+		if existing, taken := iconToTag[iconKey]; taken {
+			return nil, fmt.Errorf("Icon %s is already assigned to %s", iconKey, existing)
+		}
+		iconToTag[iconKey] = item.Name
+	}
+
+	ids := make([]int64, 0, len(payload))
+	for _, item := range payload {
+		tag, err := h.trackerRepo.UpsertProfileTag(profileID, item.Name, item.IconKey)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") && item.IconKey != nil {
+				return nil, fmt.Errorf("One selected icon is already used by another tag")
+			}
+			return nil, fmt.Errorf("Failed to save tag %q", item.Name)
+		}
+		ids = append(ids, tag.ID)
+	}
+
+	return ids, nil
+}
+
+func parseTagNames(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		tag := strings.TrimSpace(part)
+		normalized := strings.ToLower(tag)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, tag)
+	}
+	return out
+}
+
+func parseTagNamesFromQuery(c *fiber.Ctx) []string {
+	queryValues := c.Context().QueryArgs().PeekMulti("tags")
+	if len(queryValues) == 0 {
+		return parseTagNames(c.Query("tags"))
+	}
+
+	values := make([]string, 0, len(queryValues))
+	for _, value := range queryValues {
+		trimmed := strings.TrimSpace(string(value))
+		if trimmed == "" {
+			continue
+		}
+		values = append(values, trimmed)
+	}
+
+	if len(values) == 0 {
+		return nil
+	}
+
+	return parseTagNames(strings.Join(values, ","))
+}
+
+func toTrackerTagView(tags []models.CustomTag) []trackerTagView {
+	items := make([]trackerTagView, 0, len(tags))
+	for _, tag := range tags {
+		items = append(items, trackerTagView{
+			ID:       tag.ID,
+			Name:     tag.Name,
+			IconKey:  tag.IconKey,
+			IconPath: tag.IconPath,
+		})
+	}
+	return items
+}
+
+func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
+	icons := make([]trackerTagIconView, 0, len(tags))
+	for _, tag := range tags {
+		if tag.IconPath == nil {
+			continue
+		}
+		icons = append(icons, trackerTagIconView{TagName: tag.Name, IconPath: *tag.IconPath})
+	}
+	return icons
+}
+
+func prioritizeTrackerTags(tags []trackerTagView, maxVisible int) ([]trackerTagView, int) {
+	if maxVisible <= 0 || len(tags) == 0 {
+		return nil, len(tags)
+	}
+
+	withIcon := make([]trackerTagView, 0, len(tags))
+	withoutIcon := make([]trackerTagView, 0, len(tags))
+	for _, tag := range tags {
+		if tag.IconPath != nil {
+			withIcon = append(withIcon, tag)
+			continue
+		}
+		withoutIcon = append(withoutIcon, tag)
+	}
+
+	ordered := make([]trackerTagView, 0, len(tags))
+	ordered = append(ordered, withIcon...)
+	ordered = append(ordered, withoutIcon...)
+
+	if len(ordered) <= maxVisible {
+		return ordered, 0
+	}
+
+	return ordered[:maxVisible], len(ordered) - maxVisible
 }
 
 func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time) {
@@ -1039,6 +1482,9 @@ func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) e
 		"chapterInputValue": chapterInputValue,
 		"textInputValue":    textInputValue,
 		"timeInputValue":    timeInputValue,
+		"hasTagID":          hasTagID,
+		"tagIconLabel":      tagIconLabel,
+		"tagIconAssetPath":  tagIconAssetPath,
 		"toJSON":            toJSON,
 		"statusLabel":       statusLabel,
 		"sortLabel":         sortLabel,
@@ -1101,4 +1547,62 @@ func toJSON(value any) string {
 		return "[]"
 	}
 	return string(raw)
+}
+
+func hasTagID(tags []models.CustomTag, id int64) bool {
+	for _, tag := range tags {
+		if tag.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func availableTagIconKeys(profileTags []models.CustomTag) []string {
+	used := make(map[string]bool, len(profileTags))
+	for _, tag := range profileTags {
+		if tag.IconKey == nil {
+			continue
+		}
+		iconKey := strings.TrimSpace(*tag.IconKey)
+		if iconKey != "" {
+			used[iconKey] = true
+		}
+	}
+
+	available := make([]string, 0, len(tagIconKeysOrdered))
+	for _, iconKey := range tagIconKeysOrdered {
+		if used[iconKey] {
+			continue
+		}
+		available = append(available, iconKey)
+	}
+
+	return available
+}
+
+func tagIconLabel(iconKey string) string {
+	switch strings.TrimSpace(iconKey) {
+	case "icon_1":
+		return "Star"
+	case "icon_2":
+		return "Heart"
+	case "icon_3":
+		return "Flames"
+	default:
+		return "Icon"
+	}
+}
+
+func tagIconAssetPath(iconKey string) string {
+	switch strings.TrimSpace(iconKey) {
+	case "icon_1":
+		return "/assets/tag-icons/icon-star-gold.svg"
+	case "icon_2":
+		return "/assets/tag-icons/icon-red-heart.svg"
+	case "icon_3":
+		return "/assets/tag-icons/icon-flames.svg"
+	default:
+		return ""
+	}
 }

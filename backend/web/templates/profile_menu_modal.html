@@ -1,0 +1,98 @@
+<div class="modal-backdrop" onclick="event.target===this && (document.getElementById('modal-zone').innerHTML='')">
+    <div class="modal-card profile-menu-card" onclick="event.stopPropagation()">
+        <header>
+            <h2>Profile Menu</h2>
+            <button type="button" class="close-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">×</button>
+        </header>
+
+        <section class="profile-menu-section">
+        <form class="tracker-form" method="post" action="/dashboard/profile/switch?profile={{.ActiveProfile.Key}}">
+            <label>
+                Active Profile
+                <select name="profile">
+                    {{range .Profiles}}
+                    <option value="{{.Key}}" {{if eq .Key $.ActiveProfile.Key}}selected{{end}}>{{.Name}}</option>
+                    {{end}}
+                </select>
+            </label>
+            <div class="modal-actions">
+                <button type="submit" class="action-btn action-btn--accent">Switch Profile</button>
+            </div>
+        </form>
+        </section>
+
+        <hr>
+
+        <section class="profile-menu-section">
+        <form class="tracker-form" method="post" action="/dashboard/profile/rename?profile={{.ActiveProfile.Key}}">
+            <label>
+                Rename Active Profile
+                <input type="text" name="profile_name" value="{{.RenameValue}}" maxlength="40" required>
+            </label>
+            <div class="modal-actions">
+                <button type="submit" class="action-btn action-btn--accent">Save Name</button>
+            </div>
+        </form>
+        </section>
+
+        <hr>
+
+        <section class="profile-menu-section profile-menu-section--tags">
+        <h3>Custom Tags</h3>
+        {{if .Message}}
+        <p class="profile-feedback">{{.Message}}</p>
+        {{end}}
+        <div class="tracker-tags-list">
+            {{if eq (len .ProfileTags) 0}}
+            <span class="tracker-tag-chip">No tags yet</span>
+            {{else}}
+            {{range .ProfileTags}}
+            <div class="profile-tag-row">
+                <span class="tracker-tag-chip profile-tag-chip">
+                    {{if .IconPath}}
+                    <img class="profile-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}">
+                    {{end}}
+                    {{.Name}}
+                </span>
+                <form hx-post="/dashboard/profile/tags/delete?profile={{$.ActiveProfile.Key}}"
+                      hx-target="#modal-zone"
+                      hx-swap="innerHTML"
+                      hx-confirm="Delete this tag?"
+                      class="profile-tag-delete-form">
+                    <input type="hidden" name="tag_id" value="{{.ID}}">
+                    <button type="submit" class="linked-btn linked-btn--danger">Remove</button>
+                </form>
+            </div>
+            {{end}}
+            {{end}}
+        </div>
+
+        <form class="tracker-form profile-tag-create-form"
+              hx-post="/dashboard/profile/tags?profile={{.ActiveProfile.Key}}"
+              hx-target="#modal-zone"
+              hx-swap="innerHTML">
+            <label>
+                New tag name
+                <input type="text" name="tag_name" maxlength="40" placeholder="e.g. Favorite" required>
+            </label>
+
+            <label>
+                Icon (optional)
+                <div class="tracker-tag-icon-picker tracker-tag-icon-picker--menu">
+                    <button type="button" class="tracker-tag-icon-btn tracker-tag-icon-btn--active" data-menu-icon="" title="No icon">None</button>
+                    {{range .AvailableIconKeys}}
+                    <button type="button" class="tracker-tag-icon-btn" data-menu-icon="{{.}}" title="{{tagIconLabel .}}">
+                        <img src="{{tagIconAssetPath .}}" alt="{{tagIconLabel .}}">
+                    </button>
+                    {{end}}
+                </div>
+                <input type="hidden" name="icon_key" id="menu-tag-icon-key" value="">
+            </label>
+
+            <div class="modal-actions">
+                <button type="submit" class="action-btn action-btn--accent">Create Tag</button>
+            </div>
+        </form>
+        </section>
+    </div>
+</div>
