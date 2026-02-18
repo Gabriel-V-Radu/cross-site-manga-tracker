@@ -396,3 +396,45 @@ func TestExtractLatestChapterAndReleaseAt_UsesRelativeDateFromLatestChapterRow(t
 		t.Fatalf("expected latest release date not to use previous chapter absolute date")
 	}
 }
+
+func TestExtractLatestChapterAndReleaseAt_DuplicateLatestChapterPicksNewestDate(t *testing.T) {
+	body := `
+<!DOCTYPE html>
+<html>
+<body>
+	<div class="noise">
+		<a href="/read/global-martial-artss.w1lm6/en/chapter-341">Mirror entry</a>
+		<span>Feb 11, 2026</span>
+	</div>
+
+	<ul class="scroll-sm">
+		<li class="item" data-number="341">
+			<a href="/read/global-martial-artss.w1lm6/en/chapter-341" title=" Chap 341">
+				<span>Chapter 341:</span>
+				<span>31 minutes ago</span>
+			</a>
+		</li>
+		<li class="item" data-number="340">
+			<a href="/read/global-martial-artss.w1lm6/en/chapter-340" title=" Chap 340">
+				<span>Chapter 340:</span>
+				<span>Feb 11, 2026</span>
+			</a>
+		</li>
+	</ul>
+</body>
+</html>`
+
+	before := time.Now().UTC().Add(-35 * time.Minute)
+	latestChapter, latestReleaseAt := extractLatestChapterAndReleaseAt(body)
+	after := time.Now().UTC().Add(-25 * time.Minute)
+
+	if latestChapter == nil || *latestChapter != 341 {
+		t.Fatalf("expected latest chapter 341, got %v", latestChapter)
+	}
+	if latestReleaseAt == nil {
+		t.Fatalf("expected latest release date to be parsed")
+	}
+	if latestReleaseAt.Before(before) || latestReleaseAt.After(after) {
+		t.Fatalf("expected freshest date around 31 minutes ago, got %s", latestReleaseAt.Format(time.RFC3339))
+	}
+}

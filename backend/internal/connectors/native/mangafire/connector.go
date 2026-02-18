@@ -584,6 +584,17 @@ func extractLatestChapterAndReleaseAt(body string) (*float64, *time.Time) {
 			value := parsed
 			latest = &value
 			latestReleaseAt = extractChapterDateAtIndex(body, match[0], match[1])
+			continue
+		}
+
+		if latest != nil && parsed == *latest {
+			candidate := extractChapterDateAtIndex(body, match[0], match[1])
+			if candidate == nil {
+				continue
+			}
+			if latestReleaseAt == nil || candidate.After(*latestReleaseAt) {
+				latestReleaseAt = candidate
+			}
 		}
 	}
 	return latest, latestReleaseAt
