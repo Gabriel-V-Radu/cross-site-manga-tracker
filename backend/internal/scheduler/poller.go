@@ -127,7 +127,12 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			latest = result.LatestChapter
 		}
 
-		if err := p.repo.UpdatePollingState(tracker.ID, latest, result.LastUpdatedAt, now); err != nil {
+		latestReleaseAt := result.LastUpdatedAt
+		if latestReleaseAt == nil && isNewChapter(tracker.LatestKnownChapter, result.LatestChapter) {
+			latestReleaseAt = &now
+		}
+
+		if err := p.repo.UpdatePollingState(tracker.ID, latest, latestReleaseAt, now); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
 		}
