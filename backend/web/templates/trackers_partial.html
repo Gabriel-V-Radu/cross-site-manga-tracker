@@ -17,4 +17,21 @@
     {{end}}
 </div>
 {{end}}
+
+<div class="panel-actions" style="margin-top:16px; justify-content:flex-end;">
+    {{if .HasPrevPage}}
+    <button type="button"
+            class="action-btn"
+            onclick="var pageInput=document.getElementById('page-input'); if(pageInput){ pageInput.value=String(Math.max(1, {{.Page}} - 1)); } document.body.dispatchEvent(new Event('trackersChanged'));">
+        Previous
+    </button>
+    {{end}}
+    {{if .HasNextPage}}
+    <button type="button"
+            class="action-btn action-btn--accent"
+            onclick="var pageInput=document.getElementById('page-input'); if(pageInput){ pageInput.value=String({{.Page}} + 1); } document.body.dispatchEvent(new Event('trackersChanged'));">
+        Next
+    </button>
+    {{end}}
+</div>
 {{end}}

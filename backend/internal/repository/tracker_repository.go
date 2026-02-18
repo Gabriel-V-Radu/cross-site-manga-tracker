@@ -16,6 +16,8 @@ type TrackerListOptions struct {
 	SortBy    string
 	Order     string
 	Query     string
+	Limit     int
+	Offset    int
 }
 
 type TrackerRepository struct {
@@ -169,6 +171,15 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	}
 
 	query += ` ORDER BY ` + sortField + ` ` + order + `, id DESC`
+
+	if options.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, options.Limit)
+		if options.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, options.Offset)
+		}
+	}
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {

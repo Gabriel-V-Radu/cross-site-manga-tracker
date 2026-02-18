@@ -28,6 +28,9 @@ type DashboardHandler struct {
 	registry        *connectors.Registry
 	coverCache      map[string]coverCacheEntry
 	cacheMu         sync.RWMutex
+	templates       *template.Template
+	templateOnce    sync.Once
+	templateErr     error
 }
 
 type coverCacheEntry struct {
@@ -56,8 +59,11 @@ type dashboardPageData struct {
 }
 
 type trackersPartialData struct {
-	Trackers []trackerCardView
-	ViewMode string
+	Trackers    []trackerCardView
+	ViewMode    string
+	Page        int
+	HasPrevPage bool
+	HasNextPage bool
 }
 
 type trackerOOBResponseData struct {
@@ -375,6 +381,9 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	}
 
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
+	page := parsePositiveInt(c.Query("page", "1"), 1)
+	const pageSize = 24
+	offset := (page - 1) * pageSize
 
 	items, err := h.trackerRepo.List(repository.TrackerListOptions{
 		ProfileID: activeProfile.ID,
@@ -383,9 +392,16 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
 		Order:     strings.TrimSpace(c.Query("order", "desc")),
 		Query:     strings.TrimSpace(c.Query("q")),
+		Limit:     pageSize + 1,
+		Offset:    offset,
 	})
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
+	}
+
+	hasNextPage := len(items) > pageSize
+	if hasNextPage {
+		items = items[:pageSize]
 	}
 
 	sources, err := h.sourceRepo.ListEnabled()
@@ -400,7 +416,13 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	cards := h.buildTrackerCards(c, items, sourceKeyByID)
 
-	return h.render(c, "trackers_partial.html", trackersPartialData{Trackers: cards, ViewMode: viewMode})
+	return h.render(c, "trackers_partial.html", trackersPartialData{
+		Trackers:    cards,
+		ViewMode:    viewMode,
+		Page:        page,
+		HasPrevPage: page > 1,
+		HasNextPage: hasNextPage,
+	})
 }
 
 func normalizeViewMode(raw string) string {
@@ -409,6 +431,14 @@ func normalizeViewMode(raw string) string {
 		return "grid"
 	}
 	return viewMode
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) []trackerCardView {
@@ -1571,22 +1601,25 @@ func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, 
 }
 
 func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) error {
-	tmpl, err := template.New("").Funcs(template.FuncMap{
-		"chapterInputValue": chapterInputValue,
-		"textInputValue":    textInputValue,
-		"timeInputValue":    timeInputValue,
-		"hasTagID":          hasTagID,
-		"tagIconLabel":      tagIconLabel,
-		"tagIconAssetPath":  tagIconAssetPath,
-		"toJSON":            toJSON,
-		"statusLabel":       statusLabel,
-		"sortLabel":         sortLabel,
-	}).ParseGlob("web/templates/*.html")
-	if err != nil {
+	h.templateOnce.Do(func() {
+		h.templates, h.templateErr = template.New("").Funcs(template.FuncMap{
+			"chapterInputValue": chapterInputValue,
+			"textInputValue":    textInputValue,
+			"timeInputValue":    timeInputValue,
+			"hasTagID":          hasTagID,
+			"tagIconLabel":      tagIconLabel,
+			"tagIconAssetPath":  tagIconAssetPath,
+			"toJSON":            toJSON,
+			"statusLabel":       statusLabel,
+			"sortLabel":         sortLabel,
+		}).ParseGlob("web/templates/*.html")
+	})
+
+	if h.templateErr != nil || h.templates == nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Template load error")
 	}
 	c.Type("html", "utf-8")
-	return tmpl.ExecuteTemplate(c.Response().BodyWriter(), templateName, data)
+	return h.templates.ExecuteTemplate(c.Response().BodyWriter(), templateName, data)
 }
 
 func statusLabel(value string) string {

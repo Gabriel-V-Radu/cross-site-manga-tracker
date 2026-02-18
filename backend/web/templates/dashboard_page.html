@@ -93,17 +93,18 @@
                 </label>
                 <input type="hidden" name="profile" id="profile-filter" value="{{.ActiveProfile.Key}}">
                 <input type="hidden" name="view" id="view-input" value="grid">
+                <input type="hidden" name="page" id="page-input" value="1">
             </form>
 
             <div class="panel-actions">
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='grid'; document.body.dispatchEvent(new Event('trackersChanged'))">
+                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('page-input').value='1'; document.body.dispatchEvent(new Event('trackersChanged'))">
                     Grid
                 </button>
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='list'; document.body.dispatchEvent(new Event('trackersChanged'))">
+                        onclick="document.getElementById('view-input').value='list'; document.getElementById('page-input').value='1'; document.body.dispatchEvent(new Event('trackersChanged'))">
                     List
                 </button>
                 <button type="button"
@@ -198,6 +199,29 @@
             }
 
             window.updateFilterTagsSummary();
+
+            var filtersForm = document.getElementById('tracker-filters');
+            if (filtersForm) {
+                filtersForm.addEventListener('change', function (event) {
+                    if (!event || !event.target || event.target.name === 'page') {
+                        return;
+                    }
+                    var pageInput = document.getElementById('page-input');
+                    if (pageInput) {
+                        pageInput.value = '1';
+                    }
+                });
+
+                var searchInput = filtersForm.querySelector('input[name="q"]');
+                if (searchInput) {
+                    searchInput.addEventListener('input', function () {
+                        var pageInput = document.getElementById('page-input');
+                        if (pageInput) {
+                            pageInput.value = '1';
+                        }
+                    });
+                }
+            }
         });
 
         window.updateFilterTagsSummary = function () {
