@@ -28,6 +28,7 @@ var (
 	htmlTagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
 	chapterURLPattern  = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
 	chapterDatePattern = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
+	chapterAgoPattern  = regexp.MustCompile(`(?i)\b((\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|an?\s+(minute|hour|day|week|month|year)|just\s+now)\s+ago\b`)
 	metaTagPattern     = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
 	imageTagPattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
 	updatedTagPattern  = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property|name)=["'](?:og:updated_time|article:published_time|article:modified_time|datePublished|dateModified)["'][^>]*content=["']([^"']+)["']`)
@@ -582,10 +583,108 @@ func extractLatestChapterAndReleaseAt(body string) (*float64, *time.Time) {
 		if latest == nil || parsed > *latest {
 			value := parsed
 			latest = &value
-			latestReleaseAt = extractDateNearIndex(body, match[0], match[1])
+			latestReleaseAt = extractChapterDateAtIndex(body, match[0], match[1])
 		}
 	}
 	return latest, latestReleaseAt
+}
+
+func extractChapterDateAtIndex(body string, start int, end int) *time.Time {
+	if len(body) == 0 {
+		return nil
+	}
+
+	if row := extractChapterRow(body, start, end); row != "" {
+		if parsed := parseChapterDateText(row, time.Now().UTC()); parsed != nil {
+			return parsed
+		}
+	}
+
+	return extractDateNearIndex(body, start, end)
+}
+
+func extractChapterRow(body string, start int, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(body) {
+		end = len(body)
+	}
+	if start >= end {
+		return ""
+	}
+
+	rowStart := strings.LastIndex(strings.ToLower(body[:start]), "<li")
+	if rowStart < 0 {
+		return ""
+	}
+	rowEndOffset := strings.Index(strings.ToLower(body[end:]), "</li>")
+	if rowEndOffset < 0 {
+		return ""
+	}
+	rowEnd := end + rowEndOffset + len("</li>")
+	if rowStart >= rowEnd || rowEnd > len(body) {
+		return ""
+	}
+
+	return body[rowStart:rowEnd]
+}
+
+func parseChapterDateText(text string, now time.Time) *time.Time {
+	rawDate := chapterDatePattern.FindString(text)
+	if strings.TrimSpace(rawDate) != "" {
+		parsed, err := time.Parse("Jan 2, 2006", rawDate)
+		if err == nil {
+			utc := parsed.UTC()
+			return &utc
+		}
+	}
+
+	match := chapterAgoPattern.FindStringSubmatch(strings.ToLower(text))
+	if len(match) == 0 {
+		return nil
+	}
+
+	agoText := strings.TrimSpace(match[1])
+	if agoText == "just now" {
+		result := now.UTC()
+		return &result
+	}
+
+	quantity := 1
+	if len(match) >= 3 {
+		if parsedQuantity, err := strconv.Atoi(strings.TrimSpace(match[2])); err == nil && parsedQuantity > 0 {
+			quantity = parsedQuantity
+		}
+	}
+
+	unit := ""
+	if len(match) >= 4 {
+		unit = strings.TrimSpace(match[3])
+	}
+	if unit == "" && len(match) >= 5 {
+		unit = strings.TrimSpace(match[4])
+	}
+
+	result := now.UTC()
+	switch unit {
+	case "minute", "minutes":
+		result = result.Add(-time.Duration(quantity) * time.Minute)
+	case "hour", "hours":
+		result = result.Add(-time.Duration(quantity) * time.Hour)
+	case "day", "days":
+		result = result.AddDate(0, 0, -quantity)
+	case "week", "weeks":
+		result = result.AddDate(0, 0, -7*quantity)
+	case "month", "months":
+		result = result.AddDate(0, -quantity, 0)
+	case "year", "years":
+		result = result.AddDate(-quantity, 0, 0)
+	default:
+		return nil
+	}
+
+	return &result
 }
 
 func extractDateNearIndex(body string, start int, end int) *time.Time {
