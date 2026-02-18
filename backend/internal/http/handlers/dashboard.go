@@ -20,25 +20,36 @@ import (
 )
 
 type DashboardHandler struct {
-	trackerRepo     *repository.TrackerRepository
-	sourceRepo      *repository.SourceRepository
-	profileRepo     *repository.ProfileRepository
-	profileResolver *profileContextResolver
-	registry        *connectors.Registry
-	coverCache      map[string]coverCacheEntry
-	cacheMu         sync.RWMutex
-	coverFetchMu    sync.Mutex
-	coverInFlight   map[string]bool
-	coverFetchSem   chan struct{}
-	templates       *template.Template
-	templateOnce    sync.Once
-	templateErr     error
+	trackerRepo        *repository.TrackerRepository
+	sourceRepo         *repository.SourceRepository
+	profileRepo        *repository.ProfileRepository
+	profileResolver    *profileContextResolver
+	registry           *connectors.Registry
+	coverCache         map[string]coverCacheEntry
+	cacheMu            sync.RWMutex
+	coverFetchMu       sync.Mutex
+	coverInFlight      map[string]bool
+	coverFetchSem      chan struct{}
+	chapterURLCache    map[string]chapterURLCacheEntry
+	chapterURLCacheMu  sync.RWMutex
+	chapterURLFetchMu  sync.Mutex
+	chapterURLInFlight map[string]bool
+	chapterURLFetchSem chan struct{}
+	templates          *template.Template
+	templateOnce       sync.Once
+	templateErr        error
 }
 
 type coverCacheEntry struct {
 	CoverURL  string
 	Found     bool
 	ExpiresAt time.Time
+}
+
+type chapterURLCacheEntry struct {
+	ChapterURL string
+	Found      bool
+	ExpiresAt  time.Time
 }
 
 var allowedTagIconKeys = map[string]bool{
@@ -150,14 +161,17 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		registry = connectors.NewRegistry()
 	}
 	return &DashboardHandler{
-		trackerRepo:     repository.NewTrackerRepository(db),
-		sourceRepo:      repository.NewSourceRepository(db),
-		profileRepo:     repository.NewProfileRepository(db),
-		profileResolver: newProfileContextResolver(db),
-		registry:        registry,
-		coverCache:      make(map[string]coverCacheEntry),
-		coverInFlight:   make(map[string]bool),
-		coverFetchSem:   make(chan struct{}, 4),
+		trackerRepo:        repository.NewTrackerRepository(db),
+		sourceRepo:         repository.NewSourceRepository(db),
+		profileRepo:        repository.NewProfileRepository(db),
+		profileResolver:    newProfileContextResolver(db),
+		registry:           registry,
+		coverCache:         make(map[string]coverCacheEntry),
+		coverInFlight:      make(map[string]bool),
+		coverFetchSem:      make(chan struct{}, 4),
+		chapterURLCache:    make(map[string]chapterURLCacheEntry),
+		chapterURLInFlight: make(map[string]bool),
+		chapterURLFetchSem: make(chan struct{}, 6),
 	}
 }
 
@@ -509,11 +523,19 @@ func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracke
 		sourceKey := sourceKeyByID[item.SourceID]
 
 		if item.LatestKnownChapter != nil {
-			card.LatestKnownChapterURL = h.resolveChapterURL(c.Context(), sourceKey, item.SourceURL, *item.LatestKnownChapter)
+			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter)
+			card.LatestKnownChapterURL = latestChapterURL
+			if waitingLatestChapterURL {
+				pendingCovers = true
+			}
 		}
 
 		if item.LastReadChapter != nil {
-			card.LastReadChapterURL = h.resolveChapterURL(c.Context(), sourceKey, item.SourceURL, *item.LastReadChapter)
+			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter)
+			card.LastReadChapterURL = lastReadChapterURL
+			if waitingLastReadChapterURL {
+				pendingCovers = true
+			}
 		}
 
 		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID)
@@ -571,6 +593,133 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 
 		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID)
 	}()
+}
+
+func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64) (string, bool) {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return "", false
+	}
+
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return trimmedSourceURL, false
+	}
+
+	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
+	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
+		if found {
+			return cachedChapterURL, false
+		}
+		return trimmedSourceURL, false
+	}
+
+	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey)
+	return trimmedSourceURL, true
+}
+
+func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, cacheKey string) {
+	h.chapterURLFetchMu.Lock()
+	if h.chapterURLInFlight[cacheKey] {
+		h.chapterURLFetchMu.Unlock()
+		return
+	}
+	h.chapterURLInFlight[cacheKey] = true
+	h.chapterURLFetchMu.Unlock()
+
+	go func() {
+		h.chapterURLFetchSem <- struct{}{}
+		defer func() {
+			<-h.chapterURLFetchSem
+			h.chapterURLFetchMu.Lock()
+			delete(h.chapterURLInFlight, cacheKey)
+			h.chapterURLFetchMu.Unlock()
+		}()
+
+		_, _ = h.fetchChapterURL(sourceKey, sourceURL, chapter)
+	}()
+}
+
+func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64) (string, error) {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return "", fmt.Errorf("missing source url")
+	}
+
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return trimmedSourceURL, nil
+	}
+
+	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
+	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
+		if found {
+			return cachedChapterURL, nil
+		}
+		return trimmedSourceURL, fmt.Errorf("chapter url not found")
+	}
+
+	connector, ok := h.registry.Get(trimmedSourceKey)
+	if !ok {
+		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
+		return trimmedSourceURL, fmt.Errorf("connector not found")
+	}
+
+	resolver, ok := connector.(connectors.ChapterURLResolver)
+	if !ok {
+		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
+		return trimmedSourceURL, fmt.Errorf("chapter resolver not supported")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	chapterURL, err := resolver.ResolveChapterURL(ctx, trimmedSourceURL, chapter)
+	if err != nil {
+		h.setCachedChapterURL(cacheKey, "", false, 2*time.Minute)
+		return trimmedSourceURL, fmt.Errorf("resolve chapter url: %w", err)
+	}
+
+	chapterURL = strings.TrimSpace(chapterURL)
+	if chapterURL == "" {
+		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
+		return trimmedSourceURL, fmt.Errorf("chapter url empty")
+	}
+
+	h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
+	return chapterURL, nil
+}
+
+func buildChapterURLCacheKey(sourceKey, sourceURL string, chapter float64) string {
+	return strings.ToLower(strings.TrimSpace(sourceKey)) + "|" + strings.ToLower(strings.TrimSpace(sourceURL)) + "|" + strconv.FormatFloat(chapter, 'f', -1, 64)
+}
+
+func (h *DashboardHandler) getCachedChapterURL(cacheKey string) (chapterURL string, found bool, ok bool) {
+	h.chapterURLCacheMu.RLock()
+	entry, exists := h.chapterURLCache[cacheKey]
+	h.chapterURLCacheMu.RUnlock()
+	if !exists {
+		return "", false, false
+	}
+
+	if time.Now().UTC().After(entry.ExpiresAt) {
+		h.chapterURLCacheMu.Lock()
+		delete(h.chapterURLCache, cacheKey)
+		h.chapterURLCacheMu.Unlock()
+		return "", false, false
+	}
+
+	return entry.ChapterURL, entry.Found, true
+}
+
+func (h *DashboardHandler) setCachedChapterURL(cacheKey, chapterURL string, found bool, ttl time.Duration) {
+	h.chapterURLCacheMu.Lock()
+	h.chapterURLCache[cacheKey] = chapterURLCacheEntry{
+		ChapterURL: chapterURL,
+		Found:      found,
+		ExpiresAt:  time.Now().UTC().Add(ttl),
+	}
+	h.chapterURLCacheMu.Unlock()
 }
 
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
