@@ -8,9 +8,10 @@
         <form class="tracker-form"
               hx-post="{{if eq .Mode "edit"}}/dashboard/trackers/{{.Tracker.ID}}{{else}}/dashboard/trackers{{end}}"
               hx-target="#modal-zone"
-                            hx-swap="innerHTML"
-                            hx-on:submit="var view=document.getElementById('view-input'); var viewInput=this.querySelector('input[name=view_mode]'); if(viewInput){ viewInput.value = (view && view.value) ? view.value : 'grid'; }">
-                        <input type="hidden" name="view_mode" value="grid">
+              hx-swap="innerHTML"
+              hx-indicator="#tracker-save-loading"
+              hx-on:submit="var view=document.getElementById('view-input'); var viewInput=this.querySelector('input[name=view_mode]'); if(viewInput){ viewInput.value = (view && view.value) ? view.value : 'grid'; }">
+            <input type="hidden" name="view_mode" value="grid">
             <label>
                 Title
                 <input type="text" name="title" value="{{if .Tracker}}{{.Tracker.Title}}{{end}}" required>
@@ -133,6 +134,7 @@
             </div>
 
             <div class="modal-actions">
+                <p id="tracker-save-loading" class="search-loading htmx-indicator">Saving…</p>
                 <button type="button" class="action-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">Cancel</button>
                 <button type="submit" class="action-btn action-btn--accent">Save</button>
             </div>

@@ -1076,6 +1076,9 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 	if tracker == nil || strings.TrimSpace(tracker.SourceURL) == "" || tracker.SourceID <= 0 {
 		return
 	}
+	if hasResolvedSourceMetadata(tracker) {
+		return
+	}
 
 	source, err := h.sourceRepo.GetByID(tracker.SourceID)
 	if err != nil || source == nil || !source.Enabled {
@@ -1110,6 +1113,22 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 		updatedAt := resolved.LastUpdatedAt.UTC()
 		tracker.LatestReleaseAt = &updatedAt
 	}
+}
+
+func hasResolvedSourceMetadata(tracker *models.Tracker) bool {
+	if tracker == nil {
+		return false
+	}
+
+	if tracker.SourceItemID == nil || strings.TrimSpace(*tracker.SourceItemID) == "" {
+		return false
+	}
+	if tracker.LatestKnownChapter == nil || *tracker.LatestKnownChapter <= 0 {
+		return false
+	}
+
+	// latest_release_at may be missing for some sources, so only id+latest chapter are required.
+	return true
 }
 
 func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
@@ -1167,15 +1186,32 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 	}
 
-	primarySource, latestKnownChapter, latestReleaseAt := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
-	tracker.SourceID = primarySource.SourceID
-	tracker.SourceItemID = primarySource.SourceItemID
-	tracker.SourceURL = primarySource.SourceURL
-	if latestKnownChapter != nil {
-		tracker.LatestKnownChapter = latestKnownChapter
+	existingSources, err := h.trackerRepo.ListTrackerSources(activeProfile.ID, id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sources")
 	}
-	if latestReleaseAt != nil {
-		tracker.LatestReleaseAt = latestReleaseAt
+	if len(existingSources) == 0 {
+		existingSources = []models.TrackerSource{
+			{
+				TrackerID:    id,
+				SourceID:     existingTracker.SourceID,
+				SourceItemID: existingTracker.SourceItemID,
+				SourceURL:    existingTracker.SourceURL,
+			},
+		}
+	}
+
+	if !sameTrackerSources(existingSources, uniqueSources) {
+		primarySource, latestKnownChapter, latestReleaseAt := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
+		tracker.SourceID = primarySource.SourceID
+		tracker.SourceItemID = primarySource.SourceItemID
+		tracker.SourceURL = primarySource.SourceURL
+		if latestKnownChapter != nil {
+			tracker.LatestKnownChapter = latestKnownChapter
+		}
+		if latestReleaseAt != nil {
+			tracker.LatestReleaseAt = latestReleaseAt
+		}
 	}
 
 	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
@@ -1476,6 +1512,47 @@ func dedupeTrackerSources(items []models.TrackerSource) []models.TrackerSource {
 		out = append(out, item)
 	}
 	return out
+}
+
+func sameTrackerSources(existing []models.TrackerSource, incoming []models.TrackerSource) bool {
+	if len(existing) != len(incoming) {
+		return false
+	}
+
+	makeKey := func(item models.TrackerSource) string {
+		sourceItemID := ""
+		if item.SourceItemID != nil {
+			sourceItemID = strings.ToLower(strings.TrimSpace(*item.SourceItemID))
+		}
+		return fmt.Sprintf(
+			"%d|%s|%s",
+			item.SourceID,
+			strings.ToLower(strings.TrimSpace(item.SourceURL)),
+			sourceItemID,
+		)
+	}
+
+	existingSet := make(map[string]int, len(existing))
+	for _, item := range existing {
+		key := makeKey(item)
+		existingSet[key]++
+	}
+
+	for _, item := range incoming {
+		key := makeKey(item)
+		if existingSet[key] == 0 {
+			return false
+		}
+		existingSet[key]--
+	}
+
+	for _, remaining := range existingSet {
+		if remaining != 0 {
+			return false
+		}
+	}
+
+	return true
 }
 
 func parseTagNames(raw string) []string {
