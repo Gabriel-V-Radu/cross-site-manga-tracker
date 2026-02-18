@@ -56,7 +56,7 @@ func NewConnector() *Connector {
 		httpClient: &http.Client{
 			Timeout: 12 * time.Second,
 		},
-		minRequestInterval: 350 * time.Millisecond,
+		minRequestInterval: 150 * time.Millisecond,
 	}
 }
 
@@ -71,7 +71,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		baseURL:            strings.TrimRight(baseURL, "/"),
 		allowedHost:        allowedHost,
 		httpClient:         client,
-		minRequestInterval: 350 * time.Millisecond,
+		minRequestInterval: 150 * time.Millisecond,
 	}
 }
 
