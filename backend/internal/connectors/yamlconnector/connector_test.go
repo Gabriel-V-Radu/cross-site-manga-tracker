@@ -62,6 +62,7 @@ func TestYAMLConnectorSearchResolveHealth(t *testing.T) {
 			TitleField         string `yaml:"title_field"`
 			URLField           string `yaml:"url_field"`
 			LatestChapterField string `yaml:"latest_chapter_field"`
+			LastUpdatedField   string `yaml:"last_updated_field"`
 		}{
 			SearchItemsPath:    "items",
 			ResolveItemPath:    "item",
@@ -69,6 +70,7 @@ func TestYAMLConnectorSearchResolveHealth(t *testing.T) {
 			TitleField:         "title",
 			URLField:           "url",
 			LatestChapterField: "latestChapter",
+			LastUpdatedField:   "",
 		},
 	}, &http.Client{Timeout: 5 * time.Second})
 	if err != nil {

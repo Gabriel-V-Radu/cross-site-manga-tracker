@@ -244,11 +244,12 @@ func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter 
 	}
 
 	var sourceItemID string
-	if segments[0] == "manga" {
+	switch segments[0] {
+	case "manga":
 		sourceItemID = strings.TrimSpace(segments[1])
-	} else if segments[0] == "read" {
+	case "read":
 		sourceItemID = strings.TrimSpace(segments[1])
-	} else {
+	default:
 		return "", fmt.Errorf("unsupported mangafire path")
 	}
 
@@ -587,7 +588,7 @@ func extractLatestChapterAndReleaseAt(body string) (*float64, *time.Time) {
 			continue
 		}
 
-		if latest != nil && parsed == *latest {
+		if parsed == *latest {
 			candidate := extractChapterDateAtIndex(body, match[0], match[1])
 			if candidate == nil {
 				continue
