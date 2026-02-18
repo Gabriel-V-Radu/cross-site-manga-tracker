@@ -57,6 +57,7 @@
 
         window.__coverRefreshAttempts[refreshKey] = attempts + 1;
         window.setTimeout(function () {
+            window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
         }, 900);
     })();

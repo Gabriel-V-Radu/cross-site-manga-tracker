@@ -317,6 +317,11 @@
                 return;
             }
 
+            if (window.__silentCoverRefresh) {
+                window.__silentCoverRefresh = false;
+                return;
+            }
+
             var viewInput = document.getElementById('view-input');
             var mode = viewInput && viewInput.value ? viewInput.value : 'grid';
             window.renderTrackersSkeleton(mode);
