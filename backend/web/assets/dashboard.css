@@ -283,6 +283,67 @@ input:focus, select:focus {
     margin-top: 24px;
 }
 
+.pagination {
+    display: flex;
+    justify-content: center;
+}
+
+.pagination__group {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    padding: 8px 10px;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.pagination-btn {
+    min-width: 34px;
+    height: 32px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font: inherit;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    transition: color 120ms ease, background-color 120ms ease;
+}
+
+.pagination-btn:not(:disabled):hover {
+    color: var(--ink);
+    background: rgba(154, 168, 196, 0.16);
+}
+
+.pagination-btn--active {
+    color: var(--ink);
+    font-weight: 700;
+}
+
+.pagination-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.pagination-ellipsis {
+    min-width: 20px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-soft);
+    font-size: 1rem;
+    line-height: 1;
+    user-select: none;
+}
+
 .trackers-loading__label {
     margin: 0 0 10px;
     color: var(--ink-soft);

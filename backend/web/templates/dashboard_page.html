@@ -262,6 +262,22 @@
                 return;
             }
 
+            if (button.hasAttribute('disabled')) {
+                return;
+            }
+
+            var explicitPage = Number(button.getAttribute('data-page-value') || '0');
+            if (explicitPage > 0) {
+                var explicitPageInput = document.getElementById('page-input');
+                if (explicitPageInput) {
+                    explicitPageInput.value = String(explicitPage);
+                }
+
+                window.__scrollTrackersToTop = true;
+                document.body.dispatchEvent(new Event('trackersChanged'));
+                return;
+            }
+
             var base = Number(button.getAttribute('data-page-target') || '1');
             var delta = Number(button.getAttribute('data-page-delta') || '0');
             var nextPage = Math.max(1, base + delta);

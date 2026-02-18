@@ -73,6 +73,10 @@ type trackersPartialData struct {
 	Trackers      []trackerCardView
 	ViewMode      string
 	Page          int
+	PrevPage      int
+	NextPage      int
+	TotalPages    int
+	PageNumbers   []int
 	HasPrevPage   bool
 	HasNextPage   bool
 	PendingCovers bool
@@ -401,26 +405,39 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
 	page := parsePositiveInt(c.Query("page", "1"), 1)
 	const pageSize = 24
-	offset := (page - 1) * pageSize
 
-	items, err := h.trackerRepo.List(repository.TrackerListOptions{
+	listOptions := repository.TrackerListOptions{
 		ProfileID: activeProfile.ID,
 		Statuses:  statuses,
 		TagNames:  parseTagNamesFromQuery(c),
 		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
 		Order:     strings.TrimSpace(c.Query("order", "desc")),
 		Query:     strings.TrimSpace(c.Query("q")),
-		Limit:     pageSize + 1,
-		Offset:    offset,
-	})
+	}
+
+	totalTrackers, err := h.trackerRepo.Count(listOptions)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
 	}
 
-	hasNextPage := len(items) > pageSize
-	if hasNextPage {
-		items = items[:pageSize]
+	totalPages := int(math.Ceil(float64(totalTrackers) / float64(pageSize)))
+	if totalPages < 1 {
+		totalPages = 1
 	}
+
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * pageSize
+	listOptions.Limit = pageSize
+	listOptions.Offset = offset
+
+	items, err := h.trackerRepo.List(listOptions)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
+	}
+
+	hasNextPage := page < totalPages
 
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
@@ -438,6 +455,10 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		Trackers:      cards,
 		ViewMode:      viewMode,
 		Page:          page,
+		PrevPage:      max(1, page-1),
+		NextPage:      min(totalPages, page+1),
+		TotalPages:    totalPages,
+		PageNumbers:   buildPageNumbers(totalPages, page),
 		HasPrevPage:   page > 1,
 		HasNextPage:   hasNextPage,
 		PendingCovers: pendingCovers,
@@ -459,6 +480,55 @@ func parsePositiveInt(raw string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func buildPageNumbers(totalPages int, currentPage int) []int {
+	if totalPages <= 0 {
+		return []int{1}
+	}
+	if currentPage <= 0 {
+		currentPage = 1
+	}
+	if currentPage > totalPages {
+		currentPage = totalPages
+	}
+
+	if totalPages <= 11 {
+		pages := make([]int, totalPages)
+		for idx := 0; idx < totalPages; idx++ {
+			pages[idx] = idx + 1
+		}
+		return pages
+	}
+
+	pages := make([]int, 0, 9)
+	pages = append(pages, 1)
+
+	windowStart := currentPage - 2
+	windowEnd := currentPage + 2
+
+	if windowStart < 2 {
+		windowStart = 2
+	}
+	if windowEnd > totalPages-1 {
+		windowEnd = totalPages - 1
+	}
+
+	if windowStart > 2 {
+		pages = append(pages, 0)
+	}
+
+	for page := windowStart; page <= windowEnd; page++ {
+		pages = append(pages, page)
+	}
+
+	if windowEnd < totalPages-1 {
+		pages = append(pages, 0)
+	}
+
+	pages = append(pages, totalPages)
+
+	return pages
 }
 
 func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) ([]trackerCardView, bool) {

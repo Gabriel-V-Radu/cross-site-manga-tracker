@@ -127,44 +127,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		FROM trackers
 	`
 
-	args := make([]any, 0, 1)
-	whereClauses := make([]string, 0, 1)
-
-	whereClauses = append(whereClauses, `profile_id = ?`)
-	args = append(args, options.ProfileID)
-
-	if strings.TrimSpace(options.Query) != "" {
-		whereClauses = append(whereClauses, `LOWER(title) LIKE ?`)
-		queryLike := "%" + strings.ToLower(strings.TrimSpace(options.Query)) + "%"
-		args = append(args, queryLike)
-	}
-
-	if len(options.Statuses) > 0 {
-		placeholders := make([]string, 0, len(options.Statuses))
-		for _, status := range options.Statuses {
-			placeholders = append(placeholders, "?")
-			args = append(args, status)
-		}
-		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
-	}
-
-	if len(options.TagNames) > 0 {
-		for _, tagName := range options.TagNames {
-			normalized := strings.TrimSpace(strings.ToLower(tagName))
-			if normalized == "" {
-				continue
-			}
-			whereClauses = append(whereClauses, `EXISTS (
-				SELECT 1
-				FROM tracker_tags tt
-				INNER JOIN custom_tags ct ON ct.id = tt.tag_id
-				WHERE tt.tracker_id = trackers.id
-				  AND ct.profile_id = ?
-				  AND LOWER(ct.name) = ?
-			)`)
-			args = append(args, options.ProfileID, normalized)
-		}
-	}
+	whereClauses, args := buildTrackerListFilters(options)
 
 	if len(whereClauses) > 0 {
 		query += ` WHERE ` + strings.Join(whereClauses, " AND ")
@@ -213,6 +176,64 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	}
 
 	return trackers, nil
+}
+
+func (r *TrackerRepository) Count(options TrackerListOptions) (int, error) {
+	query := `SELECT COUNT(1) FROM trackers`
+	whereClauses, args := buildTrackerListFilters(options)
+	if len(whereClauses) > 0 {
+		query += ` WHERE ` + strings.Join(whereClauses, " AND ")
+	}
+
+	var total int
+	if err := r.db.QueryRow(query, args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count trackers: %w", err)
+	}
+
+	return total, nil
+}
+
+func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
+	args := make([]any, 0, 1)
+	whereClauses := make([]string, 0, 1)
+
+	whereClauses = append(whereClauses, `profile_id = ?`)
+	args = append(args, options.ProfileID)
+
+	if strings.TrimSpace(options.Query) != "" {
+		whereClauses = append(whereClauses, `LOWER(title) LIKE ?`)
+		queryLike := "%" + strings.ToLower(strings.TrimSpace(options.Query)) + "%"
+		args = append(args, queryLike)
+	}
+
+	if len(options.Statuses) > 0 {
+		placeholders := make([]string, 0, len(options.Statuses))
+		for _, status := range options.Statuses {
+			placeholders = append(placeholders, "?")
+			args = append(args, status)
+		}
+		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
+	}
+
+	if len(options.TagNames) > 0 {
+		for _, tagName := range options.TagNames {
+			normalized := strings.TrimSpace(strings.ToLower(tagName))
+			if normalized == "" {
+				continue
+			}
+			whereClauses = append(whereClauses, `EXISTS (
+				SELECT 1
+				FROM tracker_tags tt
+				INNER JOIN custom_tags ct ON ct.id = tt.tag_id
+				WHERE tt.tracker_id = trackers.id
+				  AND ct.profile_id = ?
+				  AND LOWER(ct.name) = ?
+			)`)
+			args = append(args, options.ProfileID, normalized)
+		}
+	}
+
+	return whereClauses, args
 }
 
 func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {

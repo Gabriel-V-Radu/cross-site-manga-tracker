@@ -18,24 +18,38 @@
 </div>
 {{end}}
 
-<div class="panel-actions" style="margin-top:16px; justify-content:flex-end;">
-    {{if .HasPrevPage}}
-    <button type="button"
-            class="action-btn js-page-btn"
-            data-page-target="{{.Page}}"
-            data-page-delta="-1">
-        Previous
-    </button>
-    {{end}}
-    {{if .HasNextPage}}
-    <button type="button"
-            class="action-btn action-btn--accent js-page-btn"
-            data-page-target="{{.Page}}"
-            data-page-delta="1">
-        Next
-    </button>
-    {{end}}
+{{if gt .TotalPages 1}}
+<div class="pagination" style="margin-top:16px;">
+    <div class="pagination__group" role="navigation" aria-label="Pagination">
+        <button type="button"
+                class="pagination-btn js-page-btn"
+                data-page-value="{{.PrevPage}}"
+                {{if not .HasPrevPage}}disabled{{end}}>
+            &#8249;
+        </button>
+
+        {{range .PageNumbers}}
+        {{if eq . 0}}
+        <span class="pagination-ellipsis" aria-hidden="true">&hellip;</span>
+        {{else}}
+        <button type="button"
+                class="pagination-btn {{if eq . $.Page}}pagination-btn--active {{end}}js-page-btn"
+                data-page-value="{{.}}"
+                {{if eq . $.Page}}aria-current="page"{{end}}>
+            {{.}}
+        </button>
+        {{end}}
+        {{end}}
+
+        <button type="button"
+                class="pagination-btn js-page-btn"
+                data-page-value="{{.NextPage}}"
+                {{if not .HasNextPage}}disabled{{end}}>
+            &#8250;
+        </button>
+    </div>
 </div>
+{{end}}
 {{end}}
 
 {{if .PendingCovers}}
