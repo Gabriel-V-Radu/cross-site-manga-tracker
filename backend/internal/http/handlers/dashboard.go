@@ -28,6 +28,9 @@ type DashboardHandler struct {
 	registry        *connectors.Registry
 	coverCache      map[string]coverCacheEntry
 	cacheMu         sync.RWMutex
+	coverFetchMu    sync.Mutex
+	coverInFlight   map[string]bool
+	coverFetchSem   chan struct{}
 	templates       *template.Template
 	templateOnce    sync.Once
 	templateErr     error
@@ -59,11 +62,13 @@ type dashboardPageData struct {
 }
 
 type trackersPartialData struct {
-	Trackers    []trackerCardView
-	ViewMode    string
-	Page        int
-	HasPrevPage bool
-	HasNextPage bool
+	Trackers      []trackerCardView
+	ViewMode      string
+	Page          int
+	HasPrevPage   bool
+	HasNextPage   bool
+	PendingCovers bool
+	RefreshKey    string
 }
 
 type trackerOOBResponseData struct {
@@ -154,6 +159,8 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		profileResolver: newProfileContextResolver(db),
 		registry:        registry,
 		coverCache:      make(map[string]coverCacheEntry),
+		coverInFlight:   make(map[string]bool),
+		coverFetchSem:   make(chan struct{}, 4),
 	}
 }
 
@@ -414,14 +421,16 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		sourceKeyByID[source.ID] = source.Key
 	}
 
-	cards := h.buildTrackerCards(c, items, sourceKeyByID)
+	cards, pendingCovers := h.buildTrackerCards(c, items, sourceKeyByID)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
-		Trackers:    cards,
-		ViewMode:    viewMode,
-		Page:        page,
-		HasPrevPage: page > 1,
-		HasNextPage: hasNextPage,
+		Trackers:      cards,
+		ViewMode:      viewMode,
+		Page:          page,
+		HasPrevPage:   page > 1,
+		HasNextPage:   hasNextPage,
+		PendingCovers: pendingCovers,
+		RefreshKey:    c.OriginalURL(),
 	})
 }
 
@@ -441,8 +450,9 @@ func parsePositiveInt(raw string, fallback int) int {
 	return value
 }
 
-func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) []trackerCardView {
+func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
+	pendingCovers := false
 	for _, item := range items {
 		tagViews := toTrackerTagView(item.Tags)
 		displayTags, hiddenTagCount := prioritizeTrackerTags(tagViews, 3)
@@ -509,14 +519,61 @@ func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracke
 			card.LastReadChapterURL = h.resolveChapterURL(c.Context(), sourceKey, item.SourceURL, *item.LastReadChapter)
 		}
 
-		if coverURL, coverErr := h.fetchCoverURL(c.Context(), sourceKey, item.SourceURL, item.SourceItemID); coverErr == nil {
-			card.CoverURL = coverURL
+		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID)
+		card.CoverURL = coverURL
+		if waitingCover {
+			pendingCovers = true
 		}
 
 		cards = append(cards, card)
 	}
 
-	return cards
+	return cards, pendingCovers
+}
+
+func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string) (string, bool) {
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return "", false
+	}
+
+	cacheKey := buildCoverCacheKey(trimmedSourceKey, sourceURL, sourceItemID)
+	if cachedURL, found, ok := h.getCachedCover(cacheKey); ok {
+		if found {
+			return cachedURL, false
+		}
+		return "", false
+	}
+
+	if strings.TrimSpace(sourceURL) == "" {
+		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+		return "", false
+	}
+
+	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, cacheKey)
+	return "", true
+}
+
+func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, cacheKey string) {
+	h.coverFetchMu.Lock()
+	if h.coverInFlight[cacheKey] {
+		h.coverFetchMu.Unlock()
+		return
+	}
+	h.coverInFlight[cacheKey] = true
+	h.coverFetchMu.Unlock()
+
+	go func() {
+		h.coverFetchSem <- struct{}{}
+		defer func() {
+			<-h.coverFetchSem
+			h.coverFetchMu.Lock()
+			delete(h.coverInFlight, cacheKey)
+			h.coverFetchMu.Unlock()
+		}()
+
+		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID)
+	}()
 }
 
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
@@ -894,7 +951,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID)
+	cards, _ := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID)
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -968,7 +1025,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID)
+	cards, _ := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID)
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)

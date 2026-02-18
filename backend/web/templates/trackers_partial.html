@@ -35,3 +35,38 @@
     {{end}}
 </div>
 {{end}}
+
+{{if .PendingCovers}}
+<script>
+    (function () {
+        var refreshKey = "{{.RefreshKey}}";
+        if (!refreshKey || !document || !document.body) {
+            return;
+        }
+
+        if (!window.__coverRefreshAttempts) {
+            window.__coverRefreshAttempts = {};
+        }
+
+        var attempts = Number(window.__coverRefreshAttempts[refreshKey] || 0);
+        if (attempts >= 3) {
+            return;
+        }
+
+        window.__coverRefreshAttempts[refreshKey] = attempts + 1;
+        window.setTimeout(function () {
+            document.body.dispatchEvent(new Event('trackersChanged'));
+        }, 900);
+    })();
+</script>
+{{else}}
+<script>
+    (function () {
+        var refreshKey = "{{.RefreshKey}}";
+        if (!refreshKey || !window.__coverRefreshAttempts) {
+            return;
+        }
+        delete window.__coverRefreshAttempts[refreshKey];
+    })();
+</script>
+{{end}}
