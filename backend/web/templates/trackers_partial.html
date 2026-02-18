@@ -51,15 +51,17 @@
         }
 
         var attempts = Number(window.__coverRefreshAttempts[refreshKey] || 0);
-        if (attempts >= 3) {
+        var maxAttempts = 12;
+        if (attempts >= maxAttempts) {
             return;
         }
 
         window.__coverRefreshAttempts[refreshKey] = attempts + 1;
+        var delayMs = Math.min(2500, 700 + (attempts * 250));
         window.setTimeout(function () {
             window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
-        }, 900);
+        }, delayMs);
     })();
 </script>
 {{else}}
