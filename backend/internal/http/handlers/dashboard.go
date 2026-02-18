@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"log/slog"
 	"math"
 	"net/url"
 	"strconv"
@@ -1740,16 +1739,12 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		tryKeys = append(tryKeys, fallbackKey)
 	}
 
-	errorsByKey := make([]string, 0, len(tryKeys))
-
 	for _, key := range tryKeys {
 		coverURL, err := h.resolveCoverFromConnector(parent, key, resolvedURL)
 		if err != nil {
-			errorsByKey = append(errorsByKey, key+": "+err.Error())
 			continue
 		}
 		if coverURL == "" {
-			errorsByKey = append(errorsByKey, key+": empty cover url")
 			continue
 		}
 
@@ -1761,21 +1756,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	if strings.EqualFold(trimmedSourceKey, "mangafire") {
 		missTTL = 25 * time.Second
 	}
-	for _, detail := range errorsByKey {
-		lower := strings.ToLower(detail)
-		if strings.Contains(lower, "429") || strings.Contains(lower, "deadline") {
-			missTTL = 25 * time.Second
-			break
-		}
-	}
 	h.setCachedCover(cacheKey, "", false, missTTL)
-	slog.Warn("cover resolution failed",
-		"cacheKey", cacheKey,
-		"sourceURL", resolvedURL,
-		"storedSourceKey", trimmedSourceKey,
-		"attemptedKeys", tryKeys,
-		"attemptErrors", errorsByKey,
-	)
 	return "", fmt.Errorf("cover not found")
 }
 
