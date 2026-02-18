@@ -35,6 +35,8 @@ type DashboardHandler struct {
 	chapterURLFetchMu  sync.Mutex
 	chapterURLInFlight map[string]bool
 	chapterURLFetchSem chan struct{}
+	activePageMu       sync.RWMutex
+	activePageKey      string
 	templates          *template.Template
 	templateOnce       sync.Once
 	templateErr        error
@@ -431,6 +433,8 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 	listOptions.Limit = pageSize
 	listOptions.Offset = offset
+	refreshKey := c.OriginalURL()
+	h.setActiveTrackersPageKey(refreshKey)
 
 	items, err := h.trackerRepo.List(listOptions)
 	if err != nil {
@@ -449,7 +453,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		sourceKeyByID[source.ID] = source.Key
 	}
 
-	cards, pendingCovers := h.buildTrackerCards(c, items, sourceKeyByID)
+	cards, pendingCovers := h.buildTrackerCards(c, items, sourceKeyByID, refreshKey)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
 		Trackers:      cards,
@@ -462,7 +466,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		HasPrevPage:   page > 1,
 		HasNextPage:   hasNextPage,
 		PendingCovers: pendingCovers,
-		RefreshKey:    c.OriginalURL(),
+		RefreshKey:    refreshKey,
 	})
 }
 
@@ -531,7 +535,7 @@ func buildPageNumbers(totalPages int, currentPage int) []int {
 	return pages
 }
 
-func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string) ([]trackerCardView, bool) {
+func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracker, sourceKeyByID map[int64]string, pageKey string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
 	pendingCovers := false
 	for _, item := range items {
@@ -593,7 +597,7 @@ func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracke
 		sourceKey := sourceKeyByID[item.SourceID]
 
 		if item.LatestKnownChapter != nil {
-			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter)
+			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, pageKey)
 			card.LatestKnownChapterURL = latestChapterURL
 			if waitingLatestChapterURL {
 				pendingCovers = true
@@ -601,14 +605,14 @@ func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracke
 		}
 
 		if item.LastReadChapter != nil {
-			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter)
+			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, pageKey)
 			card.LastReadChapterURL = lastReadChapterURL
 			if waitingLastReadChapterURL {
 				pendingCovers = true
 			}
 		}
 
-		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID)
+		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, pageKey)
 		card.CoverURL = coverURL
 		if waitingCover {
 			pendingCovers = true
@@ -620,7 +624,7 @@ func (h *DashboardHandler) buildTrackerCards(c *fiber.Ctx, items []models.Tracke
 	return cards, pendingCovers
 }
 
-func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string) (string, bool) {
+func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, pageKey string) (string, bool) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
 		return "", false
@@ -639,11 +643,11 @@ func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, so
 		return "", false
 	}
 
-	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, cacheKey)
+	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, cacheKey, pageKey)
 	return "", true
 }
 
-func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, cacheKey string) {
+func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, cacheKey string, pageKey string) {
 	h.coverFetchMu.Lock()
 	if h.coverInFlight[cacheKey] {
 		h.coverFetchMu.Unlock()
@@ -661,11 +665,15 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 			h.coverFetchMu.Unlock()
 		}()
 
+		if pageKey != "" && !h.isActiveTrackersPageKey(pageKey) {
+			return
+		}
+
 		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID)
 	}()
 }
 
-func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64) (string, bool) {
+func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, pageKey string) (string, bool) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", false
@@ -684,11 +692,11 @@ func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL strin
 		return trimmedSourceURL, false
 	}
 
-	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey)
+	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey, pageKey)
 	return trimmedSourceURL, true
 }
 
-func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, cacheKey string) {
+func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, cacheKey string, pageKey string) {
 	h.chapterURLFetchMu.Lock()
 	if h.chapterURLInFlight[cacheKey] {
 		h.chapterURLFetchMu.Unlock()
@@ -706,8 +714,25 @@ func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, c
 			h.chapterURLFetchMu.Unlock()
 		}()
 
+		if pageKey != "" && !h.isActiveTrackersPageKey(pageKey) {
+			return
+		}
+
 		_, _ = h.fetchChapterURL(sourceKey, sourceURL, chapter)
 	}()
+}
+
+func (h *DashboardHandler) setActiveTrackersPageKey(pageKey string) {
+	h.activePageMu.Lock()
+	h.activePageKey = strings.TrimSpace(pageKey)
+	h.activePageMu.Unlock()
+}
+
+func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
+	h.activePageMu.RLock()
+	activePage := h.activePageKey
+	h.activePageMu.RUnlock()
+	return strings.TrimSpace(pageKey) != "" && strings.TrimSpace(pageKey) == strings.TrimSpace(activePage)
 }
 
 func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64) (string, error) {
@@ -1181,7 +1206,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID)
+	cards, _ := h.buildTrackerCards(c, []models.Tracker{*fullTracker}, sourceKeyByID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -1255,7 +1280,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID)
+	cards, _ := h.buildTrackerCards(c, []models.Tracker{*updatedTracker}, sourceKeyByID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
