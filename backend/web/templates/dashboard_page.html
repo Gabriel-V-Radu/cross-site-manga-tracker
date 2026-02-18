@@ -290,6 +290,32 @@
             dropdown.removeAttribute('open');
         });
 
+        window.dismissModalZone = function () {
+            var modalZone = document.getElementById('modal-zone');
+            if (!modalZone) {
+                return;
+            }
+            modalZone.innerHTML = '';
+        };
+
+        document.addEventListener('click', function (event) {
+            var target = event && event.target;
+            if (!target || !target.closest) {
+                return;
+            }
+
+            var backdrop = target.closest('#modal-zone .modal-backdrop');
+            if (!backdrop) {
+                return;
+            }
+
+            if (target.closest('.modal-card')) {
+                return;
+            }
+
+            window.dismissModalZone();
+        });
+
         var cancelPendingTrackersRefresh = function () {
             if (!window.__pendingTrackersRefreshTimer) {
                 return;
