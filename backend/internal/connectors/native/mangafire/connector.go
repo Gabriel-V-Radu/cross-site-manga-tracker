@@ -40,6 +40,10 @@ type Connector struct {
 	allowedHost []string
 	httpClient  *http.Client
 
+	requestMu          sync.Mutex
+	nextAllowedRequest time.Time
+	minRequestInterval time.Duration
+
 	indexMu        sync.RWMutex
 	cachedMangaIDs []string
 	cachedIndexAt  time.Time
@@ -52,6 +56,7 @@ func NewConnector() *Connector {
 		httpClient: &http.Client{
 			Timeout: 12 * time.Second,
 		},
+		minRequestInterval: 350 * time.Millisecond,
 	}
 }
 
@@ -62,7 +67,12 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 	if len(allowedHost) == 0 {
 		allowedHost = []string{"mangafire.to"}
 	}
-	return &Connector{baseURL: strings.TrimRight(baseURL, "/"), allowedHost: allowedHost, httpClient: client}
+	return &Connector{
+		baseURL:            strings.TrimRight(baseURL, "/"),
+		allowedHost:        allowedHost,
+		httpClient:         client,
+		minRequestInterval: 350 * time.Millisecond,
+	}
 }
 
 func (c *Connector) Key() string {
@@ -332,6 +342,10 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := c.waitForRequestWindow(ctx); err != nil {
+			return "", err
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return "", fmt.Errorf("create request: %w", err)
@@ -344,6 +358,7 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 
 		res, err := c.httpClient.Do(req)
 		if err != nil {
+			c.deferRequests(c.minRequestInterval)
 			return "", fmt.Errorf("request failed: %w", err)
 		}
 
@@ -351,8 +366,10 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 			rawBody, readErr := io.ReadAll(res.Body)
 			res.Body.Close()
 			if readErr != nil {
+				c.deferRequests(c.minRequestInterval)
 				return "", fmt.Errorf("read response body: %w", readErr)
 			}
+			c.deferRequests(c.minRequestInterval)
 			return string(rawBody), nil
 		}
 
@@ -362,20 +379,56 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 
 		if res.StatusCode == http.StatusTooManyRequests && attempt < maxAttempts-1 {
 			delay := computeRetryDelay(attempt, retryAfter)
-			if delay > 0 {
-				select {
-				case <-ctx.Done():
-					return "", ctx.Err()
-				case <-time.After(delay):
-				}
+			if delay < 2*time.Second {
+				delay = 2 * time.Second
 			}
+			c.deferRequests(delay)
 			continue
 		}
+
+		c.deferRequests(c.minRequestInterval)
 
 		return "", statusErr
 	}
 
 	return "", &httpStatusError{StatusCode: http.StatusTooManyRequests}
+}
+
+func (c *Connector) waitForRequestWindow(ctx context.Context) error {
+	for {
+		c.requestMu.Lock()
+		nextAllowed := c.nextAllowedRequest
+		c.requestMu.Unlock()
+
+		now := time.Now().UTC()
+		if !nextAllowed.After(now) {
+			return nil
+		}
+
+		wait := time.Until(nextAllowed)
+		if wait <= 0 {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (c *Connector) deferRequests(delay time.Duration) {
+	if delay <= 0 {
+		delay = c.minRequestInterval
+	}
+
+	next := time.Now().UTC().Add(delay)
+	c.requestMu.Lock()
+	if next.After(c.nextAllowedRequest) {
+		c.nextAllowedRequest = next
+	}
+	c.requestMu.Unlock()
 }
 
 type httpStatusError struct {
