@@ -42,6 +42,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Get("/dashboard", dashboard.Page)
 	app.Post("/dashboard/profile/rename", dashboard.RenameProfileFromForm)
 	app.Get("/dashboard/profile/menu", dashboard.ProfileMenuModal)
+	app.Get("/dashboard/profile/filter-tags", dashboard.ProfileFilterTagsPartial)
 	app.Post("/dashboard/profile/switch", dashboard.SwitchProfileFromMenu)
 	app.Post("/dashboard/profile/tags", dashboard.CreateTagFromMenu)
 	app.Post("/dashboard/profile/tags/delete", dashboard.DeleteTagFromMenu)

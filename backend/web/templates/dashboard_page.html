@@ -72,7 +72,12 @@
                     Tags
                     <details id="filter-tags-dropdown" class="filter-multi-select">
                         <summary id="filter-tags-summary">0</summary>
-                        <div class="filter-multi-select__menu">
+                        <div class="filter-multi-select__menu"
+                             hx-get="/dashboard/profile/filter-tags"
+                             hx-trigger="load, profileTagsChanged from:body"
+                             hx-target="this"
+                             hx-swap="innerHTML"
+                             hx-include="#profile-filter">
                             {{if gt (len .ProfileTags) 0}}
                             {{range .ProfileTags}}
                             <label class="filter-multi-select__option">

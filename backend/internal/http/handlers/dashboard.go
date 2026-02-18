@@ -126,6 +126,10 @@ type profileMenuData struct {
 	Message           string
 }
 
+type profileFilterTagsData struct {
+	ProfileTags []models.CustomTag
+}
+
 func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHandler {
 	if registry == nil {
 		registry = connectors.NewRegistry()
@@ -217,8 +221,22 @@ func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 	})
 }
 
+func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
+	return h.render(c, "profile_filter_tags_partial.html", profileFilterTagsData{ProfileTags: profileTags})
+}
+
 func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
-	profileKey := strings.TrimSpace(c.FormValue("profile"))
+	profileKey := strings.TrimSpace(string(c.Request().PostArgs().Peek("profile")))
 	if profileKey == "" {
 		return c.Status(fiber.StatusBadRequest).SendString("Profile is required")
 	}
@@ -280,7 +298,7 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
+	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
 	return h.render(c, "profile_menu_modal.html", profileMenuData{
 		Profiles:          profiles,
 		ActiveProfile:     *activeProfile,
@@ -321,7 +339,7 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
+	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
 	return h.render(c, "profile_menu_modal.html", profileMenuData{
 		Profiles:          profiles,
 		ActiveProfile:     *activeProfile,

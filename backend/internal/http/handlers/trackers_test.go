@@ -323,6 +323,31 @@ func TestTrackersAreIsolatedByProfile(t *testing.T) {
 	}
 }
 
+func TestProfileSwitchFromMenuUsesPostedProfile(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	form := url.Values{}
+	form.Set("profile", "profile2")
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/profile/switch?profile=profile1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("switch profile request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 303, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	location := res.Header.Get("Location")
+	if location != "/dashboard?profile=profile2" {
+		t.Fatalf("expected redirect to profile2, got %q", location)
+	}
+}
+
 func TestEditTrackerDeletingOriginalLinkedSourcePromotesRemainingSource(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
@@ -500,5 +525,65 @@ func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
 	}
 	if !strings.Contains(html, "/assets/tag-icons/icon-star-gold.svg") {
 		t.Fatalf("expected tracker card to render tag icon overlay")
+	}
+}
+
+func TestDeleteTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO custom_tags (profile_id, name)
+		VALUES (?, ?)
+	`, 1, "to-remove")
+	if err != nil {
+		t.Fatalf("seed custom tag: %v", err)
+	}
+
+	tagID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("custom tag id: %v", err)
+	}
+
+	deleteForm := url.Values{}
+	deleteForm.Set("tag_id", strconv.FormatInt(tagID, 10))
+	deleteReq := httptest.NewRequest(http.MethodPost, "/dashboard/profile/tags/delete?profile=profile1", strings.NewReader(deleteForm.Encode()))
+	deleteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	deleteRes, err := app.Test(deleteReq)
+	if err != nil {
+		t.Fatalf("delete tag request failed: %v", err)
+	}
+	if deleteRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(deleteRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", deleteRes.StatusCode, string(body))
+	}
+
+	hxTrigger := deleteRes.Header.Get("HX-Trigger")
+	if !strings.Contains(hxTrigger, "\"profileTagsChanged\":true") {
+		t.Fatalf("expected HX-Trigger to include profileTagsChanged, got %q", hxTrigger)
+	}
+
+	partialReq := httptest.NewRequest(http.MethodGet, "/dashboard/profile/filter-tags?profile=profile1", nil)
+	partialRes, err := app.Test(partialReq)
+	if err != nil {
+		t.Fatalf("filter tags partial request failed: %v", err)
+	}
+	if partialRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(partialRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", partialRes.StatusCode, string(body))
+	}
+
+	partialBody, err := io.ReadAll(partialRes.Body)
+	if err != nil {
+		t.Fatalf("read filter tags partial body: %v", err)
+	}
+	html := string(partialBody)
+
+	if strings.Contains(html, "to-remove") {
+		t.Fatalf("expected deleted tag to be removed from filter options")
+	}
+	if !strings.Contains(html, "No tags created yet.") {
+		t.Fatalf("expected empty state after deleting only tag")
 	}
 }

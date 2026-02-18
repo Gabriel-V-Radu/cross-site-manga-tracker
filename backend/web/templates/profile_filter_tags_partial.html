@@ -1,0 +1,10 @@
+{{if gt (len .ProfileTags) 0}}
+{{range .ProfileTags}}
+<label class="filter-multi-select__option">
+    <input type="checkbox" name="tags" value="{{.Name}}">
+    <span>{{.Name}}</span>
+</label>
+{{end}}
+{{else}}
+<p class="filter-multi-select__empty">No tags created yet.</p>
+{{end}}
