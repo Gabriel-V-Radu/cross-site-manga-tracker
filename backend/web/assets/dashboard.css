@@ -1090,6 +1090,12 @@ input:focus, select:focus {
     gap: 10px;
 }
 
+.profile-tag-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .profile-tag-chip {
     display: inline-flex;
     align-items: center;
@@ -1103,6 +1109,7 @@ input:focus, select:focus {
     display: block;
 }
 
+.profile-tag-rename-form,
 .profile-tag-delete-form {
     margin: 0;
 }
@@ -1234,11 +1241,42 @@ input:focus, select:focus {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.linked-btn:hover {
+    background: #1a2a3f;
+    border-color: #5f79a0;
+    color: #ebf2ff;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 14px -10px rgba(0, 0, 0, 0.85);
+}
+
+.linked-btn:active {
+    transform: translateY(0);
+    box-shadow: none;
+}
+
+.linked-btn:focus-visible {
+    outline: 2px solid rgba(154, 168, 196, 0.9);
+    outline-offset: 1px;
+}
+
+.linked-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }
 
 .linked-btn--danger {
     border-color: #ff6c75;
     color: #ff8188;
+}
+
+.linked-btn--danger:hover {
+    background: rgba(255, 108, 117, 0.12);
+    border-color: #ff8087;
+    color: #ffb2b7;
 }
 
 .search-result-item:last-child {

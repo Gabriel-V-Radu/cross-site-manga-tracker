@@ -720,6 +720,33 @@ func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconK
 	return &tag, nil
 }
 
+func (r *TrackerRepository) RenameProfileTag(profileID int64, tagID int64, name string) (bool, error) {
+	if tagID <= 0 {
+		return false, nil
+	}
+
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return false, fmt.Errorf("tag name is required")
+	}
+
+	result, err := r.db.Exec(`
+		UPDATE custom_tags
+		SET name = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND profile_id = ?
+	`, trimmedName, tagID, profileID)
+	if err != nil {
+		return false, fmt.Errorf("rename profile tag: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("profile tag rename rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
+}
+
 func (r *TrackerRepository) DeleteProfileTag(profileID int64, tagID int64) (bool, error) {
 	if tagID <= 0 {
 		return false, nil

@@ -351,6 +351,59 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 	})
 }
 
+func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
+	if err != nil || tagID <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid tag")
+	}
+
+	tagName := strings.TrimSpace(c.FormValue("tag_name"))
+	if tagName == "" {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag name is required")
+	}
+	if len(tagName) > 40 {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag name must be 40 characters or less")
+	}
+
+	renamed, err := h.trackerRepo.RenameProfileTag(activeProfile.ID, tagID, tagName)
+	if err != nil {
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "unique") {
+			return c.Status(fiber.StatusBadRequest).SendString("A tag with that name already exists")
+		}
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to rename tag")
+	}
+	if !renamed {
+		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
+	}
+
+	profiles, err := h.profileResolver.ListProfiles()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+	}
+
+	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+	}
+
+	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
+	return h.render(c, "profile_menu_modal.html", profileMenuData{
+		Profiles:          profiles,
+		ActiveProfile:     *activeProfile,
+		RenameValue:       activeProfile.Name,
+		ProfileTags:       profileTags,
+		TagIconKeys:       tagIconKeysOrdered,
+		AvailableIconKeys: availableTagIconKeys(profileTags),
+		Message:           "Tag renamed",
+	})
+}
+
 func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {

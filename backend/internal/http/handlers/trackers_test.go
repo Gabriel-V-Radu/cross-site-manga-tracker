@@ -874,3 +874,73 @@ func TestDeleteTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
 		t.Fatalf("expected empty state after deleting only tag")
 	}
 }
+
+func TestRenameTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO custom_tags (profile_id, name)
+		VALUES (?, ?)
+	`, 1, "old-name")
+	if err != nil {
+		t.Fatalf("seed custom tag: %v", err)
+	}
+
+	tagID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("custom tag id: %v", err)
+	}
+
+	renameForm := url.Values{}
+	renameForm.Set("tag_id", strconv.FormatInt(tagID, 10))
+	renameForm.Set("tag_name", "new-name")
+	renameReq := httptest.NewRequest(http.MethodPost, "/dashboard/profile/tags/rename?profile=profile1", strings.NewReader(renameForm.Encode()))
+	renameReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	renameRes, err := app.Test(renameReq)
+	if err != nil {
+		t.Fatalf("rename tag request failed: %v", err)
+	}
+	if renameRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(renameRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", renameRes.StatusCode, string(body))
+	}
+
+	hxTrigger := renameRes.Header.Get("HX-Trigger")
+	if !strings.Contains(hxTrigger, "\"profileTagsChanged\":true") {
+		t.Fatalf("expected HX-Trigger to include profileTagsChanged, got %q", hxTrigger)
+	}
+
+	renameBody, err := io.ReadAll(renameRes.Body)
+	if err != nil {
+		t.Fatalf("read rename response body: %v", err)
+	}
+	renameHTML := string(renameBody)
+	if !strings.Contains(renameHTML, "Tag renamed") {
+		t.Fatalf("expected rename success feedback message")
+	}
+
+	partialReq := httptest.NewRequest(http.MethodGet, "/dashboard/profile/filter-tags?profile=profile1", nil)
+	partialRes, err := app.Test(partialReq)
+	if err != nil {
+		t.Fatalf("filter tags partial request failed: %v", err)
+	}
+	if partialRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(partialRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", partialRes.StatusCode, string(body))
+	}
+
+	partialBody, err := io.ReadAll(partialRes.Body)
+	if err != nil {
+		t.Fatalf("read filter tags partial body: %v", err)
+	}
+	html := string(partialBody)
+
+	if strings.Contains(html, "old-name") {
+		t.Fatalf("expected old tag name to be removed from filter options")
+	}
+	if !strings.Contains(html, "new-name") {
+		t.Fatalf("expected renamed tag to appear in filter options")
+	}
+}

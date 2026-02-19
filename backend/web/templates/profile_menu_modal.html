@@ -54,6 +54,18 @@
                     {{end}}
                     {{.Name}}
                 </span>
+                <div class="profile-tag-actions">
+                <form hx-post="/dashboard/profile/tags/rename?profile={{$.ActiveProfile.Key}}"
+                      hx-target="#modal-zone"
+                      hx-swap="innerHTML"
+                      class="profile-tag-rename-form">
+                    <input type="hidden" name="tag_id" value="{{.ID}}">
+                    <input type="hidden" name="tag_name" value="{{.Name}}">
+                    <button type="button"
+                            class="linked-btn"
+                            data-current-tag-name="{{.Name}}"
+                            onclick="window.editProfileTagName(this)">Edit Name</button>
+                </form>
                 <form hx-post="/dashboard/profile/tags/delete?profile={{$.ActiveProfile.Key}}"
                       hx-target="#modal-zone"
                       hx-swap="innerHTML"
@@ -62,6 +74,7 @@
                     <input type="hidden" name="tag_id" value="{{.ID}}">
                     <button type="submit" class="linked-btn linked-btn--danger">Remove</button>
                 </form>
+                </div>
             </div>
             {{end}}
             {{end}}
