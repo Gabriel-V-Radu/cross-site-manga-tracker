@@ -13,6 +13,7 @@ type TrackerListOptions struct {
 	ProfileID int64
 	Statuses  []string
 	TagNames  []string
+	SourceIDs []int64
 	SortBy    string
 	Order     string
 	Query     string
@@ -193,6 +194,43 @@ func (r *TrackerRepository) Count(options TrackerListOptions) (int, error) {
 	return total, nil
 }
 
+func (r *TrackerRepository) ListLinkedSourceIDs(profileID int64) ([]int64, error) {
+	rows, err := r.db.Query(`
+		SELECT source_id
+		FROM (
+			SELECT source_id
+			FROM trackers
+			WHERE profile_id = ?
+			UNION
+			SELECT ts.source_id
+			FROM tracker_sources ts
+			INNER JOIN trackers t ON t.id = ts.tracker_id
+			WHERE t.profile_id = ?
+		)
+		WHERE source_id > 0
+		ORDER BY source_id ASC
+	`, profileID, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list linked source ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var sourceID int64
+		if err := rows.Scan(&sourceID); err != nil {
+			return nil, fmt.Errorf("scan linked source id: %w", err)
+		}
+		ids = append(ids, sourceID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate linked source ids: %w", err)
+	}
+
+	return ids, nil
+}
+
 func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	args := make([]any, 0, 1)
 	whereClauses := make([]string, 0, 1)
@@ -219,6 +257,39 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
 		if hasReading {
 			whereClauses = append(whereClauses, `(status <> 'reading' OR latest_known_chapter IS NULL OR last_read_chapter IS NULL OR last_read_chapter < latest_known_chapter)`)
+		}
+	}
+
+	if len(options.SourceIDs) > 0 {
+		seenSourceIDs := make(map[int64]bool, len(options.SourceIDs))
+		filteredSourceIDs := make([]int64, 0, len(options.SourceIDs))
+		for _, sourceID := range options.SourceIDs {
+			if sourceID <= 0 || seenSourceIDs[sourceID] {
+				continue
+			}
+			seenSourceIDs[sourceID] = true
+			filteredSourceIDs = append(filteredSourceIDs, sourceID)
+		}
+
+		if len(filteredSourceIDs) > 0 {
+			placeholders := make([]string, 0, len(filteredSourceIDs))
+			for range filteredSourceIDs {
+				placeholders = append(placeholders, "?")
+			}
+			joinedPlaceholders := strings.Join(placeholders, ",")
+
+			whereClauses = append(whereClauses, `(trackers.source_id IN (`+joinedPlaceholders+`) OR EXISTS (
+				SELECT 1
+				FROM tracker_sources ts
+				WHERE ts.tracker_id = trackers.id
+				  AND ts.source_id IN (`+joinedPlaceholders+`)
+			))`)
+			for _, sourceID := range filteredSourceIDs {
+				args = append(args, sourceID)
+			}
+			for _, sourceID := range filteredSourceIDs {
+				args = append(args, sourceID)
+			}
 		}
 	}
 

@@ -64,12 +64,14 @@ var allowedTagIconKeys = map[string]bool{
 var tagIconKeysOrdered = []string{"icon_1", "icon_2", "icon_3"}
 
 type dashboardPageData struct {
-	Statuses      []string
-	Sorts         []string
-	Profiles      []models.Profile
-	ActiveProfile models.Profile
-	RenameValue   string
-	ProfileTags   []models.CustomTag
+	Statuses              []string
+	Sorts                 []string
+	Profiles              []models.Profile
+	ActiveProfile         models.Profile
+	RenameValue           string
+	ProfileTags           []models.CustomTag
+	LinkedSites           []models.Source
+	SelectedLinkedSiteIDs map[int64]bool
 }
 
 type trackersPartialData struct {
@@ -167,6 +169,11 @@ type profileFilterTagsData struct {
 	ProfileTags []models.CustomTag
 }
 
+type profileFilterLinkedSitesData struct {
+	LinkedSites       []models.Source
+	SelectedSourceIDs map[int64]bool
+}
+
 func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHandler {
 	if registry == nil {
 		registry = connectors.NewRegistry()
@@ -203,16 +210,24 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
 	}
 
+	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+	}
+	selectedLinkedSiteIDs := sourceIDFilterMap(parseSourceIDsFromQuery(c))
+
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
 	data := dashboardPageData{
-		Statuses:      []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:         []string{"latest_known_chapter", "last_read_at"},
-		Profiles:      profiles,
-		ActiveProfile: *activeProfile,
-		RenameValue:   activeProfile.Name,
-		ProfileTags:   profileTags,
+		Statuses:              []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
+		Sorts:                 []string{"latest_known_chapter", "last_read_at"},
+		Profiles:              profiles,
+		ActiveProfile:         *activeProfile,
+		RenameValue:           activeProfile.Name,
+		ProfileTags:           profileTags,
+		LinkedSites:           linkedSites,
+		SelectedLinkedSiteIDs: selectedLinkedSiteIDs,
 	}
 	return h.render(c, "dashboard_page.html", data)
 }
@@ -276,6 +291,23 @@ func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 	}
 
 	return h.render(c, "profile_filter_tags_partial.html", profileFilterTagsData{ProfileTags: profileTags})
+}
+
+func (h *DashboardHandler) ProfileFilterLinkedSitesPartial(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+	}
+
+	return h.render(c, "profile_filter_linked_sites_partial.html", profileFilterLinkedSitesData{
+		LinkedSites:       linkedSites,
+		SelectedSourceIDs: sourceIDFilterMap(parseSourceIDsFromQuery(c)),
+	})
 }
 
 func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
@@ -471,6 +503,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		ProfileID: activeProfile.ID,
 		Statuses:  statuses,
 		TagNames:  parseTagNamesFromQuery(c),
+		SourceIDs: parseSourceIDsFromQuery(c),
 		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
 		Order:     strings.TrimSpace(c.Query("order", "desc")),
 		Query:     strings.TrimSpace(c.Query("q")),
@@ -536,6 +569,32 @@ func normalizeViewMode(raw string) string {
 		return "grid"
 	}
 	return viewMode
+}
+
+func (h *DashboardHandler) listLinkedSourcesForProfile(profileID int64) ([]models.Source, error) {
+	linkedSourceIDs, err := h.trackerRepo.ListLinkedSourceIDs(profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list linked source ids: %w", err)
+	}
+	if len(linkedSourceIDs) == 0 {
+		return []models.Source{}, nil
+	}
+
+	enabledSources, err := h.sourceRepo.ListEnabled()
+	if err != nil {
+		return nil, fmt.Errorf("list enabled sources: %w", err)
+	}
+
+	sourceIDSet := sourceIDFilterMap(linkedSourceIDs)
+	linkedSources := make([]models.Source, 0, len(enabledSources))
+	for _, source := range enabledSources {
+		if !sourceIDSet[source.ID] {
+			continue
+		}
+		linkedSources = append(linkedSources, source)
+	}
+
+	return linkedSources, nil
 }
 
 func parsePositiveInt(raw string, fallback int) int {
@@ -1709,6 +1768,59 @@ func parseTagNamesFromQuery(c *fiber.Ctx) []string {
 	}
 
 	return parseTagNames(strings.Join(values, ","))
+}
+
+func parseSourceIDs(raw string) []int64 {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]int64, 0, len(parts))
+	seen := make(map[int64]bool, len(parts))
+	for _, part := range parts {
+		sourceID, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err != nil || sourceID <= 0 || seen[sourceID] {
+			continue
+		}
+		seen[sourceID] = true
+		out = append(out, sourceID)
+	}
+
+	return out
+}
+
+func parseSourceIDsFromQuery(c *fiber.Ctx) []int64 {
+	queryValues := c.Context().QueryArgs().PeekMulti("sites")
+	if len(queryValues) == 0 {
+		return parseSourceIDs(c.Query("sites"))
+	}
+
+	values := make([]string, 0, len(queryValues))
+	for _, value := range queryValues {
+		trimmed := strings.TrimSpace(string(value))
+		if trimmed == "" {
+			continue
+		}
+		values = append(values, trimmed)
+	}
+
+	if len(values) == 0 {
+		return nil
+	}
+
+	return parseSourceIDs(strings.Join(values, ","))
+}
+
+func sourceIDFilterMap(sourceIDs []int64) map[int64]bool {
+	ids := make(map[int64]bool, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		if sourceID <= 0 {
+			continue
+		}
+		ids[sourceID] = true
+	}
+	return ids
 }
 
 func toTrackerTagView(tags []models.CustomTag) []trackerTagView {

@@ -69,11 +69,27 @@
                     </select>
                 </label>
                 <label>
-                    Order
-                    <select name="order">
-                        <option value="desc">desc</option>
-                        <option value="asc">asc</option>
-                    </select>
+                    Linked Sites
+                    <details id="filter-sites-dropdown" class="filter-multi-select">
+                        <summary id="filter-sites-summary">0</summary>
+                        <div class="filter-multi-select__menu filter-multi-select__menu--sites"
+                             hx-get="/dashboard/profile/filter-linked-sites"
+                             hx-trigger="load, trackersChanged from:body"
+                             hx-target="this"
+                             hx-swap="innerHTML"
+                             hx-include="#profile-filter, #tracker-filters input[name='sites']:checked">
+                            {{if gt (len .LinkedSites) 0}}
+                            {{range .LinkedSites}}
+                            <label class="filter-multi-select__option">
+                                <input type="checkbox" name="sites" value="{{.ID}}" {{if index $.SelectedLinkedSiteIDs .ID}}checked{{end}}>
+                                <span>{{.Name}}</span>
+                            </label>
+                            {{end}}
+                            {{else}}
+                            <p class="filter-multi-select__empty">No linked sites yet.</p>
+                            {{end}}
+                        </div>
+                    </details>
                 </label>
                 <label class="filters-grid__tags-row">
                     Tags
@@ -395,6 +411,7 @@
             var initialViewInput = document.getElementById('view-input');
             window.setDashboardViewMode(initialViewInput && initialViewInput.value ? initialViewInput.value : 'grid', false);
             window.updateFilterTagsSummary();
+            window.updateFilterSitesSummary();
 
             var filtersForm = document.getElementById('tracker-filters');
             if (filtersForm) {
@@ -422,7 +439,7 @@
                     var shouldRefresh = false;
                     if (target.tagName === 'SELECT') {
                         shouldRefresh = true;
-                    } else if (target.name === 'tags') {
+                    } else if (target.name === 'tags' || target.name === 'sites') {
                         shouldRefresh = true;
                     }
 
@@ -489,12 +506,29 @@
             summary.textContent = String(checks ? checks.length : 0);
         };
 
-        document.addEventListener('change', function (event) {
-            var target = event.target;
-            if (!target || target.name !== 'tags') {
+        window.updateFilterSitesSummary = function () {
+            var dropdown = document.getElementById('filter-sites-dropdown');
+            var summary = document.getElementById('filter-sites-summary');
+            if (!dropdown || !summary) {
                 return;
             }
-            window.updateFilterTagsSummary();
+
+            var checks = dropdown.querySelectorAll('input[name="sites"]:checked');
+            summary.textContent = String(checks ? checks.length : 0);
+        };
+
+        document.addEventListener('change', function (event) {
+            var target = event.target;
+            if (!target) {
+                return;
+            }
+            if (target.name === 'tags') {
+                window.updateFilterTagsSummary();
+                return;
+            }
+            if (target.name === 'sites') {
+                window.updateFilterSitesSummary();
+            }
         });
 
         document.addEventListener('click', function (event) {
@@ -512,16 +546,19 @@
         });
 
         document.addEventListener('click', function (event) {
-            var dropdown = document.getElementById('filter-tags-dropdown');
-            if (!dropdown || !dropdown.hasAttribute('open')) {
-                return;
-            }
+            var closeDropdownIfOutside = function (dropdownID) {
+                var dropdown = document.getElementById(dropdownID);
+                if (!dropdown || !dropdown.hasAttribute('open')) {
+                    return;
+                }
+                if (dropdown.contains(event.target)) {
+                    return;
+                }
+                dropdown.removeAttribute('open');
+            };
 
-            if (dropdown.contains(event.target)) {
-                return;
-            }
-
-            dropdown.removeAttribute('open');
+            closeDropdownIfOutside('filter-tags-dropdown');
+            closeDropdownIfOutside('filter-sites-dropdown');
         });
 
         window.dismissModalZone = function () {
@@ -649,7 +686,19 @@
         });
 
         document.body.addEventListener('htmx:afterSwap', function (event) {
-            if (!event || !event.target || event.target.id !== 'trackers-zone') {
+            var target = event && event.target;
+            if (!target) {
+                return;
+            }
+
+            if (target.closest && target.closest('#filter-tags-dropdown')) {
+                window.updateFilterTagsSummary();
+            }
+            if (target.closest && target.closest('#filter-sites-dropdown')) {
+                window.updateFilterSitesSummary();
+            }
+
+            if (target.id !== 'trackers-zone') {
                 return;
             }
 

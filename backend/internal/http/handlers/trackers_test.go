@@ -818,6 +818,129 @@ func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
 	}
 }
 
+func TestDashboardLinkedSitesFilterSupportsMultipleSelections(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+	`,
+		1, "Linked Sites Match", 1, "https://mangadex.org/title/linked-sites-match", "reading", 2.0, 8.0,
+		1, "Linked Sites Partial", 1, "https://mangadex.org/title/linked-sites-partial", "reading", 3.0, 7.0,
+		1, "Linked Sites Other", 2, "https://mangaplus.shueisha.co.jp/titles/other", "reading", 1.0, 9.0,
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	var matchTrackerID int64
+	if err := db.QueryRow(`SELECT id FROM trackers WHERE profile_id = ? AND title = ?`, 1, "Linked Sites Match").Scan(&matchTrackerID); err != nil {
+		t.Fatalf("load match tracker id: %v", err)
+	}
+
+	var partialTrackerID int64
+	if err := db.QueryRow(`SELECT id FROM trackers WHERE profile_id = ? AND title = ?`, 1, "Linked Sites Partial").Scan(&partialTrackerID); err != nil {
+		t.Fatalf("load partial tracker id: %v", err)
+	}
+
+	var otherTrackerID int64
+	if err := db.QueryRow(`SELECT id FROM trackers WHERE profile_id = ? AND title = ?`, 1, "Linked Sites Other").Scan(&otherTrackerID); err != nil {
+		t.Fatalf("load other tracker id: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+		VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)
+	`,
+		matchTrackerID, 1, "match-1", "https://mangadex.org/title/linked-sites-match",
+		matchTrackerID, 2, "match-2", "https://mangaplus.shueisha.co.jp/titles/match",
+		partialTrackerID, 1, "partial-1", "https://mangadex.org/title/linked-sites-partial",
+		otherTrackerID, 2, "other-2", "https://mangaplus.shueisha.co.jp/titles/other",
+	)
+	if err != nil {
+		t.Fatalf("seed tracker sources: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading&sites=1&sites=2", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers linked-sites request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read linked-sites response body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "Linked Sites Match") {
+		t.Fatalf("expected multi-site OR filter to include tracker linked to selected sites")
+	}
+	if !strings.Contains(html, "Linked Sites Partial") {
+		t.Fatalf("expected multi-site OR filter to include tracker linked to site 1")
+	}
+	if !strings.Contains(html, "Linked Sites Other") {
+		t.Fatalf("expected multi-site OR filter to include tracker linked to site 2")
+	}
+}
+
+func TestProfileLinkedSitesPartialPreservesSelectedValues(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, 1, "Linked Sites Partial Endpoint", 1, "https://mangadex.org/title/linked-sites-partial-endpoint", "reading", 1.0, 2.0)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	trackerID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("tracker id: %v", err)
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+		VALUES (?, ?, ?, ?), (?, ?, ?, ?)
+	`,
+		trackerID, 1, "partial-endpoint-1", "https://mangadex.org/title/linked-sites-partial-endpoint",
+		trackerID, 2, "partial-endpoint-2", "https://mangaplus.shueisha.co.jp/titles/partial-endpoint",
+	)
+	if err != nil {
+		t.Fatalf("seed tracker sources: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/profile/filter-linked-sites?profile=profile1&sites=2", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("linked sites partial request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read linked sites partial body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "name=\"sites\" value=\"2\" checked") {
+		t.Fatalf("expected linked sites partial to preserve selected site 2")
+	}
+	if strings.Contains(html, "name=\"sites\" value=\"1\" checked") {
+		t.Fatalf("expected linked sites partial to keep site 1 unselected")
+	}
+}
+
 func TestDeleteTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()

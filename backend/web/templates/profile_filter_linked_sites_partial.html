@@ -1,0 +1,10 @@
+{{if gt (len .LinkedSites) 0}}
+{{range .LinkedSites}}
+<label class="filter-multi-select__option">
+    <input type="checkbox" name="sites" value="{{.ID}}" {{if index $.SelectedSourceIDs .ID}}checked{{end}}>
+    <span>{{.Name}}</span>
+</label>
+{{end}}
+{{else}}
+<p class="filter-multi-select__empty">No linked sites yet.</p>
+{{end}}

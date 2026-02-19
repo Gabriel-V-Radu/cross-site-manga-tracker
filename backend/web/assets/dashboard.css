@@ -190,6 +190,14 @@ h1 {
     gap: 4px;
 }
 
+.filter-multi-select__menu--sites {
+    right: auto;
+    min-width: 220px;
+    width: max-content;
+    max-width: min(86vw, 340px);
+    overflow-x: hidden;
+}
+
 .filter-multi-select__option {
     display: flex;
     align-items: center;
