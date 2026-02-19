@@ -376,9 +376,15 @@ input:focus, select:focus {
     margin-bottom: 16px;
 }
 
-.pagination--top::before {
-    content: "";
+.pagination-results {
     grid-column: 1;
+    justify-self: start;
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: lowercase;
 }
 
 .pagination--bottom {
@@ -1372,10 +1378,7 @@ input:focus, select:focus {
         row-gap: 8px;
     }
 
-    .pagination--top::before {
-        display: none;
-    }
-
+    .pagination-results,
     .pagination--top .pagination__group,
     .pagination-site-links {
         grid-column: 1;

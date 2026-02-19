@@ -6,6 +6,7 @@
 {{else}}
 {{if gt .TotalPages 1}}
 <div class="pagination pagination--top">
+    <p class="pagination-results">{{.TotalResults}} result{{if ne .TotalResults 1}}s{{end}}</p>
     <div class="pagination__group" role="navigation" aria-label="Pagination">
         <button type="button"
                 class="pagination-btn js-page-btn"

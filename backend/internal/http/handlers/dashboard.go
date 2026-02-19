@@ -78,6 +78,7 @@ type trackersPartialData struct {
 	Page          int
 	PrevPage      int
 	NextPage      int
+	TotalResults  int
 	TotalPages    int
 	PageNumbers   []int
 	HasPrevPage   bool
@@ -464,6 +465,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		Page:          page,
 		PrevPage:      max(1, page-1),
 		NextPage:      min(totalPages, page+1),
+		TotalResults:  totalTrackers,
 		TotalPages:    totalPages,
 		PageNumbers:   buildPageNumbers(totalPages, page),
 		HasPrevPage:   page > 1,
