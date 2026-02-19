@@ -104,16 +104,20 @@
             </form>
 
             <div class="panel-actions">
-                <button type="button"
-                        class="action-btn"
-                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('page-input').value='1'; window.dispatchTrackersChanged('user')">
-                    Grid
-                </button>
-                <button type="button"
-                        class="action-btn"
-                        onclick="document.getElementById('view-input').value='list'; document.getElementById('page-input').value='1'; window.dispatchTrackersChanged('user')">
-                    List
-                </button>
+                <div class="view-toggle" role="group" aria-label="Tracker view mode">
+                    <button type="button"
+                            class="view-toggle__option"
+                            data-view-mode="grid"
+                            aria-pressed="true">
+                        Grid
+                    </button>
+                    <button type="button"
+                            class="view-toggle__option"
+                            data-view-mode="list"
+                            aria-pressed="false">
+                        List
+                    </button>
+                </div>
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/trackers/new"
@@ -154,6 +158,37 @@
             document.body.dispatchEvent(new CustomEvent('trackersChanged', {
                 detail: { reason: kind }
             }));
+        };
+
+        window.setDashboardViewMode = function (mode, shouldRefresh) {
+            var nextMode = (mode === 'list') ? 'list' : 'grid';
+            var viewInput = document.getElementById('view-input');
+            var currentMode = viewInput && viewInput.value ? viewInput.value : 'grid';
+
+            if (shouldRefresh && currentMode === nextMode) {
+                return;
+            }
+
+            if (viewInput) {
+                viewInput.value = nextMode;
+            }
+
+            var options = document.querySelectorAll('[data-view-mode]');
+            Array.prototype.forEach.call(options, function (option) {
+                var isActive = option.getAttribute('data-view-mode') === nextMode;
+                option.classList.toggle('view-toggle__option--active', isActive);
+                option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+
+            if (!shouldRefresh) {
+                return;
+            }
+
+            var pageInput = document.getElementById('page-input');
+            if (pageInput) {
+                pageInput.value = '1';
+            }
+            window.dispatchTrackersChanged('user');
         };
 
         window.onProfileSwitch = function (select) {
@@ -357,6 +392,8 @@
                 window.onProfileSwitch(select);
             }
 
+            var initialViewInput = document.getElementById('view-input');
+            window.setDashboardViewMode(initialViewInput && initialViewInput.value ? initialViewInput.value : 'grid', false);
             window.updateFilterTagsSummary();
 
             var filtersForm = document.getElementById('tracker-filters');
@@ -458,6 +495,20 @@
                 return;
             }
             window.updateFilterTagsSummary();
+        });
+
+        document.addEventListener('click', function (event) {
+            var option = event.target && event.target.closest ? event.target.closest('[data-view-mode]') : null;
+            if (!option) {
+                return;
+            }
+            var nextMode = option.getAttribute('data-view-mode') || 'grid';
+            var viewInput = document.getElementById('view-input');
+            var currentMode = viewInput && viewInput.value ? viewInput.value : 'grid';
+            if (currentMode === nextMode) {
+                return;
+            }
+            window.setDashboardViewMode(nextMode, true);
         });
 
         document.addEventListener('click', function (event) {
