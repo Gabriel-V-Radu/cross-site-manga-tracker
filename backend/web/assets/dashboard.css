@@ -614,14 +614,41 @@ input:focus, select:focus {
     justify-self: start;
 }
 
-.badge--status {
-    background: rgba(19, 161, 102, 0.2);
-    border-color: rgba(19, 161, 102, 0.7);
-    color: #7cf1c4;
+.badge.badge--status {
     letter-spacing: 0.06em;
     text-transform: capitalize;
     font-size: 12px;
     padding: 6px 14px;
+}
+
+.badge.badge--status-reading {
+    background: rgba(11, 92, 64, 0.62);
+    border-color: rgba(93, 227, 166, 0.34);
+    color: #63e8ac;
+}
+
+.badge.badge--status-completed {
+    background: rgba(34, 45, 58, 0.88);
+    border-color: rgba(94, 159, 255, 0.26);
+    color: #5e9fff;
+}
+
+.badge.badge--status-dropped {
+    background: rgba(89, 0, 0, 0.78);
+    border-color: rgba(255, 70, 70, 0.33);
+    color: #ff3a3a;
+}
+
+.badge.badge--status-plan_to_read {
+    background: rgba(96, 73, 0, 0.78);
+    border-color: rgba(255, 157, 43, 0.33);
+    color: #ff9d2b;
+}
+
+.badge.badge--status-on_hold {
+    background: rgba(106, 81, 0, 0.82);
+    border-color: rgba(243, 163, 23, 0.36);
+    color: #f3a317;
 }
 
 .tracker-row__metric {

@@ -20,7 +20,7 @@
     </div>
 
     <div class="tracker-row__status">
-        <span class="badge badge--status" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.ReplaceCard.Status}}" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
     </div>
 
     <div class="tracker-row__metric">
@@ -76,7 +76,7 @@
 <article id="tracker-card-{{.ReplaceCard.ID}}" class="tracker-card" hx-swap-oob="outerHTML:#tracker-card-{{.ReplaceCard.ID}}">
     <header class="tracker-card__header">
         <h3>{{.ReplaceCard.Title}}</h3>
-        <span class="badge" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.ReplaceCard.Status}}" title="{{.ReplaceCard.StatusLabel}}">{{.ReplaceCard.StatusLabel}}</span>
     </header>
 
     <div class="tracker-card__cover">
@@ -183,7 +183,7 @@
     </div>
 
     <div class="tracker-row__status">
-        <span class="badge badge--status" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.PrependCard.Status}}" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
     </div>
 
     <div class="tracker-row__metric">
@@ -239,7 +239,7 @@
 <article id="tracker-card-{{.PrependCard.ID}}" class="tracker-card" hx-swap-oob="afterbegin:#cards-container-grid">
     <header class="tracker-card__header">
         <h3>{{.PrependCard.Title}}</h3>
-        <span class="badge" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.PrependCard.Status}}" title="{{.PrependCard.StatusLabel}}">{{.PrependCard.StatusLabel}}</span>
     </header>
 
     <div class="tracker-card__cover">

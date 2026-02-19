@@ -5,7 +5,7 @@
     </div>
 
     <div class="tracker-row__status">
-        <span class="badge badge--status" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.Status}}" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
     </div>
 
     <div class="tracker-row__metric">
@@ -63,7 +63,7 @@
 <article id="tracker-card-{{.ID}}" class="tracker-card">
     <header class="tracker-card__header">
         <h3>{{.Title}}</h3>
-        <span class="badge" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
+        <span class="badge badge--status badge--status-{{.Status}}" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
     </header>
 
     <div class="tracker-card__cover">
