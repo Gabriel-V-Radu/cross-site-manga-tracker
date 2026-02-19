@@ -329,11 +329,25 @@ input:focus, select:focus {
 }
 
 .pagination--top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
     margin-bottom: 16px;
+}
+
+.pagination--top::before {
+    content: "";
+    grid-column: 1;
 }
 
 .pagination--bottom {
     margin-top: 16px;
+}
+
+.pagination--top .pagination__group {
+    grid-column: 2;
+    justify-self: center;
 }
 
 .pagination__group {
@@ -392,6 +406,41 @@ input:focus, select:focus {
     font-size: 0.82rem;
     line-height: 1;
     user-select: none;
+}
+
+.pagination-site-links {
+    grid-column: 3;
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.pagination-site-link {
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(17, 26, 41, 0.9);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.pagination-site-link:hover {
+    transform: translateY(-1px);
+    border-color: #4a5f7e;
+    box-shadow: 0 10px 16px -14px rgba(0, 0, 0, 0.9);
+}
+
+.pagination-site-link img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
 }
 
 .trackers-loading__label {
@@ -1276,6 +1325,32 @@ input:focus, select:focus {
 
     .tracker-row__chapter {
         font-size: 1.05rem;
+    }
+
+    .pagination--top {
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 8px;
+    }
+
+    .pagination--top::before {
+        display: none;
+    }
+
+    .pagination--top .pagination__group,
+    .pagination-site-links {
+        grid-column: 1;
+        justify-self: center;
+    }
+
+    .pagination-site-links {
+        gap: 5px;
+    }
+
+    .pagination-site-link {
+        width: 36px;
+        height: 36px;
+        border-radius: 7px;
+        padding: 3px;
     }
 
     .tracker-tag-row {
