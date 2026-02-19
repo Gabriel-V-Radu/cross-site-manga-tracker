@@ -72,6 +72,11 @@
         {{else}}
         <div class="tracker-card__cover-title">{{.Title}}</div>
         {{end}}
+        {{if .SourceLogoURL}}
+        <span class="tracker-card__source-logo" title="{{.SourceLogoLabel}}">
+            <img class="tracker-card__source-logo-img" src="{{.SourceLogoURL}}" alt="{{.SourceLogoLabel}} logo" loading="lazy">
+        </span>
+        {{end}}
     </div>
 
     <div class="tracker-card__tags{{if gt .HiddenTagCount 0}} tracker-card__tags--more{{end}}">

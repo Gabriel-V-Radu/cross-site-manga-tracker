@@ -106,6 +106,8 @@ type trackerCardView struct {
 	LatestKnownChapterURL  string
 	LastReadChapterURL     string
 	CoverURL               string
+	SourceLogoURL          string
+	SourceLogoLabel        string
 	LatestKnownChapter     string
 	LatestReleaseAgo       string
 	LastCheckedAgo         string
@@ -653,6 +655,7 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyBy
 		}
 
 		sourceKey := sourceKeyByID[item.SourceID]
+		card.SourceLogoURL, card.SourceLogoLabel = sourceLogoForKey(sourceKey)
 
 		if item.LatestKnownChapter != nil {
 			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, pageKey)
@@ -1730,6 +1733,25 @@ func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
 		icons = append(icons, trackerTagIconView{TagName: tag.Name, IconPath: *tag.IconPath})
 	}
 	return icons
+}
+
+func sourceLogoForKey(sourceKey string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
+	case "asuracomic":
+		return "/assets/tracking-sites-logos/asuracomic-logo.png", "AsuraComic"
+	case "flamecomics":
+		return "/assets/tracking-sites-logos/flamescomic-logo.svg", "FlameComics"
+	case "mangadex":
+		return "/assets/tracking-sites-logos/mangadex-logo.png", "MangaDex"
+	case "mangafire":
+		return "/assets/tracking-sites-logos/mangafire-logo.png", "MangaFire"
+	case "mangaplus":
+		return "/assets/tracking-sites-logos/mangaplus-logo.png", "Manga Plus"
+	case "webtoons":
+		return "/assets/tracking-sites-logos/webtoon-logo.png", "WEBTOON"
+	default:
+		return "", ""
+	}
 }
 
 func prioritizeTrackerTags(tags []trackerTagView, maxVisible int) ([]trackerTagView, int) {

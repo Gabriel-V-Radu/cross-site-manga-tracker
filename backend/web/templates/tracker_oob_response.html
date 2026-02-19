@@ -85,6 +85,11 @@
         {{else}}
         <div class="tracker-card__cover-title">{{.ReplaceCard.Title}}</div>
         {{end}}
+        {{if .ReplaceCard.SourceLogoURL}}
+        <span class="tracker-card__source-logo" title="{{.ReplaceCard.SourceLogoLabel}}">
+            <img class="tracker-card__source-logo-img" src="{{.ReplaceCard.SourceLogoURL}}" alt="{{.ReplaceCard.SourceLogoLabel}} logo" loading="lazy">
+        </span>
+        {{end}}
     </div>
 
     <div class="tracker-card__tags{{if gt .ReplaceCard.HiddenTagCount 0}} tracker-card__tags--more{{end}}">
@@ -247,6 +252,11 @@
         <img src="{{.PrependCard.CoverURL}}" alt="{{.PrependCard.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
         {{else}}
         <div class="tracker-card__cover-title">{{.PrependCard.Title}}</div>
+        {{end}}
+        {{if .PrependCard.SourceLogoURL}}
+        <span class="tracker-card__source-logo" title="{{.PrependCard.SourceLogoLabel}}">
+            <img class="tracker-card__source-logo-img" src="{{.PrependCard.SourceLogoURL}}" alt="{{.PrependCard.SourceLogoLabel}} logo" loading="lazy">
+        </span>
         {{end}}
     </div>
 

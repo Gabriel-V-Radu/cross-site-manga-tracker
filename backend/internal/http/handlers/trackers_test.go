@@ -469,6 +469,9 @@ func TestTrackerCardFragmentRendersCard(t *testing.T) {
 	if !strings.Contains(html, "Fragment Card") {
 		t.Fatalf("expected card fragment to include tracker title")
 	}
+	if !strings.Contains(html, "tracker-card__source-logo") {
+		t.Fatalf("expected card fragment to include source logo overlay")
+	}
 }
 
 func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
