@@ -1072,9 +1072,55 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tracker tags")
 		}
 	}
+	if created == nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true}`)
+	c.Set("HX-Trigger", fmt.Sprintf(`{"trackerCreated":{"id":%d}}`, created.ID))
 	return h.render(c, "empty_modal.html", nil)
+}
+
+type trackerCardFragmentData struct {
+	ViewMode string
+	Card     trackerCardView
+}
+
+func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil || id <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
+	}
+
+	viewMode := normalizeViewMode(c.Query("view", "grid"))
+
+	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
+	}
+	if tracker == nil {
+		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
+	}
+
+	sourceKeyByID, err := h.listSourceKeys()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceKeyByID, "")
+	if len(cards) == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Tracker card not found")
+	}
+
+	return h.render(c, "tracker_card_fragment.html", trackerCardFragmentData{
+		ViewMode: viewMode,
+		Card:     cards[0],
+	})
 }
 
 func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, tracker *models.Tracker) {

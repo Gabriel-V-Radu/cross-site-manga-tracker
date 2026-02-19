@@ -1,0 +1,5 @@
+{{if eq .ViewMode "list"}}
+{{template "tracker_card_list" .Card}}
+{{else}}
+{{template "tracker_card_grid" .Card}}
+{{end}}

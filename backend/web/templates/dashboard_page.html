@@ -106,12 +106,12 @@
             <div class="panel-actions">
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('page-input').value='1'; document.body.dispatchEvent(new Event('trackersChanged'))">
+                        onclick="document.getElementById('view-input').value='grid'; document.getElementById('page-input').value='1'; window.dispatchTrackersChanged('user')">
                     Grid
                 </button>
                 <button type="button"
                         class="action-btn"
-                        onclick="document.getElementById('view-input').value='list'; document.getElementById('page-input').value='1'; document.body.dispatchEvent(new Event('trackersChanged'))">
+                        onclick="document.getElementById('view-input').value='list'; document.getElementById('page-input').value='1'; window.dispatchTrackersChanged('user')">
                     List
                 </button>
                 <button type="button"
@@ -140,6 +140,22 @@
                 .replace(/'/g, '&#39;');
         };
 
+        window.dispatchTrackersChanged = function (reason) {
+            if (!document || !document.body) {
+                return;
+            }
+
+            var kind = String(reason || 'system').toLowerCase();
+            if (kind === 'user') {
+                window.__freezeTrackersOrder = false;
+                window.__pinnedTrackerID = '';
+            }
+
+            document.body.dispatchEvent(new CustomEvent('trackersChanged', {
+                detail: { reason: kind }
+            }));
+        };
+
         window.onProfileSwitch = function (select) {
             if (!select) {
                 return;
@@ -165,7 +181,7 @@
                 window.history.replaceState({}, '', nextURL);
             }
 
-            document.body.dispatchEvent(new Event('trackersChanged'));
+            window.dispatchTrackersChanged('user');
         };
 
         window.renameProfileOnce = function () {
@@ -200,6 +216,141 @@
             form.submit();
         };
 
+        document.body.addEventListener('trackerCreated', function (event) {
+            var detail = event && event.detail ? event.detail : {};
+            var payload = detail;
+            if (detail && detail.value && typeof detail.value === 'object') {
+                payload = detail.value;
+            }
+            var trackerID = Number((payload && payload.id) || detail.id || 0);
+            if (!trackerID) {
+                return;
+            }
+
+            var listContainer = document.getElementById('cards-container-list');
+            var gridContainer = document.getElementById('cards-container-grid');
+            var activeContainer = listContainer || gridContainer;
+            var viewMode = listContainer ? 'list' : 'grid';
+            if (!activeContainer) {
+                window.dispatchTrackersChanged('system');
+                return;
+            }
+
+            var profileInput = document.getElementById('profile-filter');
+            var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
+            var requestURL = '/dashboard/trackers/' + encodeURIComponent(String(trackerID)) + '/card-fragment?view=' + encodeURIComponent(viewMode);
+            if (profileKey) {
+                requestURL += '&profile=' + encodeURIComponent(profileKey);
+            }
+
+            fetch(requestURL, {
+                credentials: 'same-origin',
+                headers: { 'HX-Request': 'true' }
+            })
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('card fragment request failed');
+                    }
+                    return response.text();
+                })
+                .then(function (html) {
+                    var markup = String(html || '').trim();
+                    if (!markup) {
+                        throw new Error('empty card fragment');
+                    }
+
+                    var buffer = document.createElement('div');
+                    buffer.innerHTML = markup;
+                    var card = buffer.firstElementChild;
+                    if (!card || !card.id) {
+                        throw new Error('invalid card fragment');
+                    }
+
+                    var existing = activeContainer.querySelector('#' + card.id);
+                    if (existing) {
+                        existing.remove();
+                    }
+
+                    activeContainer.insertBefore(card, activeContainer.firstElementChild);
+                    card.style.order = '-9999';
+                    window.__freezeTrackersOrder = true;
+                    window.__pinnedTrackerID = card.id;
+                    if (window.htmx && typeof window.htmx.process === 'function') {
+                        window.htmx.process(card);
+                    }
+
+                    var shouldRetryCover = (viewMode === 'grid');
+                    if (!shouldRetryCover) {
+                        return;
+                    }
+
+                    var retryCount = 0;
+                    var maxRetries = 4;
+                    var retryDelayMs = 1200;
+                    var retryLoadCard = function () {
+                        if (window.__pinnedTrackerID !== card.id) {
+                            return;
+                        }
+                        if (retryCount >= maxRetries) {
+                            return;
+                        }
+                        retryCount += 1;
+
+                        fetch(requestURL, {
+                            credentials: 'same-origin',
+                            headers: { 'HX-Request': 'true' }
+                        })
+                            .then(function (retryResponse) {
+                                if (!retryResponse.ok) {
+                                    throw new Error('card refresh request failed');
+                                }
+                                return retryResponse.text();
+                            })
+                            .then(function (retryHTML) {
+                                var retryMarkup = String(retryHTML || '').trim();
+                                if (!retryMarkup) {
+                                    throw new Error('empty card refresh fragment');
+                                }
+
+                                var retryBuffer = document.createElement('div');
+                                retryBuffer.innerHTML = retryMarkup;
+                                var refreshedCard = retryBuffer.firstElementChild;
+                                if (!refreshedCard || refreshedCard.id !== card.id) {
+                                    throw new Error('invalid refreshed card fragment');
+                                }
+
+                                var currentCard = activeContainer.querySelector('#' + card.id);
+                                if (currentCard) {
+                                    currentCard.replaceWith(refreshedCard);
+                                } else {
+                                    activeContainer.insertBefore(refreshedCard, activeContainer.firstElementChild);
+                                }
+
+                                refreshedCard.style.order = '-9999';
+                                activeContainer.insertBefore(refreshedCard, activeContainer.firstElementChild);
+                                if (window.htmx && typeof window.htmx.process === 'function') {
+                                    window.htmx.process(refreshedCard);
+                                }
+
+                                var hasCoverImage = !!refreshedCard.querySelector('.tracker-card__cover img');
+                                if (!hasCoverImage && retryCount < maxRetries) {
+                                    window.setTimeout(retryLoadCard, retryDelayMs);
+                                }
+                            })
+                            .catch(function () {
+                                if (retryCount < maxRetries) {
+                                    window.setTimeout(retryLoadCard, retryDelayMs);
+                                }
+                            });
+                    };
+
+                    window.setTimeout(retryLoadCard, retryDelayMs);
+                })
+                .catch(function () {
+                    window.dispatchTrackersChanged('system');
+                });
+        });
+
         document.addEventListener('DOMContentLoaded', function () {
             var select = document.getElementById('profile-switch');
             if (select) {
@@ -211,10 +362,7 @@
             var filtersForm = document.getElementById('tracker-filters');
             if (filtersForm) {
                 var dispatchTrackersChanged = function () {
-                    if (!document || !document.body) {
-                        return;
-                    }
-                    document.body.dispatchEvent(new Event('trackersChanged'));
+                    window.dispatchTrackersChanged('user');
                 };
 
                 var searchDebounceTimer = null;
@@ -380,7 +528,7 @@
                 }
 
                 window.__scrollTrackersToTop = true;
-                document.body.dispatchEvent(new Event('trackersChanged'));
+                window.dispatchTrackersChanged('user');
                 return;
             }
 
@@ -393,7 +541,7 @@
             }
 
             window.__scrollTrackersToTop = true;
-            document.body.dispatchEvent(new Event('trackersChanged'));
+            window.dispatchTrackersChanged('user');
         });
 
         window.renderTrackersSkeleton = function (viewMode) {

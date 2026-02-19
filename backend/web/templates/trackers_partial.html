@@ -88,8 +88,22 @@
 {{if .PendingCovers}}
 <script>
     (function () {
+        if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
+            var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
+            var pinnedCard = document.getElementById(window.__pinnedTrackerID);
+            if (pinnedContainer && pinnedCard) {
+                if (pinnedContainer.firstElementChild !== pinnedCard) {
+                    pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
+                }
+                pinnedCard.style.order = '-9999';
+            }
+        }
+
         var refreshKey = "{{.RefreshKey}}";
         if (!refreshKey || !document || !document.body) {
+            return;
+        }
+        if (window.__freezeTrackersOrder) {
             return;
         }
 
@@ -112,6 +126,9 @@
         var delayMs = Math.min(3000, 600 + (attempts * 200));
         window.__pendingTrackersRefreshTimer = window.setTimeout(function () {
             window.__pendingTrackersRefreshTimer = null;
+            if (window.__freezeTrackersOrder) {
+                return;
+            }
             window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
         }, delayMs);
@@ -120,6 +137,17 @@
 {{else}}
 <script>
     (function () {
+        if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
+            var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
+            var pinnedCard = document.getElementById(window.__pinnedTrackerID);
+            if (pinnedContainer && pinnedCard) {
+                if (pinnedContainer.firstElementChild !== pinnedCard) {
+                    pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
+                }
+                pinnedCard.style.order = '-9999';
+            }
+        }
+
         if (window.__pendingTrackersRefreshTimer) {
             window.clearTimeout(window.__pendingTrackersRefreshTimer);
             window.__pendingTrackersRefreshTimer = null;

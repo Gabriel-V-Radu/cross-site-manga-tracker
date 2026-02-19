@@ -51,6 +51,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Get("/dashboard/trackers/empty-modal", dashboard.EmptyModal)
 	app.Get("/dashboard/trackers/new", dashboard.NewTrackerModal)
 	app.Get("/dashboard/trackers/:id/edit", dashboard.EditTrackerModal)
+	app.Get("/dashboard/trackers/:id/card-fragment", dashboard.CardFragment)
 	app.Post("/dashboard/trackers", dashboard.CreateFromForm)
 	app.Post("/dashboard/trackers/:id", dashboard.UpdateFromForm)
 	app.Post("/dashboard/trackers/:id/set-last-read", dashboard.SetLastReadFromCard)
