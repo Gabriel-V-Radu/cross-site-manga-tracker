@@ -1132,7 +1132,12 @@ func hasResolvedSourceMetadata(tracker *models.Tracker) bool {
 		return false
 	}
 
-	// latest_release_at may be missing for some sources, so only id+latest chapter are required.
+	// Require release date so add/edit flows do not display "released just now"
+	// when the source can provide an older chapter timestamp.
+	if tracker.LatestReleaseAt == nil {
+		return false
+	}
+
 	return true
 }
 
