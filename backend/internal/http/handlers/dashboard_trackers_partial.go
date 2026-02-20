@@ -182,6 +182,7 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyBy
 			LatestKnownChapterURL:  item.SourceURL,
 			LastReadChapterURL:     item.SourceURL,
 			SourceItemID:           item.SourceItemID,
+			Rating:                 item.Rating,
 			LatestKnownChapterRaw:  item.LatestKnownChapter,
 			LastReadChapterRaw:     item.LastReadChapter,
 			LatestReleaseAgo:       "—",
@@ -222,7 +223,12 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyBy
 			card.LastReadChapter = "—"
 		}
 
+		if item.Rating != nil {
+			card.RatingLabel = formatRatingLabel(*item.Rating)
+		}
+
 		sourceKey := sourceKeyByID[item.SourceID]
+
 		card.SourceLogoURL, card.SourceLogoLabel = sourceLogoForKey(sourceKey)
 
 		if item.LatestKnownChapter != nil {

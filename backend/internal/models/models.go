@@ -31,6 +31,7 @@ type Tracker struct {
 	SourceURL          string      `json:"sourceUrl"`
 	Status             string      `json:"status"`
 	LastReadChapter    *float64    `json:"lastReadChapter,omitempty"`
+	Rating             *float64    `json:"rating,omitempty"`
 	LastReadAt         *time.Time  `json:"lastReadAt,omitempty"`
 	LatestKnownChapter *float64    `json:"latestKnownChapter,omitempty"`
 	LatestReleaseAt    *time.Time  `json:"latestReleaseAt,omitempty"`

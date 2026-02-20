@@ -57,6 +57,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Post("/dashboard/trackers", dashboard.CreateFromForm)
 	app.Post("/dashboard/trackers/:id", dashboard.UpdateFromForm)
 	app.Post("/dashboard/trackers/:id/set-last-read", dashboard.SetLastReadFromCard)
+	app.Post("/dashboard/trackers/:id/rating", dashboard.SetRatingFromCard)
 	app.Post("/dashboard/trackers/:id/delete", dashboard.DeleteFromForm)
 	app.Get("/health", health.Check)
 	app.Get("/v1/health", health.Check)

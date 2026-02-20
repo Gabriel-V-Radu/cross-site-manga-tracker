@@ -292,6 +292,80 @@ document.addEventListener('click', function (event) {
     closeDropdownIfOutside('filter-sites-dropdown');
 });
 
+var syncRatingPreview = function (rangeInput) {
+    if (!rangeInput) {
+        return;
+    }
+
+    var numericValue = Number(rangeInput.value);
+    if (!isFinite(numericValue)) {
+        return;
+    }
+
+    if (numericValue < 0) {
+        numericValue = 0;
+    } else if (numericValue > 10) {
+        numericValue = 10;
+    }
+
+    var valueLabel = numericValue.toFixed(1);
+    var popover = rangeInput.closest('.tracker-rating__popover');
+    if (!popover) {
+        return;
+    }
+
+    var valueNode = popover.querySelector('.js-rating-value');
+    if (valueNode) {
+        valueNode.textContent = valueLabel;
+    }
+
+    var starsNode = popover.querySelector('.js-rating-stars');
+    if (starsNode) {
+        starsNode.style.setProperty('--rating-value', valueLabel);
+    }
+};
+
+document.addEventListener('input', function (event) {
+    var target = event && event.target;
+    if (!target || !target.matches || !target.matches('.js-rating-range')) {
+        return;
+    }
+    syncRatingPreview(target);
+});
+
+document.addEventListener('toggle', function (event) {
+    var target = event && event.target;
+    if (!target || !target.matches || !target.matches('.tracker-rating[open]')) {
+        return;
+    }
+
+    var openPopovers = document.querySelectorAll('.tracker-rating[open]');
+    openPopovers.forEach(function (popover) {
+        if (popover !== target) {
+            popover.removeAttribute('open');
+        }
+    });
+
+    var range = target.querySelector('.js-rating-range');
+    if (range) {
+        syncRatingPreview(range);
+    }
+});
+
+document.addEventListener('click', function (event) {
+    var openPopovers = document.querySelectorAll('.tracker-rating[open]');
+    if (!openPopovers || openPopovers.length === 0) {
+        return;
+    }
+
+    openPopovers.forEach(function (popover) {
+        if (popover.contains(event.target)) {
+            return;
+        }
+        popover.removeAttribute('open');
+    });
+});
+
 window.dismissModalZone = function () {
     var modalZone = document.getElementById('modal-zone');
     if (!modalZone) {

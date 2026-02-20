@@ -107,10 +107,12 @@ type trackerCardView struct {
 	LastCheckedAgo         string
 	LastReadChapter        string
 	LastReadAgo            string
+	RatingLabel            string
 	LatestReleaseFormatted string
 	UpdatedAtFormatted     string
 	LastCheckedFormatted   string
 	SourceItemID           *string
+	Rating                 *float64
 	LatestKnownChapterRaw  *float64
 	LastReadChapterRaw     *float64
 }

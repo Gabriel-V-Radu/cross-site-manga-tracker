@@ -90,6 +90,7 @@
             <img class="tracker-card__source-logo-img" src="{{.ReplaceCard.SourceLogoURL}}" alt="{{.ReplaceCard.SourceLogoLabel}} logo" loading="lazy">
         </span>
         {{end}}
+        {{template "tracker_rating_popover" .ReplaceCard}}
     </div>
 
     <div class="tracker-card__tags{{if gt .ReplaceCard.HiddenTagCount 0}} tracker-card__tags--more{{end}}">
@@ -258,6 +259,7 @@
             <img class="tracker-card__source-logo-img" src="{{.PrependCard.SourceLogoURL}}" alt="{{.PrependCard.SourceLogoLabel}} logo" loading="lazy">
         </span>
         {{end}}
+        {{template "tracker_rating_popover" .PrependCard}}
     </div>
 
     <div class="tracker-card__tags{{if gt .PrependCard.HiddenTagCount 0}} tracker-card__tags--more{{end}}">

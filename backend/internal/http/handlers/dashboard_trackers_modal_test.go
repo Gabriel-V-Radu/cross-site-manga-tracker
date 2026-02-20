@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -121,5 +122,59 @@ func TestTrackerCardFragmentRendersCard(t *testing.T) {
 	}
 	if !strings.Contains(html, "tracker-card__source-logo") {
 		t.Fatalf("expected card fragment to include source logo overlay")
+	}
+	if !strings.Contains(html, "tracker-rating__toggle") {
+		t.Fatalf("expected card fragment to include rating toggle")
+	}
+	plusPattern := regexp.MustCompile(`tracker-rating__toggle[^>]*>\s*\+\s*</summary>`)
+	if !plusPattern.MatchString(html) {
+		t.Fatalf("expected unrated card fragment to render plus rating toggle")
+	}
+}
+
+func TestSetRatingFromCardReplacesCard(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, 1, "Rated Tracker", 1, "https://mangadex.org/title/rated-tracker", "reading", 12.0)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	trackerID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("tracker id: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("rating", "9.5")
+	form.Set("view_mode", "grid")
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/trackers/"+strconv.FormatInt(trackerID, 10)+"/rating", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("set rating request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read set rating response: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "hx-swap-oob=\"outerHTML:#tracker-card-"+strconv.FormatInt(trackerID, 10)+"\"") {
+		t.Fatalf("expected set rating to return OOB card replacement")
+	}
+	scorePattern := regexp.MustCompile(`tracker-rating__toggle[^>]*>\s*9\.5\s*</summary>`)
+	if !scorePattern.MatchString(html) {
+		t.Fatalf("expected rated card response to render updated score")
 	}
 }

@@ -19,10 +19,10 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
 	result, err := r.db.Exec(`
 		INSERT INTO trackers (
-			profile_id, title, source_id, source_item_id, source_url, status, last_read_chapter, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
+			profile_id, title, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.ProfileID, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+	`, tracker.ProfileID, tracker.Title, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
 	if err != nil {
 		return nil, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -47,7 +47,7 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 	row := r.db.QueryRow(`
 		SELECT
 			id, profile_id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
+			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ? AND profile_id = ?
@@ -80,6 +80,7 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 			source_url = ?,
 			status = ?,
 			last_read_chapter = ?,
+			rating = ?,
 			last_read_at = CASE WHEN last_read_chapter IS NOT ? THEN CURRENT_TIMESTAMP ELSE last_read_at END,
 			latest_known_chapter = ?,
 			latest_release_at = ?,
@@ -94,6 +95,7 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 			OR source_url IS NOT ?
 			OR status IS NOT ?
 			OR last_read_chapter IS NOT ?
+			OR rating IS NOT ?
 			OR latest_known_chapter IS NOT ?
 			OR latest_release_at IS NOT ?
 			OR last_checked_at IS NOT ?
@@ -105,6 +107,7 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 		tracker.SourceURL,
 		tracker.Status,
 		tracker.LastReadChapter,
+		tracker.Rating,
 		tracker.LastReadChapter,
 		tracker.LatestKnownChapter,
 		tracker.LatestReleaseAt,
@@ -117,6 +120,7 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 		tracker.SourceURL,
 		tracker.Status,
 		tracker.LastReadChapter,
+		tracker.Rating,
 		tracker.LatestKnownChapter,
 		tracker.LatestReleaseAt,
 		tracker.LastCheckedAt,
@@ -162,6 +166,28 @@ func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, las
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("last read update rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
+}
+
+func (r *TrackerRepository) UpdateRating(profileID int64, id int64, rating *float64) (bool, error) {
+	result, err := r.db.Exec(`
+		UPDATE trackers
+		SET
+			rating = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		  AND profile_id = ?
+		  AND rating IS NOT ?
+	`, rating, id, profileID, rating)
+	if err != nil {
+		return false, fmt.Errorf("update rating: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rating update rows affected: %w", err)
 	}
 
 	return rowsAffected > 0, nil
