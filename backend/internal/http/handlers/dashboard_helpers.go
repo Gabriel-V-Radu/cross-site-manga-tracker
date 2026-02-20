@@ -183,6 +183,10 @@ func formatChapterLabel(chapter float64) string {
 	return "Ch. " + strconv.FormatFloat(chapter, 'f', -1, 64)
 }
 
+func formatRatingLabel(rating float64) string {
+	return strconv.FormatFloat(rating, 'f', 1, 64)
+}
+
 func chapterInputValue(chapter *float64) string {
 	if chapter == nil {
 		return ""
@@ -427,6 +431,8 @@ func sortLabel(value string) string {
 		return "Date added"
 	case "last_checked_at":
 		return "Last checked"
+	case "rating":
+		return "Rating"
 	case "latest_known_chapter":
 		return "Latest chapter"
 	default:

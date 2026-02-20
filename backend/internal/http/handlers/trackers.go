@@ -27,6 +27,7 @@ type createTrackerRequest struct {
 	SourceURL          string   `json:"sourceUrl"`
 	Status             string   `json:"status"`
 	LastReadChapter    *float64 `json:"lastReadChapter"`
+	Rating             *float64 `json:"rating"`
 	LatestKnownChapter *float64 `json:"latestKnownChapter"`
 	LastCheckedAt      *string  `json:"lastCheckedAt"`
 }
@@ -208,6 +209,9 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 	if !validStatuses[status] {
 		return nil, fmt.Errorf("invalid status")
 	}
+	if err := validateTrackerRating(req.Rating); err != nil {
+		return nil, err
+	}
 
 	var lastCheckedAt *time.Time
 	if req.LastCheckedAt != nil && strings.TrimSpace(*req.LastCheckedAt) != "" {
@@ -225,6 +229,7 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 		SourceURL:          strings.TrimSpace(req.SourceURL),
 		Status:             status,
 		LastReadChapter:    req.LastReadChapter,
+		Rating:             req.Rating,
 		LatestKnownChapter: req.LatestKnownChapter,
 		LastCheckedAt:      lastCheckedAt,
 	}, nil

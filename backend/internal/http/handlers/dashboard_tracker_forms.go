@@ -290,6 +290,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	}
 	tracker.LastCheckedAt = existingTracker.LastCheckedAt
 	tracker.LatestReleaseAt = existingTracker.LatestReleaseAt
+	tracker.Rating = existingTracker.Rating
 	tracker.ProfileID = activeProfile.ID
 
 	linkedSources, err := parseLinkedSourcesFromForm(c)
@@ -447,6 +448,73 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to update tracker")
 		}
+	}
+
+	updatedTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	if err != nil || updatedTracker == nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	sourceKeyByID, err := h.listSourceKeys()
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceKeyByID, "")
+	if len(cards) == 0 {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
+		ViewMode:    viewMode,
+		ReplaceCard: &cards[0],
+	})
+}
+
+func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
+
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil || id <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid tracker id")
+	}
+
+	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
+	}
+	if tracker == nil {
+		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
+	}
+
+	var rating *float64
+	if strings.TrimSpace(c.FormValue("clear")) != "1" {
+		raw := strings.TrimSpace(c.FormValue("rating"))
+		if raw == "" {
+			return c.Status(fiber.StatusBadRequest).SendString("Rating is required")
+		}
+
+		value, parseErr := strconv.ParseFloat(raw, 64)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).SendString("Invalid rating")
+		}
+		rating = &value
+	}
+
+	if err := validateTrackerRating(rating); err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	if _, err := h.trackerRepo.UpdateRating(activeProfile.ID, id, rating); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update rating")
 	}
 
 	updatedTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)

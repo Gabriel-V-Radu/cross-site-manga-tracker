@@ -16,6 +16,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		"updated_at":           "updated_at",
 		"last_read_at":         "last_read_at",
 		"last_checked_at":      "last_checked_at",
+		"rating":               "rating",
 		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(latest_release_at, last_checked_at, updated_at, created_at) END",
 	}
 	sortField, ok := validSortFields[options.SortBy]
@@ -31,7 +32,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	query := `
 		SELECT
 			id, profile_id, title, source_id, source_item_id, source_url, status,
-			last_read_chapter, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
+			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 	`

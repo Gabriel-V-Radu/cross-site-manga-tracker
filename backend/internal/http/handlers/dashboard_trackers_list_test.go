@@ -192,3 +192,46 @@ func TestDashboardPaginationCondensesWithEllipses(t *testing.T) {
 		t.Fatalf("expected condensed pagination to include ellipsis")
 	}
 }
+
+func TestDashboardSortByRating(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (title, source_id, source_url, status, rating)
+		VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+	`,
+		"Rating Sort Low", 1, "https://mangadex.org/title/rating-sort-low", "completed", 2.5,
+		"Rating Sort High", 1, "https://mangadex.org/title/rating-sort-high", "completed", 9.5,
+		"Rating Sort None", 1, "https://mangadex.org/title/rating-sort-none", "completed", nil,
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=all&sort=rating&order=desc", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	html := string(body)
+
+	highIndex := strings.Index(html, "Rating Sort High")
+	lowIndex := strings.Index(html, "Rating Sort Low")
+	noneIndex := strings.Index(html, "Rating Sort None")
+	if highIndex < 0 || lowIndex < 0 || noneIndex < 0 {
+		t.Fatalf("expected all seeded trackers in response")
+	}
+	if !(highIndex < lowIndex && lowIndex < noneIndex) {
+		t.Fatalf("expected rating desc order High -> Low -> None")
+	}
+}

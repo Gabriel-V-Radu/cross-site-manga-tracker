@@ -292,6 +292,262 @@ document.addEventListener('click', function (event) {
     closeDropdownIfOutside('filter-sites-dropdown');
 });
 
+var normalizeRatingValue = function (value) {
+    var numericValue = Number(value);
+    if (!isFinite(numericValue)) {
+        numericValue = 0;
+    }
+
+    if (numericValue < 0) {
+        numericValue = 0;
+    } else if (numericValue > 10) {
+        numericValue = 10;
+    }
+
+    return Math.round(numericValue * 2) / 2;
+};
+
+var getRatingPopover = function (node) {
+    if (!node || !node.closest) {
+        return null;
+    }
+    return node.closest('.tracker-rating__popover');
+};
+
+var getRatingInput = function (popover) {
+    if (!popover || !popover.querySelector) {
+        return null;
+    }
+    return popover.querySelector('.js-rating-input');
+};
+
+var applyRatingUI = function (popover, value) {
+    if (!popover) {
+        return;
+    }
+
+    var numericValue = normalizeRatingValue(value);
+    var valueLabel = numericValue.toFixed(1);
+
+    var valueNode = popover.querySelector('.js-rating-value');
+    if (valueNode) {
+        valueNode.textContent = valueLabel;
+    }
+
+    var starsNode = popover.querySelector('.js-rating-stars');
+    if (starsNode) {
+        starsNode.style.setProperty('--rating-value', valueLabel);
+    }
+
+    var controlNode = popover.querySelector('.js-rating-control');
+    if (controlNode) {
+        controlNode.setAttribute('aria-valuenow', valueLabel);
+    }
+};
+
+var getSelectedRatingValue = function (popover) {
+    if (!popover) {
+        return 0;
+    }
+
+    var selected = popover.getAttribute('data-selected-rating');
+    if (selected === null || selected === '') {
+        var input = getRatingInput(popover);
+        if (!input) {
+            return 0;
+        }
+        return normalizeRatingValue(input.value);
+    }
+
+    return normalizeRatingValue(selected);
+};
+
+var setSelectedRatingValue = function (popover, value) {
+    if (!popover) {
+        return;
+    }
+
+    var normalized = normalizeRatingValue(value);
+    var valueLabel = normalized.toFixed(1);
+
+    var ratingInput = getRatingInput(popover);
+    if (ratingInput) {
+        ratingInput.value = valueLabel;
+    }
+
+    popover.setAttribute('data-selected-rating', valueLabel);
+    applyRatingUI(popover, normalized);
+};
+
+var revertRatingPreview = function (popover) {
+    if (!popover) {
+        return;
+    }
+    applyRatingUI(popover, getSelectedRatingValue(popover));
+};
+
+var previewRatingValue = function (popover, value) {
+    applyRatingUI(popover, value);
+};
+
+var ratingFromPointer = function (controlNode, event) {
+    if (!controlNode || !event) {
+        return 0;
+    }
+
+    var rect = controlNode.getBoundingClientRect();
+    if (!rect || rect.width <= 0) {
+        return 0;
+    }
+
+    var relativeX = event.clientX - rect.left;
+    if (relativeX < 0) {
+        relativeX = 0;
+    } else if (relativeX > rect.width) {
+        relativeX = rect.width;
+    }
+
+    var rawValue = (relativeX / rect.width) * 10;
+    return normalizeRatingValue(rawValue);
+};
+
+document.addEventListener('pointermove', function (event) {
+    var target = event && event.target;
+    var controlNode = target && target.closest ? target.closest('.js-rating-control') : null;
+    if (!controlNode) {
+        return;
+    }
+
+    if (event.pointerType === 'touch') {
+        return;
+    }
+
+    var popover = getRatingPopover(controlNode);
+    if (!popover) {
+        return;
+    }
+
+    previewRatingValue(popover, ratingFromPointer(controlNode, event));
+});
+
+document.addEventListener('pointerleave', function (event) {
+    var target = event && event.target;
+    if (!target || !target.matches || !target.matches('.js-rating-control')) {
+        return;
+    }
+
+    var popover = getRatingPopover(target);
+    if (!popover) {
+        return;
+    }
+
+    revertRatingPreview(popover);
+}, true);
+
+document.addEventListener('click', function (event) {
+    var target = event && event.target;
+    var controlNode = target && target.closest ? target.closest('.js-rating-control') : null;
+    if (!controlNode) {
+        return;
+    }
+
+    var popover = getRatingPopover(controlNode);
+    if (!popover) {
+        return;
+    }
+
+    setSelectedRatingValue(popover, ratingFromPointer(controlNode, event));
+});
+
+document.addEventListener('keydown', function (event) {
+    var target = event && event.target;
+    if (!target || !target.matches || !target.matches('.js-rating-control')) {
+        return;
+    }
+
+    var popover = getRatingPopover(target);
+    if (!popover) {
+        return;
+    }
+
+    var current = getSelectedRatingValue(popover);
+    var next = current;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+        next = current + 0.5;
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+        next = current - 0.5;
+    } else if (event.key === 'Home') {
+        next = 0;
+    } else if (event.key === 'End') {
+        next = 10;
+    } else {
+        return;
+    }
+
+    event.preventDefault();
+    setSelectedRatingValue(popover, next);
+});
+
+document.addEventListener('toggle', function (event) {
+    var target = event && event.target;
+    if (!target || !target.matches || !target.matches('.tracker-rating[open]')) {
+        return;
+    }
+
+    var openPopovers = document.querySelectorAll('.tracker-rating[open]');
+    openPopovers.forEach(function (popover) {
+        if (popover !== target) {
+            popover.removeAttribute('open');
+        }
+    });
+
+    var popoverForm = target.querySelector('.tracker-rating__popover');
+    if (!popoverForm) {
+        return;
+    }
+
+    var ratingInput = getRatingInput(popoverForm);
+    if (!ratingInput) {
+        return;
+    }
+
+    setSelectedRatingValue(popoverForm, ratingInput.value);
+});
+
+document.addEventListener('click', function (event) {
+    var openPopovers = document.querySelectorAll('.tracker-rating[open]');
+    if (!openPopovers || openPopovers.length === 0) {
+        return;
+    }
+
+    openPopovers.forEach(function (popover) {
+        if (popover.contains(event.target)) {
+            return;
+        }
+        popover.removeAttribute('open');
+    });
+});
+
+var initializeVisibleRatingPopovers = function () {
+    var popovers = document.querySelectorAll('.tracker-rating__popover');
+    if (!popovers || popovers.length === 0) {
+        return;
+    }
+
+    popovers.forEach(function (popover) {
+        var input = getRatingInput(popover);
+        if (!input) {
+            return;
+        }
+        setSelectedRatingValue(popover, input.value);
+    });
+};
+
+document.addEventListener('DOMContentLoaded', initializeVisibleRatingPopovers);
+document.body.addEventListener('htmx:afterSwap', function () {
+    initializeVisibleRatingPopovers();
+});
+
 window.dismissModalZone = function () {
     var modalZone = document.getElementById('modal-zone');
     if (!modalZone) {

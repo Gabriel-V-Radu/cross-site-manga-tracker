@@ -59,6 +59,39 @@
 </article>
 {{end}}
 
+{{define "tracker_rating_popover"}}
+<details class="tracker-rating">
+    <summary class="tracker-rating__toggle" title="Set rating">
+        {{if .Rating}}{{.RatingLabel}}{{else}}+{{end}}
+    </summary>
+    <form class="tracker-rating__popover"
+          hx-post="/dashboard/trackers/{{.ID}}/rating"
+          hx-target="this"
+          hx-swap="none"
+          hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'>
+        <p class="tracker-rating__label">Rating</p>
+        <input type="hidden"
+               class="js-rating-input"
+               name="rating"
+               value="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}">
+        <div class="tracker-rating__control js-rating-control"
+             role="slider"
+             tabindex="0"
+             aria-label="Rating"
+             aria-valuemin="0"
+             aria-valuemax="10"
+             aria-valuenow="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}">
+            <div class="tracker-rating__stars js-rating-stars" style="--rating-value: {{if .Rating}}{{.RatingLabel}}{{else}}0{{end}};" aria-hidden="true"></div>
+        </div>
+        <output class="tracker-rating__value js-rating-value">{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}</output>
+        <div class="tracker-rating__actions">
+            <button type="submit" class="linked-btn">Save</button>
+            <button type="submit" class="linked-btn linked-btn--danger" name="clear" value="1">Clear</button>
+        </div>
+    </form>
+</details>
+{{end}}
+
 {{define "tracker_card_grid"}}
 <article id="tracker-card-{{.ID}}" class="tracker-card">
     <header class="tracker-card__header">
@@ -77,6 +110,7 @@
             <img class="tracker-card__source-logo-img" src="{{.SourceLogoURL}}" alt="{{.SourceLogoLabel}} logo" loading="lazy">
         </span>
         {{end}}
+        {{template "tracker_rating_popover" .}}
     </div>
 
     <div class="tracker-card__tags{{if gt .HiddenTagCount 0}} tracker-card__tags--more{{end}}">

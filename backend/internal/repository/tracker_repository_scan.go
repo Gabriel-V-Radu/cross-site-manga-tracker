@@ -14,6 +14,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var tracker models.Tracker
 	var sourceItemID sql.NullString
 	var lastReadChapter sql.NullFloat64
+	var rating sql.NullFloat64
 	var lastReadAt sql.NullTime
 	var latestKnownChapter sql.NullFloat64
 	var latestReleaseAt sql.NullTime
@@ -28,6 +29,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&tracker.SourceURL,
 		&tracker.Status,
 		&lastReadChapter,
+		&rating,
 		&lastReadAt,
 		&latestKnownChapter,
 		&latestReleaseAt,
@@ -44,6 +46,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 	if lastReadChapter.Valid {
 		tracker.LastReadChapter = &lastReadChapter.Float64
+	}
+	if rating.Valid {
+		tracker.Rating = &rating.Float64
 	}
 	if lastReadAt.Valid {
 		tracker.LastReadAt = &lastReadAt.Time

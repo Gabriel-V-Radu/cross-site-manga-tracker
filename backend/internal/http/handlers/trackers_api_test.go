@@ -19,6 +19,7 @@ func TestTrackersCRUD(t *testing.T) {
 		"sourceUrl":          "https://mangadex.org/title/1",
 		"status":             "reading",
 		"lastReadChapter":    20.0,
+		"rating":             8.5,
 		"latestKnownChapter": 22.0,
 	}
 	body, _ := json.Marshal(createBody)
@@ -72,6 +73,7 @@ func TestTrackersCRUD(t *testing.T) {
 		"sourceUrl":          "https://mangadex.org/title/1",
 		"status":             "completed",
 		"lastReadChapter":    30.0,
+		"rating":             9.5,
 		"latestKnownChapter": 30.0,
 	}
 	updateRaw, _ := json.Marshal(updateBody)
@@ -92,6 +94,9 @@ func TestTrackersCRUD(t *testing.T) {
 	if updated["status"] != "completed" {
 		t.Fatalf("expected status completed, got %v", updated["status"])
 	}
+	if updated["rating"] != 9.5 {
+		t.Fatalf("expected rating 9.5, got %v", updated["rating"])
+	}
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/trackers/"+toString(id), nil)
 	deleteRes, err := app.Test(deleteReq)
@@ -109,6 +114,32 @@ func TestTrackersCRUD(t *testing.T) {
 	}
 	if getAfterDeleteRes.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", getAfterDeleteRes.StatusCode)
+	}
+}
+
+func TestTrackersRejectInvalidRatingStep(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	createBody := map[string]any{
+		"title":              "Invalid Rating",
+		"sourceId":           1,
+		"sourceUrl":          "https://mangadex.org/title/invalid-rating",
+		"status":             "reading",
+		"lastReadChapter":    1.0,
+		"rating":             8.3,
+		"latestKnownChapter": 2.0,
+	}
+	body, _ := json.Marshal(createBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/trackers", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", res.StatusCode)
 	}
 }
 
