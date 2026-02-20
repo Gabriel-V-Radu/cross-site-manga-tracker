@@ -556,21 +556,47 @@ window.dismissModalZone = function () {
     modalZone.innerHTML = '';
 };
 
-document.addEventListener('click', function (event) {
+var shouldDismissModalOnBackdropClick = false;
+
+document.addEventListener('pointerdown', function (event) {
     var target = event && event.target;
     if (!target || !target.closest) {
+        shouldDismissModalOnBackdropClick = false;
         return;
     }
 
     var backdrop = target.closest('#modal-zone .modal-backdrop');
     if (!backdrop) {
+        shouldDismissModalOnBackdropClick = false;
+        return;
+    }
+
+    shouldDismissModalOnBackdropClick = !target.closest('.modal-card');
+}, true);
+
+document.addEventListener('click', function (event) {
+    var target = event && event.target;
+    if (!target || !target.closest) {
+        shouldDismissModalOnBackdropClick = false;
+        return;
+    }
+
+    var backdrop = target.closest('#modal-zone .modal-backdrop');
+    if (!backdrop) {
+        shouldDismissModalOnBackdropClick = false;
         return;
     }
 
     if (target.closest('.modal-card')) {
+        shouldDismissModalOnBackdropClick = false;
         return;
     }
 
+    if (!shouldDismissModalOnBackdropClick) {
+        return;
+    }
+
+    shouldDismissModalOnBackdropClick = false;
     window.dismissModalZone();
 });
 
