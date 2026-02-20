@@ -431,6 +431,8 @@ func sortLabel(value string) string {
 		return "Date added"
 	case "last_checked_at":
 		return "Last checked"
+	case "rating":
+		return "Rating"
 	case "latest_known_chapter":
 		return "Latest chapter"
 	default:

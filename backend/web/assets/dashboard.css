@@ -733,12 +733,13 @@ input:focus, select:focus {
     content: "";
     position: absolute;
     inset: 0;
-    border-top: 2px solid transparent;
-    transition: border-color 130ms ease;
+    border-radius: inherit;
+    box-shadow: inset 0 2px 0 0 transparent;
+    transition: box-shadow 130ms ease;
     pointer-events: none;
 }
 
-.tracker-card:hover::after { border-color: var(--accent-soft); }
+.tracker-card:hover::after { box-shadow: inset 0 2px 0 0 var(--accent-soft); }
 
 .cards-grid .tracker-card h3 {
     margin: 0;

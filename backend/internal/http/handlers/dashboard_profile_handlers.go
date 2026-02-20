@@ -37,7 +37,7 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	c.Set("Expires", "0")
 	data := dashboardPageData{
 		Statuses:              []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:                 []string{"latest_known_chapter", "last_read_at"},
+		Sorts:                 []string{"latest_known_chapter", "last_read_at", "rating"},
 		Profiles:              profiles,
 		ActiveProfile:         *activeProfile,
 		RenameValue:           activeProfile.Name,
