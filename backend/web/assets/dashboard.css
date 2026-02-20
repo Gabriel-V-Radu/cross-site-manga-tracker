@@ -794,14 +794,17 @@ input:focus, select:focus {
 }
 
 .tracker-card__cover > img:not(.tracker-card__tag-icon):not(.tracker-card__source-logo-img) {
-    width: auto;
-    height: 100%;
-    max-width: 100%;
-    max-height: 100%;
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    width: calc(100% - 28px);
+    height: calc(100% - 28px);
     object-fit: contain;
     object-position: center;
     border-radius: 8px;
     display: block;
+    max-width: none;
+    max-height: none;
 }
 
 .tracker-card__source-logo {
