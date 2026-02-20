@@ -145,6 +145,45 @@ func TestAsuraComicConnectorSupportsBareChapterPathPattern(t *testing.T) {
 	}
 }
 
+func TestAsuraComicConnectorUsesPublishedAtForLatestChapter(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/series", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+	})
+	mux.HandleFunc("/series/nano-machine-11b89554", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Nano Machine - Asura Scans">
+</head>
+<body>
+  <a href="/series/nano-machine-11b89554/chapter/298">Chapter 298 February 4th 2026</a>
+  <a href="/series/nano-machine-11b89554/chapter/299">Chapter 299 February 11th 2026</a>
+  <script>self.__next_f.push([1,"{\"chapters\":[{\"name\":298,\"title\":\"A\",\"id\":1001,\"published_at\":\"2026-02-04T15:10:00.000000Z\"},{\"name\":299,\"title\":\"B\",\"id\":1002,\"published_at\":\"2026-02-11T16:44:55.000000Z\"}]}"])</script>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	resolved, err := conn.ResolveByURL(context.Background(), "https://asuracomic.net/series/nano-machine-11b89554")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+
+	if resolved.LastUpdatedAt == nil {
+		t.Fatalf("expected published_at timestamp for latest chapter")
+	}
+
+	expected := time.Date(2026, time.February, 11, 16, 44, 55, 0, time.UTC)
+	if !resolved.LastUpdatedAt.Equal(expected) {
+		t.Fatalf("expected latest chapter release time %s, got %s", expected.Format(time.RFC3339), resolved.LastUpdatedAt.UTC().Format(time.RFC3339))
+	}
+}
+
 func TestAsuraComicConnectorSearchSupportsSeriesHrefWithoutLeadingSlash(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/series", func(w http.ResponseWriter, r *http.Request) {

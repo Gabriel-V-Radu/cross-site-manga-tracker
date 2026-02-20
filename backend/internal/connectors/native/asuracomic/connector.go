@@ -22,6 +22,8 @@ var (
 	htmlTagPattern             = regexp.MustCompile(`(?is)<[^>]+>`)
 	whitespacePattern          = regexp.MustCompile(`\s+`)
 	chapterHrefPattern         = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
+	chapterPublishedEscPattern = regexp.MustCompile(`(?is)\\"name\\":\s*(\d+(?:\.\d+)?).*?\\"published_at\\":\\"([^\\"]+)\\"`)
+	chapterPublishedRawPattern = regexp.MustCompile(`(?is)"name":\s*(\d+(?:\.\d+)?).*?"published_at":"([^"]+)"`)
 	metaTitlePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
 	titleTagPattern            = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
 	metaImagePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content=["']([^"']+)["']`)
@@ -386,6 +388,9 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 	}
 
 	if latestByPair != nil {
+		if publishedAt := extractPublishedAtForChapter(body, *latestByPair); publishedAt != nil {
+			return latestByPair, publishedAt
+		}
 		return latestByPair, releaseAtByPair
 	}
 
@@ -432,6 +437,50 @@ func parseAsuraDate(raw string) *time.Time {
 	}
 	utc := parsed.UTC()
 	return &utc
+}
+
+func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter < 0 {
+		return nil
+	}
+
+	for _, pattern := range []*regexp.Regexp{chapterPublishedEscPattern, chapterPublishedRawPattern} {
+		matches := pattern.FindAllStringSubmatch(body, -1)
+		for _, match := range matches {
+			if len(match) < 3 {
+				continue
+			}
+
+			parsedChapter, err := strconv.ParseFloat(strings.TrimSpace(match[1]), 64)
+			if err != nil || math.Abs(parsedChapter-chapter) > 1e-9 {
+				continue
+			}
+
+			if parsed := parseAsuraPublishedAt(match[2]); parsed != nil {
+				return parsed
+			}
+		}
+	}
+
+	return nil
+}
+
+func parseAsuraPublishedAt(raw string) *time.Time {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		parsed, err := time.Parse(layout, trimmed)
+		if err != nil {
+			continue
+		}
+		utc := parsed.UTC()
+		return &utc
+	}
+
+	return nil
 }
 
 func isValidSeriesID(seriesID string) bool {
