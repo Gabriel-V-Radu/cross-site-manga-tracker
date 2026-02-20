@@ -7,57 +7,40 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
-	"github.com/gabriel/cross-site-tracker/backend/internal/notifications"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
 type pollRepository interface {
-	ListForPolling(statuses []string) ([]repository.PollingTracker, error)
+	ListForPolling() ([]repository.PollingTracker, error)
 	UpdatePollingState(id int64, latestKnownChapter *float64, latestReleaseAt *time.Time, checkedAt time.Time) error
 }
 
 type Poller struct {
-	repo          pollRepository
-	registry      *connectors.Registry
-	notifier      notifications.Notifier
-	interval      time.Duration
-	notifyEnabled bool
-	notifyMap     map[string]bool
-	logger        *slog.Logger
-	stopCh        chan struct{}
+	repo     pollRepository
+	registry *connectors.Registry
+	interval time.Duration
+	logger   *slog.Logger
+	stopCh   chan struct{}
 }
 
 type PollerConfig struct {
-	Interval      time.Duration
-	NotifyEnabled bool
-	NotifyStatus  []string
+	Interval time.Duration
 }
 
-func NewPoller(repo pollRepository, registry *connectors.Registry, notifier notifications.Notifier, cfg PollerConfig, logger *slog.Logger) *Poller {
+func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Minute
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if notifier == nil {
-		notifier = notifications.NoopNotifier{}
-	}
-
-	notifyMap := make(map[string]bool)
-	for _, status := range cfg.NotifyStatus {
-		notifyMap[status] = true
-	}
 
 	return &Poller{
-		repo:          repo,
-		registry:      registry,
-		notifier:      notifier,
-		interval:      cfg.Interval,
-		notifyEnabled: cfg.NotifyEnabled,
-		notifyMap:     notifyMap,
-		logger:        logger,
-		stopCh:        make(chan struct{}),
+		repo:     repo,
+		registry: registry,
+		interval: cfg.Interval,
+		logger:   logger,
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -95,12 +78,7 @@ func (p *Poller) StopWait(timeout time.Duration) {
 }
 
 func (p *Poller) RunOnce(ctx context.Context) error {
-	statuses := make([]string, 0)
-	for status := range p.notifyMap {
-		statuses = append(statuses, status)
-	}
-
-	trackers, err := p.repo.ListForPolling(nil)
+	trackers, err := p.repo.ListForPolling()
 	if err != nil {
 		return fmt.Errorf("load trackers for polling: %w", err)
 	}
@@ -135,35 +113,6 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		if err := p.repo.UpdatePollingState(tracker.ID, latest, latestReleaseAt, now); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
-		}
-
-		if !p.notifyEnabled || result.LatestChapter == nil {
-			continue
-		}
-		if !p.notifyMap[tracker.Status] {
-			continue
-		}
-		if !isNewChapter(tracker.LatestKnownChapter, result.LatestChapter) {
-			continue
-		}
-
-		notifyCtx, notifyCancel := context.WithTimeout(ctx, 5*time.Second)
-		notifyErr := p.notifier.Notify(notifyCtx, notifications.Message{
-			Title: "New chapter available",
-			Body:  fmt.Sprintf("%s now has chapter %.2f", tracker.Title, *result.LatestChapter),
-			Context: map[string]interface{}{
-				"trackerId":         tracker.ID,
-				"title":             tracker.Title,
-				"status":            tracker.Status,
-				"source":            tracker.SourceKey,
-				"sourceUrl":         tracker.SourceURL,
-				"latestKnownBefore": tracker.LatestKnownChapter,
-				"latestKnownNow":    result.LatestChapter,
-			},
-		})
-		notifyCancel()
-		if notifyErr != nil {
-			p.logger.Warn("notification failed", "trackerId", tracker.ID, "error", notifyErr)
 		}
 	}
 

@@ -12,7 +12,6 @@ import (
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
-	"github.com/gabriel/cross-site-tracker/backend/internal/notifications"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gabriel/cross-site-tracker/backend/internal/scheduler"
 )
@@ -54,25 +53,12 @@ func main() {
 
 	app := apihttp.NewServerWithRegistry(cfg, db, connectorRegistry)
 
-	var notifier notifications.Notifier = notifications.NoopNotifier{}
-	if cfg.NotifyEnabled && cfg.NotifyWebhookURL != "" {
-		webhookNotifier, err := notifications.NewWebhookNotifier(cfg.NotifyWebhookURL)
-		if err != nil {
-			slog.Warn("invalid webhook notifier config", "error", err)
-		} else {
-			notifier = notifications.NewMultiNotifier(webhookNotifier)
-		}
-	}
-
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
 	poller := scheduler.NewPoller(
 		repository.NewTrackerRepository(db),
 		connectorRegistry,
-		notifier,
 		scheduler.PollerConfig{
-			Interval:      time.Duration(cfg.PollingMinutes) * time.Minute,
-			NotifyEnabled: cfg.NotifyEnabled,
-			NotifyStatus:  cfg.NotifyStatuses,
+			Interval: time.Duration(cfg.PollingMinutes) * time.Minute,
 		},
 		slog.Default(),
 	)

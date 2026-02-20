@@ -50,8 +50,7 @@ func SeedDefaults(db *sql.DB) error {
 	_, err = tx.Exec(`
 		INSERT OR IGNORE INTO settings (key, value)
 		VALUES
-			('polling_minutes', '30'),
-			('notify_on_statuses', 'reading,completed');
+			('polling_minutes', '30');
 	`)
 	if err != nil {
 		tx.Rollback()

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
-	"github.com/gabriel/cross-site-tracker/backend/internal/notifications"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
@@ -17,7 +16,7 @@ type fakeRepo struct {
 	updatedAt     *time.Time
 }
 
-func (f *fakeRepo) ListForPolling(_ []string) ([]repository.PollingTracker, error) {
+func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
@@ -44,16 +43,7 @@ func (f fakeConnector) ResolveByURL(context.Context, string) (*connectors.MangaR
 	return &connectors.MangaResult{SourceKey: f.Key(), SourceItemID: "a", Title: "T", URL: "u", LatestChapter: f.latest, LastUpdatedAt: f.releaseDate}, nil
 }
 
-type fakeNotifier struct {
-	called int
-}
-
-func (f *fakeNotifier) Notify(_ context.Context, _ notifications.Message) error {
-	f.called++
-	return nil
-}
-
-func TestPollerRunOnce_NotifiesOnNewChapter(t *testing.T) {
+func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	prev := 10.0
 	next := 11.0
 	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
@@ -61,9 +51,8 @@ func TestPollerRunOnce_NotifiesOnNewChapter(t *testing.T) {
 	if err := registry.Register(fakeConnector{latest: &next}); err != nil {
 		t.Fatalf("register connector: %v", err)
 	}
-	notifier := &fakeNotifier{}
 
-	poller := NewPoller(repo, registry, notifier, PollerConfig{Interval: time.Minute, NotifyEnabled: true, NotifyStatus: []string{"reading"}}, nil)
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
 	if err := poller.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run once failed: %v", err)
 	}
@@ -71,12 +60,12 @@ func TestPollerRunOnce_NotifiesOnNewChapter(t *testing.T) {
 	if repo.updatedCount != 1 {
 		t.Fatalf("expected 1 update call, got %d", repo.updatedCount)
 	}
-	if notifier.called != 1 {
-		t.Fatalf("expected 1 notification, got %d", notifier.called)
+	if repo.updatedLatest == nil || *repo.updatedLatest != next {
+		t.Fatalf("expected latest chapter %.2f, got %#v", next, repo.updatedLatest)
 	}
 }
 
-func TestPollerRunOnce_NoNotifyWhenChapterNotAdvanced(t *testing.T) {
+func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T) {
 	prev := 10.0
 	next := 10.0
 	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
@@ -84,15 +73,17 @@ func TestPollerRunOnce_NoNotifyWhenChapterNotAdvanced(t *testing.T) {
 	if err := registry.Register(fakeConnector{latest: &next}); err != nil {
 		t.Fatalf("register connector: %v", err)
 	}
-	notifier := &fakeNotifier{}
 
-	poller := NewPoller(repo, registry, notifier, PollerConfig{Interval: time.Minute, NotifyEnabled: true, NotifyStatus: []string{"reading"}}, nil)
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
 	if err := poller.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run once failed: %v", err)
 	}
 
-	if notifier.called != 0 {
-		t.Fatalf("expected 0 notifications, got %d", notifier.called)
+	if repo.updatedCount != 1 {
+		t.Fatalf("expected 1 update call, got %d", repo.updatedCount)
+	}
+	if repo.updatedAt != nil {
+		t.Fatalf("expected release date to remain unset when chapter does not advance")
 	}
 }
 
@@ -105,7 +96,7 @@ func TestPollerRunOnce_UsesCheckedTimeWhenNewChapterHasNoReleaseDate(t *testing.
 		t.Fatalf("register connector: %v", err)
 	}
 
-	poller := NewPoller(repo, registry, &fakeNotifier{}, PollerConfig{Interval: time.Minute, NotifyEnabled: false}, nil)
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
 	if err := poller.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run once failed: %v", err)
 	}

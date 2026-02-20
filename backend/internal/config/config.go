@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -21,9 +20,6 @@ type Config struct {
 	SeedDefaultData    bool
 	PollingEnabled     bool
 	PollingMinutes     int
-	NotifyEnabled      bool
-	NotifyWebhookURL   string
-	NotifyStatuses     []string
 }
 
 func Load() (Config, error) {
@@ -39,9 +35,6 @@ func Load() (Config, error) {
 		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
 		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),
 		PollingMinutes:     getEnvAsInt("POLLING_MINUTES", 30),
-		NotifyEnabled:      getEnvAsBool("NOTIFY_ENABLED", false),
-		NotifyWebhookURL:   getEnv("NOTIFY_WEBHOOK_URL", ""),
-		NotifyStatuses:     getEnvAsList("NOTIFY_STATUSES", []string{"reading", "completed"}),
 	}
 
 	if cfg.PollingMinutes <= 0 {
@@ -102,23 +95,4 @@ func getEnvAsInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
-}
-
-func getEnvAsList(key string, fallback []string) []string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		item := strings.TrimSpace(part)
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	if len(out) == 0 {
-		return fallback
-	}
-	return out
 }

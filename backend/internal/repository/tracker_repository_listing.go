@@ -186,7 +186,7 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	return whereClauses, args
 }
 
-func (r *TrackerRepository) ListForPolling(statuses []string) ([]PollingTracker, error) {
+func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	query := `
 		SELECT
 			t.id, t.title, t.status, t.source_url, t.latest_known_chapter, s.key
@@ -194,17 +194,7 @@ func (r *TrackerRepository) ListForPolling(statuses []string) ([]PollingTracker,
 		INNER JOIN sources s ON s.id = t.source_id
 	`
 
-	args := make([]any, 0)
-	if len(statuses) > 0 {
-		placeholders := make([]string, 0, len(statuses))
-		for _, status := range statuses {
-			placeholders = append(placeholders, "?")
-			args = append(args, status)
-		}
-		query += ` WHERE t.status IN (` + strings.Join(placeholders, ",") + `)`
-	}
-
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers for polling: %w", err)
 	}
