@@ -70,14 +70,19 @@
           hx-swap="none"
           hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'>
         <p class="tracker-rating__label">Rating</p>
-        <div class="tracker-rating__stars js-rating-stars" style="--rating-value: {{if .Rating}}{{.RatingLabel}}{{else}}0{{end}};" aria-hidden="true"></div>
-        <input type="range"
-               class="tracker-rating__range js-rating-range"
+        <input type="hidden"
+               class="js-rating-input"
                name="rating"
-               min="0"
-               max="10"
-               step="0.5"
-               value="{{if .Rating}}{{.RatingLabel}}{{else}}0{{end}}">
+               value="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}">
+        <div class="tracker-rating__control js-rating-control"
+             role="slider"
+             tabindex="0"
+             aria-label="Rating"
+             aria-valuemin="0"
+             aria-valuemax="10"
+             aria-valuenow="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}">
+            <div class="tracker-rating__stars js-rating-stars" style="--rating-value: {{if .Rating}}{{.RatingLabel}}{{else}}0{{end}};" aria-hidden="true"></div>
+        </div>
         <output class="tracker-rating__value js-rating-value">{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}</output>
         <div class="tracker-rating__actions">
             <button type="submit" class="linked-btn">Save</button>
