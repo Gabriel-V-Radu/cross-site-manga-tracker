@@ -10,6 +10,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -245,6 +246,9 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 		updatedAt := resolved.LastUpdatedAt.UTC()
 		tracker.LatestReleaseAt = &updatedAt
 	}
+	if len(resolved.RelatedTitles) > 0 {
+		tracker.RelatedTitles = searchutil.FilterEnglishAlphabetNames(resolved.RelatedTitles)
+	}
 }
 
 func hasResolvedSourceMetadata(tracker *models.Tracker) bool {
@@ -340,7 +344,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	}
 
 	if !sameTrackerSources(existingSources, uniqueSources) {
-		primarySource, latestKnownChapter, latestReleaseAt := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
+		primarySource, latestKnownChapter, latestReleaseAt, relatedTitles := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
 		tracker.SourceID = primarySource.SourceID
 		tracker.SourceItemID = primarySource.SourceItemID
 		tracker.SourceURL = primarySource.SourceURL
@@ -349,6 +353,9 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 		if latestReleaseAt != nil {
 			tracker.LatestReleaseAt = latestReleaseAt
+		}
+		if len(relatedTitles) > 0 {
+			tracker.RelatedTitles = relatedTitles
 		}
 	}
 
@@ -617,9 +624,14 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Invalid latest release date")
 	}
+	relatedTitles, err := parseRelatedTitlesFromForm(c.FormValue("related_titles_json"))
+	if err != nil {
+		return nil, fmt.Errorf("Invalid related titles")
+	}
 
 	return &models.Tracker{
 		Title:              title,
+		RelatedTitles:      relatedTitles,
 		SourceID:           sourceID,
 		SourceItemID:       sourceItemID,
 		SourceURL:          sourceURL,
@@ -653,6 +665,20 @@ func parseOptionalRFC3339Time(raw string) (*time.Time, error) {
 	}
 	utc := value.UTC()
 	return &utc, nil
+}
+
+func parseRelatedTitlesFromForm(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	var values []string
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return nil, err
+	}
+
+	return searchutil.FilterEnglishAlphabetNames(values), nil
 }
 
 func parseTagIDsFromForm(c *fiber.Ctx) ([]int64, error) {
@@ -778,14 +804,15 @@ func sameTrackerSources(existing []models.TrackerSource, incoming []models.Track
 	return true
 }
 
-func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time) {
+func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time, []string) {
 	if len(sources) == 0 {
-		return models.TrackerSource{}, nil, nil
+		return models.TrackerSource{}, nil, nil, nil
 	}
 
 	bestIndex := 0
 	var bestChapter *float64
 	var bestReleaseAt *time.Time
+	var bestRelatedTitles []string
 
 	for idx := range sources {
 		source := &sources[idx]
@@ -798,6 +825,10 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 		if source.SourceItemID == nil && resolvedItemID != "" {
 			source.SourceItemID = &resolvedItemID
 		}
+		resolvedRelatedTitles := searchutil.FilterEnglishAlphabetNames(resolved.RelatedTitles)
+		if idx == bestIndex && len(bestRelatedTitles) == 0 && len(resolvedRelatedTitles) > 0 {
+			bestRelatedTitles = resolvedRelatedTitles
+		}
 
 		if resolved.LatestChapter == nil {
 			continue
@@ -807,6 +838,7 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 		if bestChapter == nil || resolvedChapter > *bestChapter {
 			bestIndex = idx
 			bestChapter = &resolvedChapter
+			bestRelatedTitles = resolvedRelatedTitles
 			if resolved.LastUpdatedAt != nil {
 				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
 				bestReleaseAt = &resolvedReleaseAt
@@ -819,13 +851,14 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 		if resolvedChapter == *bestChapter && resolved.LastUpdatedAt != nil {
 			if bestReleaseAt == nil || resolved.LastUpdatedAt.After(*bestReleaseAt) {
 				bestIndex = idx
+				bestRelatedTitles = resolvedRelatedTitles
 				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
 				bestReleaseAt = &resolvedReleaseAt
 			}
 		}
 	}
 
-	return sources[bestIndex], bestChapter, bestReleaseAt
+	return sources[bestIndex], bestChapter, bestReleaseAt, bestRelatedTitles
 }
 
 func (h *DashboardHandler) resolveLinkedSource(parent context.Context, sourceID int64, sourceURL string) (*connectors.MangaResult, error) {

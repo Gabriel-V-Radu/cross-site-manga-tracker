@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 var (
@@ -103,8 +104,13 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(strings.ToLower(title))
+	query := strings.TrimSpace(title)
 	if query == "" {
+		return nil, fmt.Errorf("title is required")
+	}
+	normalizedQuery := searchutil.Normalize(query)
+	queryTokens := searchutil.Tokenize(query)
+	if normalizedQuery == "" || len(queryTokens) == 0 {
 		return nil, fmt.Errorf("title is required")
 	}
 
@@ -135,19 +141,19 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			break
 		}
 
-		normalizedTitle := strings.ToLower(strings.TrimSpace(entry.Title))
-		if normalizedTitle == "" {
-			continue
-		}
-		if !strings.Contains(normalizedTitle, query) {
-			continue
-		}
 		if _, ok := seen[entry.SeriesID]; ok {
 			continue
 		}
 
 		resolved, resolveErr := c.resolveBySeriesID(ctx, entry.SeriesID)
 		if resolveErr != nil {
+			continue
+		}
+		if !searchutil.AnyCandidateMatches(
+			append([]string{resolved.Title, entry.Title, resolved.SourceItemID}, resolved.RelatedTitles...),
+			normalizedQuery,
+			queryTokens,
+		) {
 			continue
 		}
 
@@ -288,6 +294,8 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 	if title == "" {
 		title = "Series " + seriesID
 	}
+	relatedTitles := searchutil.ExtractRelatedTitles(body)
+	relatedTitles = removeMatchingTitle(relatedTitles, title)
 
 	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
 	coverImageURL = normalizeFlameImageURL(coverImageURL)
@@ -298,6 +306,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		SourceKey:     c.Key(),
 		SourceItemID:  seriesID,
 		Title:         title,
+		RelatedTitles: relatedTitles,
 		URL:           "https://flamecomics.xyz/series/" + seriesID,
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
@@ -435,6 +444,31 @@ func firstSubmatch(pattern *regexp.Regexp, raw string) string {
 		return ""
 	}
 	return matches[1]
+}
+
+func removeMatchingTitle(values []string, title string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	titleKey := searchutil.Normalize(title)
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		candidateKey := searchutil.Normalize(value)
+		if candidateKey == "" {
+			continue
+		}
+		if titleKey != "" && candidateKey == titleKey {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	return searchutil.UniqueNonEmpty(filtered)
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {

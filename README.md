@@ -68,3 +68,11 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 - Docker backup: `./scripts/backup.ps1 -Mode docker`
 - Docker restore: `./scripts/restore.ps1 -Mode docker -BackupFile <path-to-backup.sqlite> -RestartContainer`
 - Full runbook: [BACKUP_RESTORE.md](BACKUP_RESTORE.md)
+
+## Backfill Related Titles (Existing Trackers)
+- Existing trackers created before `related_titles` persistence may have empty related-title data.
+- Run from `backend/`:
+  - Preview only: `go run ./cmd/backfill-related-titles --dry-run`
+  - Apply updates: `go run ./cmd/backfill-related-titles`
+  - Single profile: `go run ./cmd/backfill-related-titles --profile-id 1`
+  - Limit batch size: `go run ./cmd/backfill-related-titles --limit 100`

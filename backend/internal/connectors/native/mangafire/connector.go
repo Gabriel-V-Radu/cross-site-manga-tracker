@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 var (
@@ -26,6 +27,7 @@ var (
 	imgSrcPattern      = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["']`)
 	imgAltPattern      = regexp.MustCompile(`(?is)<img[^>]+alt=["']([^"']+)["']`)
 	htmlTagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
+	infoAliasPattern   = regexp.MustCompile(`(?is)<h1[^>]*>.*?</h1>\s*<h6[^>]*>(.*?)</h6>`)
 	chapterURLPattern  = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
 	chapterDatePattern = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
 	chapterAgoPattern  = regexp.MustCompile(`(?i)\b((\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|an?\s+(minute|hour|day|week|month|year)|just\s+now)\s+ago\b`)
@@ -130,6 +132,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	if title == "" {
 		title = prettifyItemID(sourceItemID)
 	}
+	relatedTitles := buildMangaFireRelatedTitles(body, title, sourceItemID)
 
 	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(imageTagPattern, body)))
 	if coverImageURL == "" {
@@ -145,6 +148,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		SourceKey:     c.Key(),
 		SourceItemID:  sourceItemID,
 		Title:         title,
+		RelatedTitles: relatedTitles,
 		URL:           "https://mangafire.to/manga/" + sourceItemID,
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
@@ -187,19 +191,31 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	results := make([]connectors.MangaResult, 0, len(entries))
 	resultIDs := map[string]struct{}{}
 	for _, entry := range entries {
-		if !matchesSearchQuery(entry, query, queryTokens, significantQueryTokens) {
-			continue
-		}
-
-		results = append(results, connectors.MangaResult{
+		candidate := connectors.MangaResult{
 			SourceKey:     c.Key(),
 			SourceItemID:  entry.ItemID,
 			Title:         entry.Title,
 			URL:           "https://mangafire.to/manga/" + entry.ItemID,
 			CoverImageURL: c.absoluteURL(entry.CoverImageURL),
 			LatestChapter: nil,
-		})
-		resultIDs[entry.ItemID] = struct{}{}
+		}
+		c.enrichSearchResult(ctx, &candidate)
+
+		if !matchesSearchQuery(
+			searchEntry{
+				ItemID:        candidate.SourceItemID,
+				Title:         candidate.Title,
+				RelatedTitles: candidate.RelatedTitles,
+			},
+			query,
+			queryTokens,
+			significantQueryTokens,
+		) {
+			continue
+		}
+
+		results = append(results, candidate)
+		resultIDs[candidate.SourceItemID] = struct{}{}
 
 		if len(results) >= limit {
 			break
@@ -211,10 +227,6 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if fallbackErr == nil {
 			results = updatedResults
 		}
-	}
-
-	for index := range results {
-		c.enrichSearchResult(ctx, &results[index])
 	}
 
 	return results, nil
@@ -292,7 +304,16 @@ func (c *Connector) appendSitemapMatches(ctx context.Context, baseResults []conn
 		}
 		c.enrichSearchResult(ctx, &candidate)
 
-		if !matchesSearchQuery(searchEntry{ItemID: candidate.SourceItemID, Title: candidate.Title}, query, queryTokens, significantQueryTokens) {
+		if !matchesSearchQuery(
+			searchEntry{
+				ItemID:        candidate.SourceItemID,
+				Title:         candidate.Title,
+				RelatedTitles: candidate.RelatedTitles,
+			},
+			query,
+			queryTokens,
+			significantQueryTokens,
+		) {
 			continue
 		}
 		if _, seen := existing[candidate.SourceItemID]; seen {
@@ -318,6 +339,7 @@ func (c *Connector) enrichSearchResult(ctx context.Context, result *connectors.M
 	if resolvedTitle != "" {
 		result.Title = resolvedTitle
 	}
+	result.RelatedTitles = buildMangaFireRelatedTitles(body, result.Title, result.SourceItemID)
 	latestChapter, latestReleaseAtByChapter := extractLatestChapterAndReleaseAt(body)
 	if latestChapter != nil {
 		result.LatestChapter = latestChapter
@@ -490,6 +512,7 @@ func extractLatestReleaseAt(body string) *time.Time {
 type searchEntry struct {
 	ItemID        string
 	Title         string
+	RelatedTitles []string
 	CoverImageURL string
 }
 
@@ -995,10 +1018,24 @@ func matchesSearchQuery(entry searchEntry, rawQuery string, queryTokens []string
 	if normalizedQuery != "" && strings.Contains(normalizedTitle, normalizedQuery) {
 		return true
 	}
+	for _, related := range entry.RelatedTitles {
+		normalizedRelated := normalizeForSearch(related)
+		if normalizedRelated == "" {
+			continue
+		}
+		if normalizedQuery != "" && strings.Contains(normalizedRelated, normalizedQuery) {
+			return true
+		}
+	}
 
 	if len(queryTokens) > 0 {
 		if matchesTokens(entry.Title, queryTokens) || matchesTokens(entry.ItemID, queryTokens) {
 			return true
+		}
+		for _, related := range entry.RelatedTitles {
+			if matchesTokens(related, queryTokens) {
+				return true
+			}
 		}
 	}
 
@@ -1006,9 +1043,63 @@ func matchesSearchQuery(entry searchEntry, rawQuery string, queryTokens []string
 		if matchesTokens(entry.Title, significantQueryTokens) || matchesTokens(entry.ItemID, significantQueryTokens) {
 			return true
 		}
+		for _, related := range entry.RelatedTitles {
+			if matchesTokens(related, significantQueryTokens) {
+				return true
+			}
+		}
 	}
 
 	return false
+}
+
+func buildMangaFireRelatedTitles(body string, title string, sourceItemID string) []string {
+	candidates := make([]string, 0, 8)
+	candidates = append(candidates, prettifyItemID(sourceItemID))
+	candidates = append(candidates, extractInfoAliases(body)...)
+	candidates = append(candidates, searchutil.ExtractRelatedTitles(body)...)
+
+	candidates = searchutil.UniqueNonEmpty(candidates)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	titleKey := searchutil.Normalize(title)
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidateKey := searchutil.Normalize(candidate)
+		if candidateKey == "" {
+			continue
+		}
+		if titleKey != "" && candidateKey == titleKey {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	return filtered
+}
+
+func extractInfoAliases(body string) []string {
+	raw := strings.TrimSpace(html.UnescapeString(firstSubmatch(infoAliasPattern, body)))
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ";")
+	aliases := make([]string, 0, len(parts))
+	for _, part := range parts {
+		candidate := strings.TrimSpace(part)
+		if candidate == "" {
+			continue
+		}
+		aliases = append(aliases, candidate)
+	}
+
+	return searchutil.FilterEnglishAlphabetNames(aliases)
 }
 
 func sanitizeTitle(raw string) string {

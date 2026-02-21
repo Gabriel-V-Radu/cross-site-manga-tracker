@@ -51,3 +51,6 @@ docker-compose.override.yml
 # Backups
 .backups/
 pre-restore-*.sqlite
+
+# Local scratch files
+.tmp/

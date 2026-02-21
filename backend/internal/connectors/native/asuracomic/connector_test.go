@@ -37,6 +37,7 @@ func TestAsuraComicConnectorResolveAndSearch(t *testing.T) {
 </head>
 <body>
   <h1>Nano Machine</h1>
+  <div>Alternative Names: Mechanical Cultivator | Nano Machine Reloaded</div>
   <div>Updated On</div><div>February 17th 2026</div>
   <a href="/series/nano-machine-11b89554/chapter/298">Chapter 298</a>
   <a href="/series/nano-machine-11b89554/chapter/299">Chapter 299</a>
@@ -187,7 +188,7 @@ func TestAsuraComicConnectorUsesPublishedAtForLatestChapter(t *testing.T) {
 func TestAsuraComicConnectorSearchSupportsSeriesHrefWithoutLeadingSlash(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/series", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("name") != "solo leveling" {
+		if r.URL.Query().Get("name") != "leveling solo" {
 			_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
 			return
 		}
@@ -232,7 +233,7 @@ func TestAsuraComicConnectorSearchSupportsSeriesHrefWithoutLeadingSlash(t *testi
 	defer server.Close()
 
 	conn := NewConnectorWithOptions(server.URL, []string{"asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
-	results, err := conn.SearchByTitle(context.Background(), "solo leveling", 10)
+	results, err := conn.SearchByTitle(context.Background(), "leveling solo", 10)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}

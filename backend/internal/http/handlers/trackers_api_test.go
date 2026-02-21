@@ -15,6 +15,7 @@ func TestTrackersCRUD(t *testing.T) {
 
 	createBody := map[string]any{
 		"title":              "Blue Lock",
+		"relatedTitles":      []string{"Blue Lock: Episode Nagi"},
 		"sourceId":           1,
 		"sourceUrl":          "https://mangadex.org/title/1",
 		"status":             "reading",
@@ -69,6 +70,7 @@ func TestTrackersCRUD(t *testing.T) {
 
 	updateBody := map[string]any{
 		"title":              "Blue Lock Updated",
+		"relatedTitles":      []string{"Blue Lock Alt"},
 		"sourceId":           1,
 		"sourceUrl":          "https://mangadex.org/title/1",
 		"status":             "completed",
@@ -96,6 +98,10 @@ func TestTrackersCRUD(t *testing.T) {
 	}
 	if updated["rating"] != 9.5 {
 		t.Fatalf("expected rating 9.5, got %v", updated["rating"])
+	}
+	updatedRelatedTitles, ok := updated["relatedTitles"].([]any)
+	if !ok || len(updatedRelatedTitles) != 1 || updatedRelatedTitles[0] != "Blue Lock Alt" {
+		t.Fatalf("expected relatedTitles to be persisted and returned, got %v", updated["relatedTitles"])
 	}
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/trackers/"+toString(id), nil)
@@ -196,6 +202,53 @@ func TestAPIReadingFilterExcludesCaughtUpTrackers(t *testing.T) {
 	}
 	if titles["API Caught Up Tracker"] {
 		t.Fatalf("expected API Caught Up Tracker to be excluded from reading filter response")
+	}
+}
+
+func TestAPIQueryMatchesWordsInAnyOrderAndRelatedTitles(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (title, related_titles, source_id, source_item_id, source_url, status)
+		VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
+	`,
+		"Solo Leveling", `["Solo Leveling Ragnarok"]`, 1, "solo-leveling-ragnarok-c739e802", "https://asuracomic.net/series/solo-leveling-26b0cf1b", "reading",
+		"Tower of God", `["Tower of God"]`, 1, "tower-of-god-123", "https://www.webtoons.com/en/fantasy/tower-of-god/list?title_no=95", "reading",
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/trackers?status=reading&q=ragnarok+solo", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("api trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode api list response: %v", err)
+	}
+
+	items, ok := payload["items"].([]any)
+	if !ok {
+		t.Fatalf("items missing or invalid type")
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 filtered item, got %d", len(items))
+	}
+
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("filtered item has invalid type")
+	}
+	if title, _ := item["title"].(string); title != "Solo Leveling" {
+		t.Fatalf("expected Solo Leveling, got %v", item["title"])
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, error) {
@@ -31,7 +32,7 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 
 	query := `
 		SELECT
-			id, profile_id, title, source_id, source_item_id, source_url, status,
+			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
 			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
@@ -111,9 +112,21 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	args = append(args, options.ProfileID)
 
 	if strings.TrimSpace(options.Query) != "" {
-		whereClauses = append(whereClauses, `LOWER(title) LIKE ?`)
-		queryLike := "%" + strings.ToLower(strings.TrimSpace(options.Query)) + "%"
-		args = append(args, queryLike)
+		normalizedQuery := searchutil.Normalize(options.Query)
+		if normalizedQuery != "" {
+			queryTokens := searchutil.Tokenize(options.Query)
+			if len(queryTokens) == 0 {
+				whereClauses = append(whereClauses, `(LOWER(trackers.title) LIKE ? OR LOWER(COALESCE(trackers.related_titles, '')) LIKE ?)`)
+				queryLike := "%" + normalizedQuery + "%"
+				args = append(args, queryLike, queryLike)
+			} else {
+				for _, token := range queryTokens {
+					tokenLike := "%" + token + "%"
+					whereClauses = append(whereClauses, `(LOWER(trackers.title) LIKE ? OR LOWER(COALESCE(trackers.related_titles, '')) LIKE ?)`)
+					args = append(args, tokenLike, tokenLike)
+				}
+			}
+		}
 	}
 
 	if len(options.Statuses) > 0 {

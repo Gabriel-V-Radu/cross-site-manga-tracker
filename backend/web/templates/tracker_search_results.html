@@ -12,6 +12,7 @@
             data-title="{{.Title}}"
             data-url="{{.URL}}"
             data-source-item-id="{{.SourceItemID}}"
+            data-related-titles="{{toJSON .RelatedTitles}}"
             data-source-id="{{$.SourceID}}"
             data-source-name="{{$.SourceName}}"
             data-latest-chapter="{{chapterInputValue .LatestChapter}}"

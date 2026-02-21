@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 var (
@@ -102,8 +103,13 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(strings.ToLower(title))
+	query := strings.TrimSpace(title)
 	if query == "" {
+		return nil, fmt.Errorf("title is required")
+	}
+	normalizedQuery := searchutil.Normalize(query)
+	queryTokens := searchutil.Tokenize(query)
+	if normalizedQuery == "" || len(queryTokens) == 0 {
 		return nil, fmt.Errorf("title is required")
 	}
 
@@ -130,19 +136,19 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			break
 		}
 
-		if !strings.Contains(strings.ToLower(seriesID), query) {
-			anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
-			if anchorTitle != "" && !strings.Contains(strings.ToLower(anchorTitle), query) {
-				continue
-			}
-		}
+		seriesSlugTitle := strings.ReplaceAll(seriesID, "-", " ")
+		anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
 
 		resolved, resolveErr := c.resolveBySeriesID(ctx, seriesID)
 		if resolveErr != nil {
 			continue
 		}
 
-		if !matchesTitleQuery(resolved.Title, query) && !strings.Contains(strings.ToLower(resolved.SourceItemID), query) {
+		if !searchutil.AnyCandidateMatches(
+			[]string{resolved.Title, resolved.SourceItemID, anchorTitle, seriesSlugTitle},
+			normalizedQuery,
+			queryTokens,
+		) {
 			continue
 		}
 
@@ -194,7 +200,6 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 	if title == "" {
 		title = prettifySeriesID(seriesID)
 	}
-
 	latestChapter, releaseAtByChapter := extractLatestChapterAndReleaseAt(body, seriesID)
 	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
 	coverImageURL = c.absoluteURL(coverImageURL)
@@ -520,13 +525,4 @@ func firstSubmatch(pattern *regexp.Regexp, raw string) string {
 		return ""
 	}
 	return matches[1]
-}
-
-func matchesTitleQuery(title string, query string) bool {
-	normalizedTitle := strings.TrimSpace(strings.ToLower(title))
-	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
-	if normalizedTitle == "" || normalizedQuery == "" {
-		return false
-	}
-	return strings.Contains(normalizedTitle, normalizedQuery)
 }

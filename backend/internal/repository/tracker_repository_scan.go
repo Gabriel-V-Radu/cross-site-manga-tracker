@@ -2,8 +2,11 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/json"
+	"strings"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 type rowScanner interface {
@@ -12,6 +15,7 @@ type rowScanner interface {
 
 func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var tracker models.Tracker
+	var relatedTitlesRaw sql.NullString
 	var sourceItemID sql.NullString
 	var lastReadChapter sql.NullFloat64
 	var rating sql.NullFloat64
@@ -24,6 +28,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&tracker.ID,
 		&tracker.ProfileID,
 		&tracker.Title,
+		&relatedTitlesRaw,
 		&tracker.SourceID,
 		&sourceItemID,
 		&tracker.SourceURL,
@@ -43,6 +48,10 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 
 	if sourceItemID.Valid {
 		tracker.SourceItemID = &sourceItemID.String
+	}
+	if relatedTitlesRaw.Valid {
+		decodedRelatedTitles := decodeRelatedTitlesJSON(relatedTitlesRaw.String)
+		tracker.RelatedTitles = sanitizeRelatedTitles(decodedRelatedTitles)
 	}
 	if lastReadChapter.Valid {
 		tracker.LastReadChapter = &lastReadChapter.Float64
@@ -64,4 +73,36 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 
 	return &tracker, nil
+}
+
+func encodeRelatedTitlesJSON(values []string) *string {
+	sanitized := sanitizeRelatedTitles(values)
+	if len(sanitized) == 0 {
+		return nil
+	}
+
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		return nil
+	}
+	raw := string(encoded)
+	return &raw
+}
+
+func decodeRelatedTitlesJSON(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	var values []string
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return nil
+	}
+
+	return values
+}
+
+func sanitizeRelatedTitles(values []string) []string {
+	return searchutil.FilterEnglishAlphabetNames(values)
 }

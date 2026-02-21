@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 var (
@@ -124,6 +125,11 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	if query == "" {
 		return nil, fmt.Errorf("title is required")
 	}
+	normalizedQuery := searchutil.Normalize(query)
+	queryTokens := searchutil.Tokenize(query)
+	if normalizedQuery == "" || len(queryTokens) == 0 {
+		return nil, fmt.Errorf("title is required")
+	}
 
 	if limit <= 0 {
 		limit = 10
@@ -141,6 +147,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	results := make([]connectors.MangaResult, 0, min(limit, len(payload.Result.SearchedList)))
 	for _, item := range payload.Result.SearchedList {
 		if !strings.EqualFold(strings.TrimSpace(item.SearchMode), "TITLE") {
+			continue
+		}
+		if !searchutil.AnyCandidateMatches([]string{item.Title}, normalizedQuery, queryTokens) {
 			continue
 		}
 		if item.TitleNo <= 0 {

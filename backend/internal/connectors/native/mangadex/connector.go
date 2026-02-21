@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 var titleIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
@@ -123,9 +124,15 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 
 	title := pickBestTitle(payload.Data.Attributes.Title)
+	relatedTitles := collectEnglishRelatedTitles(title, payload.Data.Attributes.Title, payload.Data.Attributes.AltTitles)
 	if title == "" {
-		title = "Untitled"
+		if len(relatedTitles) > 0 {
+			title = relatedTitles[0]
+		} else {
+			title = "Untitled"
+		}
 	}
+	relatedTitles = removePrimaryTitle(relatedTitles, title)
 
 	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
 	feedLatestChapter, latestReleaseAt, _ := c.fetchLatestChapterFromFeed(ctx, titleID)
@@ -137,6 +144,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		SourceKey:     c.Key(),
 		SourceItemID:  payload.Data.ID,
 		Title:         title,
+		RelatedTitles: relatedTitles,
 		URL:           trimmed,
 		CoverImageURL: pickCoverImageURL(payload.Data.ID, payload.Data.Relationships),
 		LatestChapter: latestChapter,
@@ -149,6 +157,11 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	if query == "" {
 		return nil, fmt.Errorf("title is required")
 	}
+	normalizedQuery := searchutil.Normalize(query)
+	queryTokens := searchutil.Tokenize(query)
+	if normalizedQuery == "" || len(queryTokens) == 0 {
+		return nil, fmt.Errorf("title is required")
+	}
 
 	if limit <= 0 {
 		limit = 10
@@ -156,10 +169,17 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	if limit > 50 {
 		limit = 50
 	}
+	requestLimit := limit * 4
+	if requestLimit < limit {
+		requestLimit = limit
+	}
+	if requestLimit > 50 {
+		requestLimit = 50
+	}
 
 	values := url.Values{}
 	values.Set("title", query)
-	values.Set("limit", fmt.Sprintf("%d", limit))
+	values.Set("limit", fmt.Sprintf("%d", requestLimit))
 	values.Add("includes[]", "cover_art")
 
 	searchURL := c.apiBaseURL + "/manga?" + values.Encode()
@@ -183,11 +203,24 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("decode search response: %w", err)
 	}
 
-	items := make([]connectors.MangaResult, 0, len(payload.Data))
+	items := make([]connectors.MangaResult, 0, min(limit, len(payload.Data)))
 	for _, item := range payload.Data {
 		bestTitle := pickBestTitle(item.Attributes.Title)
+		englishRelatedTitles := collectEnglishRelatedTitles(bestTitle, item.Attributes.Title, item.Attributes.AltTitles)
 		if bestTitle == "" {
-			bestTitle = "Untitled"
+			if len(englishRelatedTitles) > 0 {
+				bestTitle = englishRelatedTitles[0]
+			} else {
+				bestTitle = "Untitled"
+			}
+		}
+		englishRelatedTitles = removePrimaryTitle(englishRelatedTitles, bestTitle)
+
+		searchNames := make([]string, 0, 1+len(englishRelatedTitles))
+		searchNames = append(searchNames, bestTitle)
+		searchNames = append(searchNames, englishRelatedTitles...)
+		if !searchutil.AnyCandidateMatches(searchNames, normalizedQuery, queryTokens) {
+			continue
 		}
 
 		latestChapter := parseChapterNumber(item.Attributes.LastChapter)
@@ -199,10 +232,15 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceKey:     c.Key(),
 			SourceItemID:  item.ID,
 			Title:         bestTitle,
+			RelatedTitles: englishRelatedTitles,
 			URL:           "https://mangadex.org/title/" + item.ID,
 			CoverImageURL: pickCoverImageURL(item.ID, item.Relationships),
 			LatestChapter: latestChapter,
 		})
+
+		if len(items) >= limit {
+			break
+		}
 	}
 
 	return items, nil
@@ -316,6 +354,64 @@ func pickBestTitle(titleMap map[string]string) string {
 	return ""
 }
 
+func collectEnglishRelatedTitles(primaryTitle string, titleMap map[string]string, altTitles []map[string]string) []string {
+	candidates := make([]string, 0, len(titleMap)+(len(altTitles)*2))
+	for _, value := range titleMap {
+		candidates = append(candidates, value)
+	}
+	for _, altTitleMap := range altTitles {
+		for _, value := range altTitleMap {
+			candidates = append(candidates, value)
+		}
+	}
+
+	filtered := searchutil.FilterEnglishAlphabetNames(candidates)
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	primaryKey := searchutil.Normalize(primaryTitle)
+	if primaryKey == "" {
+		return filtered
+	}
+
+	relatedOnly := make([]string, 0, len(filtered))
+	for _, candidate := range filtered {
+		if searchutil.Normalize(candidate) == primaryKey {
+			continue
+		}
+		relatedOnly = append(relatedOnly, candidate)
+	}
+	if len(relatedOnly) == 0 {
+		return nil
+	}
+
+	return relatedOnly
+}
+
+func removePrimaryTitle(values []string, primaryTitle string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	primaryKey := searchutil.Normalize(primaryTitle)
+	if primaryKey == "" {
+		return values
+	}
+
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if searchutil.Normalize(value) == primaryKey {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
 func pickCoverImageURL(mangaID string, relationships []mangaRelationship) string {
 	for _, relationship := range relationships {
 		if relationship.Type != "cover_art" {
@@ -421,8 +517,9 @@ type mangaByIDResponse struct {
 	Data struct {
 		ID         string `json:"id"`
 		Attributes struct {
-			Title       map[string]string `json:"title"`
-			LastChapter string            `json:"lastChapter"`
+			Title       map[string]string   `json:"title"`
+			AltTitles   []map[string]string `json:"altTitles"`
+			LastChapter string              `json:"lastChapter"`
 		} `json:"attributes"`
 		Relationships []mangaRelationship `json:"relationships"`
 	} `json:"data"`
@@ -432,8 +529,9 @@ type mangaSearchResponse struct {
 	Data []struct {
 		ID         string `json:"id"`
 		Attributes struct {
-			Title       map[string]string `json:"title"`
-			LastChapter string            `json:"lastChapter"`
+			Title       map[string]string   `json:"title"`
+			AltTitles   []map[string]string `json:"altTitles"`
+			LastChapter string              `json:"lastChapter"`
 		} `json:"attributes"`
 		Relationships []mangaRelationship `json:"relationships"`
 	} `json:"data"`

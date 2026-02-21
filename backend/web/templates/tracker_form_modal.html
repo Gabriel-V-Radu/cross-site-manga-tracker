@@ -93,6 +93,7 @@
                 <input type="text" name="source_item_id" value="{{if .Tracker}}{{textInputValue .Tracker.SourceItemID}}{{end}}">
             </label>
 
+            <input type="hidden" name="related_titles_json" value='{{if .Tracker}}{{toJSON .Tracker.RelatedTitles}}{{else}}[]{{end}}'>
             <input type="hidden" name="latest_release_at" value="{{if .Tracker}}{{timeInputValue .Tracker.LatestReleaseAt}}{{end}}">
 
             <fieldset class="tracker-status-field">

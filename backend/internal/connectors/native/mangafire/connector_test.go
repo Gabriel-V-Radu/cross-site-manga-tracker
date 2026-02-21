@@ -43,6 +43,7 @@ func TestMangaFireConnector(t *testing.T) {
   <meta property="og:image" content="https://cdn.example/onepiece-full.jpg">
 </head>
 <body>
+	<div>Alternative Names: Pirate Legacy | One Piece Treasure Cruise</div>
 	<a href="/read/one-piecee.dkw/en/chapter-1172">Chapter 1172</a><span>Dec 22, 2025</span>
 	<a href="/read/one-piecee.dkw/en/chapter-1173">Chapter 1173</a><span>Jan 12, 2026</span>
 </body>
@@ -92,6 +93,14 @@ func TestMangaFireConnector(t *testing.T) {
 	if resolved.LastUpdatedAt.Format("2006-01-02") != "2026-01-12" {
 		t.Fatalf("expected release date 2026-01-12, got %s", resolved.LastUpdatedAt.Format("2006-01-02"))
 	}
+	if len(resolved.RelatedTitles) == 0 {
+		t.Fatalf("expected related titles from alternative names")
+	}
+	for _, related := range resolved.RelatedTitles {
+		if related == resolved.Title {
+			t.Fatalf("did not expect primary title in related titles: %q", related)
+		}
+	}
 
 	results, err := connector.SearchByTitle(context.Background(), "one", 10)
 	if err != nil {
@@ -117,6 +126,17 @@ func TestMangaFireConnector(t *testing.T) {
 		default:
 			t.Fatalf("unexpected search source id: %s", item.SourceItemID)
 		}
+	}
+
+	aliasResults, err := connector.SearchByTitle(context.Background(), "pirate legacy", 10)
+	if err != nil {
+		t.Fatalf("alias search failed: %v", err)
+	}
+	if len(aliasResults) != 1 {
+		t.Fatalf("expected 1 alias result, got %d", len(aliasResults))
+	}
+	if aliasResults[0].SourceItemID != "one-piecee.dkw" {
+		t.Fatalf("expected alias result source id one-piecee.dkw, got %s", aliasResults[0].SourceItemID)
 	}
 }
 
@@ -436,5 +456,43 @@ func TestExtractLatestChapterAndReleaseAt_DuplicateLatestChapterPicksNewestDate(
 	}
 	if latestReleaseAt.Before(before) || latestReleaseAt.After(after) {
 		t.Fatalf("expected freshest date around 31 minutes ago, got %s", latestReleaseAt.Format(time.RFC3339))
+	}
+}
+
+func TestBuildMangaFireRelatedTitlesExtractsInfoAliases(t *testing.T) {
+	body := `
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>The Devil Butler (Colored)</h1>
+  <h6>Demonic Emperor; The Devil Butler; Mo Huang Da Guanjia; Magic Emperor; Magic emperor; Devil Butler; Как демон-император стал дворецким; The Servant Is the Demon King?!; 魔皇大管家; Mo Huang Da Guan Jia</h6>
+</body>
+</html>`
+
+	related := buildMangaFireRelatedTitles(body, "The Devil Butler", "mo-huang-da-guanjiaa.ykp3x")
+	normalized := map[string]bool{}
+	for _, item := range related {
+		normalized[item] = true
+	}
+
+	for _, expected := range []string{
+		"Mo Huang Da Guanjia",
+		"Magic Emperor",
+		"The Servant Is the Demon King?!",
+		"Mo Huang Da Guan Jia",
+	} {
+		if !normalized[expected] {
+			t.Fatalf("expected related titles to include %q", expected)
+		}
+	}
+	if normalized["The Devil Butler"] {
+		t.Fatalf("did not expect primary title to be included")
+	}
+
+	if normalized["Как демон-император стал дворецким"] {
+		t.Fatalf("did not expect non-English related title to be included")
+	}
+	if normalized["魔皇大管家"] {
+		t.Fatalf("did not expect kanji related title to be included")
 	}
 }

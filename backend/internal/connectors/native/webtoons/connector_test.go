@@ -126,7 +126,7 @@ func TestWebtoonsConnectorSearchResolveAndChapterURL(t *testing.T) {
 		t.Fatalf("health check failed: %v", err)
 	}
 
-	searchResults, err := connector.SearchByTitle(context.Background(), "Maybe Meant to Be", 8)
+	searchResults, err := connector.SearchByTitle(context.Background(), "Meant Maybe to Be", 8)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}

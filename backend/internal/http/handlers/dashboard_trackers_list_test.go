@@ -235,3 +235,42 @@ func TestDashboardSortByRating(t *testing.T) {
 		t.Fatalf("expected rating desc order High -> Low -> None")
 	}
 }
+
+func TestDashboardSearchMatchesWordsInAnyOrderAndRelatedTitles(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (title, related_titles, source_id, source_item_id, source_url, status)
+		VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)
+	`,
+		"Solo Leveling", `["Solo Leveling Ragnarok"]`, 1, "solo-leveling-ragnarok-c739e802", "https://asuracomic.net/series/solo-leveling-26b0cf1b", "reading",
+		"Tower of God", `["Tower of God"]`, 1, "tower-of-god-123", "https://www.webtoons.com/en/fantasy/tower-of-god/list?title_no=95", "reading",
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=all&q=ragnarok+solo", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "Solo Leveling") {
+		t.Fatalf("expected search to match related_titles tokens in any order")
+	}
+	if strings.Contains(html, "Tower of God") {
+		t.Fatalf("did not expect unrelated tracker in search results")
+	}
+}

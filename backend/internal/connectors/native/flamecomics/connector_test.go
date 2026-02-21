@@ -31,6 +31,7 @@ func TestFlameComicsConnectorResolveAndSearch(t *testing.T) {
   <meta property="og:image" content="https://flamecomics.xyz/_next/image?url=https%3A%2F%2Fcdn.flamecomics.xyz%2Fuploads%2Fimages%2Fseries%2F83%2Fthumbnail.png&w=1920&q=100">
 </head>
 <body>
+  <div>Alternative Names: The Novel's Additional Story | TNER</div>
   <a href="/series/83/cd9daeaf1eb9b6ca">Chapter 146</a>
   <span>February 16, 2026 3:49 PM</span>
   <a href="/series/83/4824f4f6a5dfb9ea">Chapter 145</a>
@@ -67,8 +68,16 @@ func TestFlameComicsConnectorResolveAndSearch(t *testing.T) {
 	if resolved.LastUpdatedAt == nil || resolved.LastUpdatedAt.Format("2006-01-02") != "2026-02-16" {
 		t.Fatalf("expected release date 2026-02-16, got %v", resolved.LastUpdatedAt)
 	}
+	if len(resolved.RelatedTitles) == 0 {
+		t.Fatalf("expected related titles from alternative names")
+	}
+	for _, related := range resolved.RelatedTitles {
+		if related == resolved.Title {
+			t.Fatalf("did not expect primary title in related titles: %q", related)
+		}
+	}
 
-	results, err := conn.SearchByTitle(context.Background(), "novel", 8)
+	results, err := conn.SearchByTitle(context.Background(), "additional story", 8)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}

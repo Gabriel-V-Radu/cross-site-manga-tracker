@@ -9,6 +9,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -22,6 +23,7 @@ var validStatuses = map[string]bool{
 
 type createTrackerRequest struct {
 	Title              string   `json:"title"`
+	RelatedTitles      []string `json:"relatedTitles"`
 	SourceID           int64    `json:"sourceId"`
 	SourceItemID       *string  `json:"sourceItemId"`
 	SourceURL          string   `json:"sourceUrl"`
@@ -224,6 +226,7 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 
 	return &models.Tracker{
 		Title:              title,
+		RelatedTitles:      searchutil.FilterEnglishAlphabetNames(req.RelatedTitles),
 		SourceID:           req.SourceID,
 		SourceItemID:       req.SourceItemID,
 		SourceURL:          strings.TrimSpace(req.SourceURL),

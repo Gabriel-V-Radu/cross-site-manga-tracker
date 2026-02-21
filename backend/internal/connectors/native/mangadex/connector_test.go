@@ -46,14 +46,23 @@ func TestMangaDexConnector(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
 				{
-					"id":         "abc",
-					"attributes": map[string]any{"title": map[string]string{"en": "Alpha"}},
+					"id": "abc",
+					"attributes": map[string]any{
+						"title": map[string]string{"en": "Alpha"},
+						"altTitles": []map[string]string{
+							{"en": "Solo Leveling"},
+							{"ja": "\u4ffa\u3060\u3051\u30ec\u30d9\u30eb\u30a2\u30c3\u30d7\u306a\u4ef6"},
+						},
+					},
 				},
 				{
 					"id": "def",
 					"attributes": map[string]any{
 						"title":       map[string]string{"en": "Beta"},
 						"lastChapter": "13.5",
+						"altTitles": []map[string]string{
+							{"en": "Another Story"},
+						},
 					},
 				},
 			},
@@ -82,34 +91,43 @@ func TestMangaDexConnector(t *testing.T) {
 	if resolved.CoverImageURL == "" {
 		t.Fatalf("expected cover image url to be populated")
 	}
+	if len(resolved.RelatedTitles) != 0 {
+		t.Fatalf("expected no related titles when only primary title exists, got %v", resolved.RelatedTitles)
+	}
 
-	results, err := connector.SearchByTitle(context.Background(), "alpha", 10)
+	results, err := connector.SearchByTitle(context.Background(), "leveling solo", 10)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].SourceItemID != "abc" {
+		t.Fatalf("expected source id abc, got %s", results[0].SourceItemID)
+	}
+	if results[0].LatestChapter == nil || *results[0].LatestChapter != 7.5 {
+		t.Fatalf("expected fallback latest chapter 7.5 for abc, got %v", results[0].LatestChapter)
+	}
+	contains := func(values []string, expected string) bool {
+		for _, value := range values {
+			if value == expected {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(results[0].RelatedTitles, "Solo Leveling") {
+		t.Fatalf("expected english alt title in related titles, got %v", results[0].RelatedTitles)
+	}
+	if contains(results[0].RelatedTitles, "Alpha") {
+		t.Fatalf("did not expect primary title in related titles, got %v", results[0].RelatedTitles)
 	}
 
-	if results[0].SourceItemID == "abc" {
-		if results[0].LatestChapter == nil || *results[0].LatestChapter != 7.5 {
-			t.Fatalf("expected fallback latest chapter 7.5 for abc, got %v", results[0].LatestChapter)
-		}
+	nonEnglishResults, err := connector.SearchByTitle(context.Background(), "\u4ffa\u3060\u3051", 10)
+	if err != nil {
+		t.Fatalf("search with non-English query failed: %v", err)
 	}
-	if results[1].SourceItemID == "abc" {
-		if results[1].LatestChapter == nil || *results[1].LatestChapter != 7.5 {
-			t.Fatalf("expected fallback latest chapter 7.5 for abc, got %v", results[1].LatestChapter)
-		}
-	}
-
-	if results[0].SourceItemID == "def" {
-		if results[0].LatestChapter == nil || *results[0].LatestChapter != 13.5 {
-			t.Fatalf("expected latest chapter 13.5 for def, got %v", results[0].LatestChapter)
-		}
-	}
-	if results[1].SourceItemID == "def" {
-		if results[1].LatestChapter == nil || *results[1].LatestChapter != 13.5 {
-			t.Fatalf("expected latest chapter 13.5 for def, got %v", results[1].LatestChapter)
-		}
+	if len(nonEnglishResults) != 0 {
+		t.Fatalf("expected 0 results for non-English alias query, got %d", len(nonEnglishResults))
 	}
 }

@@ -26,6 +26,7 @@ type Tracker struct {
 	ID                 int64       `json:"id"`
 	ProfileID          int64       `json:"profileId"`
 	Title              string      `json:"title"`
+	RelatedTitles      []string    `json:"relatedTitles,omitempty"`
 	SourceID           int64       `json:"sourceId"`
 	SourceItemID       *string     `json:"sourceItemId,omitempty"`
 	SourceURL          string      `json:"sourceUrl"`

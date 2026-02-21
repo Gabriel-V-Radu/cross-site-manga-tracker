@@ -35,6 +35,25 @@ window.renderLinkedSources = function (form) {
     list.innerHTML = html;
 };
 
+window.parseRelatedTitlesDataset = function (rawValue) {
+    var trimmed = String(rawValue || '').trim();
+    if (!trimmed) {
+        return [];
+    }
+
+    try {
+        var parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        return parsed.filter(function (item) {
+            return typeof item === 'string' && item.trim() !== '';
+        });
+    } catch (_) {
+        return [];
+    }
+};
+
 window.syncLinkedSourceSelect = function (form) {
     if (!form) {
         return;
@@ -203,6 +222,7 @@ window.addTrackerLinkedSource = function (button) {
         setField('input[name="source_url"]', sourceUrl);
         setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
         setField('input[name="latest_known_chapter"]', String(incomingLatest));
+        setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
 
         var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
         if (latestReleaseField && typeof button.dataset.latestReleaseAt !== 'undefined') {
@@ -240,6 +260,7 @@ window.applyTrackerSearchResult = function (button) {
     setField('input[name="title"]', button.dataset.title || '');
     setField('input[name="source_url"]', button.dataset.url || '');
     setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
+    setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
     setField('input[name="latest_known_chapter"]', button.dataset.latestChapter || '');
 
     var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
