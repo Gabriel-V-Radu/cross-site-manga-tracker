@@ -35,6 +35,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)
 	app.Static("/assets", "./web/assets")
+	app.Static("/uploads", "./data/uploads")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
 		return c.SendFile("./web/assets/favicon.svg")
 	})
@@ -45,6 +46,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Get("/dashboard/profile/filter-tags", dashboard.ProfileFilterTagsPartial)
 	app.Get("/dashboard/profile/filter-linked-sites", dashboard.ProfileFilterLinkedSitesPartial)
 	app.Post("/dashboard/profile/switch", dashboard.SwitchProfileFromMenu)
+	app.Post("/dashboard/profile/source-logos", dashboard.SaveSourceLogosFromMenu)
 	app.Post("/dashboard/profile/tags", dashboard.CreateTagFromMenu)
 	app.Post("/dashboard/profile/tags/rename", dashboard.RenameTagFromMenu)
 	app.Post("/dashboard/profile/tags/delete", dashboard.DeleteTagFromMenu)

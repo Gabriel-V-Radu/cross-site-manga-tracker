@@ -490,3 +490,47 @@ func TestRenameTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
 		t.Fatalf("expected renamed tag to appear in filter options")
 	}
 }
+
+func TestProfileFilterTagsPrioritizesIconTags(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO custom_tags (profile_id, name, icon_key)
+		VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)
+	`,
+		1, "zeta-icon", "icon_1",
+		1, "beta-icon", "icon_2",
+		1, "alpha-no-icon", nil,
+	)
+	if err != nil {
+		t.Fatalf("seed custom tags: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/profile/filter-tags?profile=profile1", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("filter tags partial request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read filter tags partial body: %v", err)
+	}
+	html := string(body)
+
+	betaIdx := strings.Index(html, `name="tags" value="beta-icon"`)
+	zetaIdx := strings.Index(html, `name="tags" value="zeta-icon"`)
+	alphaIdx := strings.Index(html, `name="tags" value="alpha-no-icon"`)
+	if betaIdx < 0 || zetaIdx < 0 || alphaIdx < 0 {
+		t.Fatalf("expected seeded tags to be rendered in filter tags partial")
+	}
+
+	if betaIdx > alphaIdx || zetaIdx > alphaIdx {
+		t.Fatalf("expected icon tags to render before no-icon tags")
+	}
+}

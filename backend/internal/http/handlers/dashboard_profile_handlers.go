@@ -2,12 +2,24 @@ package handlers
 
 import (
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gofiber/fiber/v2"
+)
+
+const (
+	sourceLogoUploadDir      = "data/uploads/site-logos"
+	sourceLogoPublicPrefix   = "/uploads/site-logos/"
+	maxSourceLogoUploadBytes = 1 << 20 // 1MB
 )
 
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
@@ -75,24 +87,7 @@ func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
 	}
 
-	profiles, err := h.profileResolver.ListProfiles()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
-	}
-
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
-	}
-
-	return h.render(c, "profile_menu_modal.html", profileMenuData{
-		Profiles:          profiles,
-		ActiveProfile:     *activeProfile,
-		RenameValue:       activeProfile.Name,
-		ProfileTags:       profileTags,
-		TagIconKeys:       tagIconKeysOrdered,
-		AvailableIconKeys: availableTagIconKeys(profileTags),
-	})
+	return h.renderProfileMenu(c, activeProfile, "", "")
 }
 
 func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
@@ -179,26 +174,7 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tag")
 	}
 
-	profiles, err := h.profileResolver.ListProfiles()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
-	}
-
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
-	}
-
-	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
-	return h.render(c, "profile_menu_modal.html", profileMenuData{
-		Profiles:          profiles,
-		ActiveProfile:     *activeProfile,
-		RenameValue:       activeProfile.Name,
-		ProfileTags:       profileTags,
-		TagIconKeys:       tagIconKeysOrdered,
-		AvailableIconKeys: availableTagIconKeys(profileTags),
-		Message:           "Tag saved",
-	})
+	return h.renderProfileMenu(c, activeProfile, "Tag saved", `{"trackersChanged":true,"profileTagsChanged":true}`)
 }
 
 func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
@@ -232,26 +208,7 @@ func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
 	}
 
-	profiles, err := h.profileResolver.ListProfiles()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
-	}
-
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
-	}
-
-	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
-	return h.render(c, "profile_menu_modal.html", profileMenuData{
-		Profiles:          profiles,
-		ActiveProfile:     *activeProfile,
-		RenameValue:       activeProfile.Name,
-		ProfileTags:       profileTags,
-		TagIconKeys:       tagIconKeysOrdered,
-		AvailableIconKeys: availableTagIconKeys(profileTags),
-		Message:           "Tag renamed",
-	})
+	return h.renderProfileMenu(c, activeProfile, "Tag renamed", `{"trackersChanged":true,"profileTagsChanged":true}`)
 }
 
 func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
@@ -273,6 +230,49 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
 	}
 
+	return h.renderProfileMenu(c, activeProfile, "Tag deleted", `{"trackersChanged":true,"profileTagsChanged":true}`)
+}
+
+func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
+	activeProfile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+	}
+
+	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+	}
+	if len(linkedSites) == 0 {
+		return h.renderProfileMenu(c, activeProfile, "No sites available to configure", "")
+	}
+
+	existingLogosBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+	}
+
+	logoBySourceID, err := readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+
+	if err := h.sourceRepo.UpsertProfileSourceLogoURLs(activeProfile.ID, logoBySourceID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save linked site logos")
+	}
+
+	return h.renderProfileMenu(c, activeProfile, "Linked site logos saved", `{"trackersChanged":true}`)
+}
+
+func (h *DashboardHandler) listLinkedSourcesForProfile(_ int64) ([]models.Source, error) {
+	enabledSources, err := h.sourceRepo.ListEnabled()
+	if err != nil {
+		return nil, fmt.Errorf("list enabled sources: %w", err)
+	}
+	return enabledSources, nil
+}
+
+func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models.Profile, message string, hxTrigger string) error {
 	profiles, err := h.profileResolver.ListProfiles()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
@@ -283,40 +283,173 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
 	}
 
-	c.Set("HX-Trigger", `{"trackersChanged":true,"profileTagsChanged":true}`)
+	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+	}
+
+	sourceLogoURLs, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+	}
+
+	if strings.TrimSpace(hxTrigger) != "" {
+		c.Set("HX-Trigger", hxTrigger)
+	}
+
 	return h.render(c, "profile_menu_modal.html", profileMenuData{
 		Profiles:          profiles,
 		ActiveProfile:     *activeProfile,
 		RenameValue:       activeProfile.Name,
+		LinkedSites:       linkedSites,
+		SourceLogoURLs:    sourceLogoURLs,
 		ProfileTags:       profileTags,
 		TagIconKeys:       tagIconKeysOrdered,
 		AvailableIconKeys: availableTagIconKeys(profileTags),
-		Message:           "Tag deleted",
+		Message:           message,
 	})
 }
 
-func (h *DashboardHandler) listLinkedSourcesForProfile(profileID int64) ([]models.Source, error) {
-	linkedSourceIDs, err := h.trackerRepo.ListLinkedSourceIDs(profileID)
-	if err != nil {
-		return nil, fmt.Errorf("list linked source ids: %w", err)
-	}
-	if len(linkedSourceIDs) == 0 {
-		return []models.Source{}, nil
-	}
+func readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
+	logoBySourceID := make(map[int64]string, len(linkedSites))
+	for _, linkedSite := range linkedSites {
+		fileField := fmt.Sprintf("source_logo_file_%d", linkedSite.ID)
+		clearField := fmt.Sprintf("source_logo_clear_%d", linkedSite.ID)
 
-	enabledSources, err := h.sourceRepo.ListEnabled()
-	if err != nil {
-		return nil, fmt.Errorf("list enabled sources: %w", err)
-	}
+		removeRequested := strings.TrimSpace(c.FormValue(clearField)) == "1"
+		fileHeader, _ := c.FormFile(fileField)
+		uploadRequested := fileHeader != nil && strings.TrimSpace(fileHeader.Filename) != ""
 
-	sourceIDSet := sourceIDFilterMap(linkedSourceIDs)
-	linkedSources := make([]models.Source, 0, len(enabledSources))
-	for _, source := range enabledSources {
-		if !sourceIDSet[source.ID] {
+		if removeRequested && uploadRequested {
+			return nil, fmt.Errorf("%s: choose either upload or remove", linkedSite.Name)
+		}
+
+		existingLogoPath := strings.TrimSpace(existingLogosBySourceID[linkedSite.ID])
+		if removeRequested {
+			if existingLogoPath != "" {
+				_ = removeStoredSourceLogoFile(existingLogoPath)
+			}
+			logoBySourceID[linkedSite.ID] = ""
 			continue
 		}
-		linkedSources = append(linkedSources, source)
+
+		if !uploadRequested {
+			continue
+		}
+
+		logoPath, err := saveUploadedSourceLogo(profileID, linkedSite.ID, fileHeader)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", linkedSite.Name, err)
+		}
+
+		if existingLogoPath != "" && existingLogoPath != logoPath {
+			_ = removeStoredSourceLogoFile(existingLogoPath)
+		}
+		logoBySourceID[linkedSite.ID] = logoPath
 	}
 
-	return linkedSources, nil
+	return logoBySourceID, nil
+}
+
+func saveUploadedSourceLogo(profileID, sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
+	ext, data, err := readValidatedSourceLogo(fileHeader)
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(sourceLogoUploadDir, 0o755); err != nil {
+		return "", fmt.Errorf("prepare upload directory: %w", err)
+	}
+
+	fileName := fmt.Sprintf(
+		"profile-%d-source-%d-%d%s",
+		profileID,
+		sourceID,
+		time.Now().UTC().UnixNano(),
+		ext,
+	)
+	diskPath := filepath.Join(sourceLogoUploadDir, fileName)
+
+	if err := os.WriteFile(diskPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("save logo file: %w", err)
+	}
+
+	return sourceLogoPublicPrefix + fileName, nil
+}
+
+func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, error) {
+	if fileHeader == nil {
+		return "", nil, fmt.Errorf("missing upload")
+	}
+	if fileHeader.Size > maxSourceLogoUploadBytes {
+		return "", nil, fmt.Errorf("file too large (max 1MB)")
+	}
+
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
+	if ext != ".png" && ext != ".svg" {
+		return "", nil, fmt.Errorf("only .png or .svg files are allowed")
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		return "", nil, fmt.Errorf("read upload: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxSourceLogoUploadBytes+1))
+	if err != nil {
+		return "", nil, fmt.Errorf("read upload: %w", err)
+	}
+	if int64(len(data)) > maxSourceLogoUploadBytes {
+		return "", nil, fmt.Errorf("file too large (max 1MB)")
+	}
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("empty upload")
+	}
+
+	sniffLen := min(512, len(data))
+	contentType := http.DetectContentType(data[:sniffLen])
+
+	if ext == ".png" {
+		if contentType != "image/png" {
+			return "", nil, fmt.Errorf("invalid PNG file")
+		}
+		return ext, data, nil
+	}
+
+	lower := strings.ToLower(string(data))
+	if !strings.Contains(lower, "<svg") {
+		return "", nil, fmt.Errorf("invalid SVG file")
+	}
+	if strings.Contains(lower, "<script") || strings.Contains(lower, "javascript:") || strings.Contains(lower, "onload=") || strings.Contains(lower, "onerror=") {
+		return "", nil, fmt.Errorf("unsafe SVG content")
+	}
+
+	return ext, data, nil
+}
+
+func removeStoredSourceLogoFile(publicPath string) error {
+	diskPath, ok := sourceLogoPublicPathToDiskPath(publicPath)
+	if !ok {
+		return nil
+	}
+	if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func sourceLogoPublicPathToDiskPath(publicPath string) (string, bool) {
+	trimmed := strings.TrimSpace(publicPath)
+	if !strings.HasPrefix(trimmed, sourceLogoPublicPrefix) {
+		return "", false
+	}
+
+	fileName := strings.TrimPrefix(trimmed, sourceLogoPublicPrefix)
+	fileName = strings.TrimSpace(filepath.Base(fileName))
+	if fileName == "" || fileName == "." {
+		return "", false
+	}
+
+	return filepath.Join(sourceLogoUploadDir, fileName), true
 }

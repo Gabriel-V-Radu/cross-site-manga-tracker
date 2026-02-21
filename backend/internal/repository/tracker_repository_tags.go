@@ -13,7 +13,13 @@ func (r *TrackerRepository) ListProfileTags(profileID int64) ([]models.CustomTag
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE profile_id = ?
-		ORDER BY name ASC, id ASC
+		ORDER BY
+			CASE
+				WHEN TRIM(COALESCE(icon_key, '')) IN ('icon_1', 'icon_2', 'icon_3') THEN 0
+				ELSE 1
+			END ASC,
+			name ASC,
+			id ASC
 	`, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile tags: %w", err)

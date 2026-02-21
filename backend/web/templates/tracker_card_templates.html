@@ -105,9 +105,13 @@
         {{else}}
         <div class="tracker-card__cover-title">{{.Title}}</div>
         {{end}}
-        {{if .SourceLogoURL}}
-        <span class="tracker-card__source-logo" title="{{.SourceLogoLabel}}">
+        {{if .SourceLogoLabel}}
+        <span class="tracker-card__source-logo{{if not .SourceLogoURL}} tracker-card__source-logo--text{{end}}" title="{{.SourceLogoLabel}}">
+            {{if .SourceLogoURL}}
             <img class="tracker-card__source-logo-img" src="{{.SourceLogoURL}}" alt="{{.SourceLogoLabel}} logo" loading="lazy">
+            {{else}}
+            <span class="tracker-card__source-logo-text">{{.SourceLogoLabel}}</span>
+            {{end}}
         </span>
         {{end}}
         {{template "tracker_rating_popover" .}}

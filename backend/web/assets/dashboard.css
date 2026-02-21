@@ -497,6 +497,27 @@ input:focus, select:focus {
     display: block;
 }
 
+.pagination-site-link--text {
+    width: auto;
+    min-width: max-content;
+    height: 36px;
+    padding: 0 9px;
+    flex: 0 0 auto;
+}
+
+.pagination-site-link__text {
+    display: block;
+    text-align: center;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #d9e3f8;
+    white-space: nowrap;
+    overflow: visible;
+    text-overflow: clip;
+}
+
 .trackers-loading__label {
     margin: 0 0 10px;
     color: var(--ink-soft);
@@ -824,11 +845,31 @@ input:focus, select:focus {
     z-index: 2;
 }
 
+.tracker-card__source-logo--text {
+    width: auto;
+    min-width: max-content;
+    height: 32px;
+    padding: 0 8px;
+}
+
 .tracker-card__source-logo-img {
     width: 100%;
     height: 100%;
     object-fit: contain;
     display: block;
+}
+
+.tracker-card__source-logo-text {
+    display: block;
+    overflow: visible;
+    text-align: center;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: #eaf1ff;
+    white-space: nowrap;
+    text-overflow: clip;
 }
 
 .tracker-rating {
@@ -1308,7 +1349,10 @@ input:focus, select:focus {
 }
 
 .profile-menu-card {
+    width: min(980px, 100%);
     padding: 16px;
+    display: grid;
+    gap: 12px;
 }
 
 .profile-menu-section {
@@ -1316,8 +1360,67 @@ input:focus, select:focus {
     gap: 8px;
 }
 
+.profile-menu-header {
+    margin-bottom: 0;
+}
+
+.profile-menu-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
+    border-bottom: 1px solid rgba(66, 88, 118, 0.55);
+    padding-bottom: 12px;
+}
+
+.profile-pane {
+    border: 1px solid rgba(66, 88, 118, 0.7);
+    background: rgba(15, 24, 38, 0.78);
+    padding: 10px;
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    align-content: start;
+}
+
+.profile-pane h3 {
+    margin: 0;
+    font-size: 1.02rem;
+}
+
+.profile-pane-subtitle {
+    margin: -2px 0 0;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+}
+
+.profile-pane-form {
+    gap: 6px;
+}
+
+.profile-inline-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.profile-inline-controls .action-btn {
+    padding: 9px 12px;
+}
+
+.modal-actions--left {
+    justify-content: flex-start;
+}
+
 .profile-menu-section--tags {
     gap: 10px;
+}
+
+.profile-menu-section--source-logos {
+    gap: 8px;
 }
 
 .profile-feedback {
@@ -1337,6 +1440,122 @@ input:focus, select:focus {
 
 .profile-tag-create-form .modal-actions {
     margin-top: 0;
+}
+
+.tracker-tags-list--menu {
+    max-height: 230px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.profile-tag-row--menu {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.profile-source-logo-form {
+    gap: 6px;
+}
+
+.profile-source-logo-table {
+    display: grid;
+    gap: 0;
+    border-top: 1px solid rgba(66, 88, 118, 0.5);
+    border-bottom: 1px solid rgba(66, 88, 118, 0.5);
+}
+
+.profile-source-logo-table__row {
+    display: grid;
+    grid-template-columns: minmax(120px, 180px) 74px auto auto;
+    justify-content: start;
+    gap: 4px;
+    align-items: center;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(66, 88, 118, 0.5);
+}
+
+.profile-source-logo-table__row:last-child {
+    border-bottom: 0;
+}
+
+.profile-source-logo-table__site {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #d4ddf4;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.profile-source-logo-preview-thumb {
+    width: 70px;
+    height: 26px;
+    border: 1px solid #425876;
+    border-radius: 6px;
+    background: rgba(16, 26, 41, 0.85);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    text-decoration: none;
+}
+
+.profile-source-logo-preview-thumb:hover {
+    border-color: #5f79a0;
+    background: #1a2a3f;
+}
+
+.profile-source-logo-preview-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    padding: 2px;
+}
+
+.profile-source-logo-preview-thumb--empty {
+    color: #9fb0d0;
+    border-style: dashed;
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    pointer-events: none;
+}
+
+.profile-source-logo-upload-form,
+.profile-source-logo-remove-form {
+    margin: 0;
+}
+
+.profile-source-logo-file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.profile-source-logo-action {
+    min-height: 26px;
+    padding: 4px 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.profile-source-logo-help {
+    margin: 6px 0 0;
+    color: var(--ink-soft);
+    font-size: 11px;
+    letter-spacing: 0.05em;
 }
 
 .tracker-tag-icon-picker {
@@ -1560,6 +1779,10 @@ input:focus, select:focus {
         grid-column: 1 / -1;
         justify-content: flex-start;
     }
+
+    .profile-menu-top {
+        grid-template-columns: 1fr;
+    }
 }
 
 @media (max-width: 640px) {
@@ -1627,9 +1850,52 @@ input:focus, select:focus {
         padding: 3px;
     }
 
+    .pagination-site-link--text {
+        width: auto;
+        min-width: max-content;
+        height: 32px;
+        padding: 0 7px;
+        flex: 0 0 auto;
+    }
+
+    .pagination-site-link__text {
+        font-size: 9px;
+    }
+
     .tracker-tag-row {
         grid-template-columns: 1fr;
         align-items: stretch;
+    }
+
+    .profile-tag-row--menu {
+        grid-template-columns: 1fr;
+    }
+
+    .profile-inline-controls {
+        grid-template-columns: 1fr;
+    }
+
+    .profile-source-logo-table__row {
+        grid-template-columns: minmax(96px, 1fr) 64px auto auto;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .profile-source-logo-table__site {
+        font-size: 10px;
+        letter-spacing: 0.06em;
+    }
+
+    .profile-source-logo-preview-thumb {
+        width: 64px;
+        height: 24px;
+    }
+
+    .profile-source-logo-action {
+        min-height: 24px;
+        padding: 3px 7px;
+        font-size: 9px;
+        letter-spacing: 0.06em;
     }
 
     .pagination__group {

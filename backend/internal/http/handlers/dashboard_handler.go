@@ -68,6 +68,7 @@ type dashboardPageData struct {
 
 type trackersPartialData struct {
 	Trackers      []trackerCardView
+	SiteLinks     []trackerSiteLinkView
 	ViewMode      string
 	Page          int
 	PrevPage      int
@@ -117,6 +118,12 @@ type trackerCardView struct {
 	LastReadChapterRaw     *float64
 }
 
+type trackerSiteLinkView struct {
+	Name    string
+	HomeURL string
+	LogoURL string
+}
+
 type trackerTagView struct {
 	ID       int64
 	Name     string
@@ -153,6 +160,8 @@ type profileMenuData struct {
 	Profiles          []models.Profile
 	ActiveProfile     models.Profile
 	RenameValue       string
+	LinkedSites       []models.Source
+	SourceLogoURLs    map[int64]string
 	ProfileTags       []models.CustomTag
 	TagIconKeys       []string
 	AvailableIconKeys []string

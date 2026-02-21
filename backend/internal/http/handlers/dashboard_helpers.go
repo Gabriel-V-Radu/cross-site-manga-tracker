@@ -134,20 +134,20 @@ func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
 	return icons
 }
 
-func sourceLogoForKey(sourceKey string) (string, string) {
+func sourceHomeURLForKey(sourceKey string) string {
 	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
 	case "asuracomic":
-		return "/assets/tracking-sites-logos/asuracomic-logo.png", "AsuraComic"
+		return "https://asuracomic.net"
 	case "flamecomics":
-		return "/assets/tracking-sites-logos/flamescomic-logo.svg", "FlameComics"
+		return "https://flamecomics.xyz"
 	case "mangadex":
-		return "/assets/tracking-sites-logos/mangadex-logo.png", "MangaDex"
+		return "https://mangadex.org"
 	case "mangafire":
-		return "/assets/tracking-sites-logos/mangafire-logo.png", "MangaFire"
+		return "https://mangafire.to"
 	case "webtoons":
-		return "/assets/tracking-sites-logos/webtoon-logo.png", "WEBTOON"
+		return "https://www.webtoons.com"
 	default:
-		return "", ""
+		return ""
 	}
 }
 

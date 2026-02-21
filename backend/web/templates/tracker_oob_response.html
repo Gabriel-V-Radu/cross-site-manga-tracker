@@ -85,9 +85,13 @@
         {{else}}
         <div class="tracker-card__cover-title">{{.ReplaceCard.Title}}</div>
         {{end}}
-        {{if .ReplaceCard.SourceLogoURL}}
-        <span class="tracker-card__source-logo" title="{{.ReplaceCard.SourceLogoLabel}}">
+        {{if .ReplaceCard.SourceLogoLabel}}
+        <span class="tracker-card__source-logo{{if not .ReplaceCard.SourceLogoURL}} tracker-card__source-logo--text{{end}}" title="{{.ReplaceCard.SourceLogoLabel}}">
+            {{if .ReplaceCard.SourceLogoURL}}
             <img class="tracker-card__source-logo-img" src="{{.ReplaceCard.SourceLogoURL}}" alt="{{.ReplaceCard.SourceLogoLabel}} logo" loading="lazy">
+            {{else}}
+            <span class="tracker-card__source-logo-text">{{.ReplaceCard.SourceLogoLabel}}</span>
+            {{end}}
         </span>
         {{end}}
         {{template "tracker_rating_popover" .ReplaceCard}}
@@ -254,9 +258,13 @@
         {{else}}
         <div class="tracker-card__cover-title">{{.PrependCard.Title}}</div>
         {{end}}
-        {{if .PrependCard.SourceLogoURL}}
-        <span class="tracker-card__source-logo" title="{{.PrependCard.SourceLogoLabel}}">
+        {{if .PrependCard.SourceLogoLabel}}
+        <span class="tracker-card__source-logo{{if not .PrependCard.SourceLogoURL}} tracker-card__source-logo--text{{end}}" title="{{.PrependCard.SourceLogoLabel}}">
+            {{if .PrependCard.SourceLogoURL}}
             <img class="tracker-card__source-logo-img" src="{{.PrependCard.SourceLogoURL}}" alt="{{.PrependCard.SourceLogoLabel}} logo" loading="lazy">
+            {{else}}
+            <span class="tracker-card__source-logo-text">{{.PrependCard.SourceLogoLabel}}</span>
+            {{end}}
         </span>
         {{end}}
         {{template "tracker_rating_popover" .PrependCard}}

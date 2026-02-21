@@ -183,12 +183,17 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
 	}
 
-	sourceKeyByID, err := h.listSourceKeys()
+	sourceByID, err := h.listSourcesByID()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceKeyByID, "")
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceByID, sourceLogoBySourceID, "")
 	if len(cards) == 0 {
 		return c.Status(fiber.StatusNotFound).SendString("Tracker card not found")
 	}
@@ -382,13 +387,19 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	sourceKeyByID, err := h.listSourceKeys()
+	sourceByID, err := h.listSourcesByID()
 	if err != nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceKeyByID, "")
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceByID, sourceLogoBySourceID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -456,13 +467,19 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	sourceKeyByID, err := h.listSourceKeys()
+	sourceByID, err := h.listSourcesByID()
 	if err != nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceKeyByID, "")
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -523,13 +540,19 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	sourceKeyByID, err := h.listSourceKeys()
+	sourceByID, err := h.listSourcesByID()
 	if err != nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceKeyByID, "")
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		c.Set("HX-Trigger", `{"trackersChanged":true}`)
+		return h.render(c, "empty_modal.html", nil)
+	}
+
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -541,18 +564,18 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 	})
 }
 
-func (h *DashboardHandler) listSourceKeys() (map[int64]string, error) {
+func (h *DashboardHandler) listSourcesByID() (map[int64]models.Source, error) {
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
 		return nil, err
 	}
 
-	sourceKeyByID := make(map[int64]string, len(sources))
+	sourceByID := make(map[int64]models.Source, len(sources))
 	for _, source := range sources {
-		sourceKeyByID[source.ID] = source.Key
+		sourceByID[source.ID] = source
 	}
 
-	return sourceKeyByID, nil
+	return sourceByID, nil
 }
 
 func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {

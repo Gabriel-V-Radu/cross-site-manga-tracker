@@ -69,21 +69,32 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	}
 
 	hasNextPage := page < totalPages
+	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+	}
+
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+	}
 
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
 	}
 
-	sourceKeyByID := make(map[int64]string, len(sources))
+	sourceByID := make(map[int64]models.Source, len(sources))
 	for _, source := range sources {
-		sourceKeyByID[source.ID] = source.Key
+		sourceByID[source.ID] = source
 	}
 
-	cards, pendingCovers := h.buildTrackerCards(items, sourceKeyByID, refreshKey)
+	cards, pendingCovers := h.buildTrackerCards(items, sourceByID, sourceLogoBySourceID, refreshKey)
+	siteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
 		Trackers:      cards,
+		SiteLinks:     siteLinks,
 		ViewMode:      viewMode,
 		Page:          page,
 		PrevPage:      max(1, page-1),
@@ -163,7 +174,7 @@ func buildPageNumbers(totalPages int, currentPage int) []int {
 	return pages
 }
 
-func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyByID map[int64]string, pageKey string) ([]trackerCardView, bool) {
+func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID map[int64]models.Source, sourceLogoBySourceID map[int64]string, pageKey string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
 	pendingCovers := false
 	for _, item := range items {
@@ -227,9 +238,19 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyBy
 			card.RatingLabel = formatRatingLabel(*item.Rating)
 		}
 
-		sourceKey := sourceKeyByID[item.SourceID]
+		source := sourceByID[item.SourceID]
+		sourceKey := strings.TrimSpace(source.Key)
+		sourceName := strings.TrimSpace(source.Name)
+		if sourceName == "" {
+			if sourceKey != "" {
+				sourceName = humanizeValueLabel(sourceKey)
+			} else {
+				sourceName = "Site"
+			}
+		}
 
-		card.SourceLogoURL, card.SourceLogoLabel = sourceLogoForKey(sourceKey)
+		card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[item.SourceID])
+		card.SourceLogoLabel = sourceName
 
 		if item.LatestKnownChapter != nil {
 			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, pageKey)
@@ -257,6 +278,27 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceKeyBy
 	}
 
 	return cards, pendingCovers
+}
+
+func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string) []trackerSiteLinkView {
+	links := make([]trackerSiteLinkView, 0, len(sources))
+	for _, source := range sources {
+		homeURL := sourceHomeURLForKey(source.Key)
+		if source.BaseURL != nil && strings.TrimSpace(*source.BaseURL) != "" {
+			homeURL = strings.TrimSpace(*source.BaseURL)
+		}
+		if homeURL == "" {
+			continue
+		}
+
+		links = append(links, trackerSiteLinkView{
+			Name:    source.Name,
+			HomeURL: homeURL,
+			LogoURL: strings.TrimSpace(sourceLogoBySourceID[source.ID]),
+		})
+	}
+
+	return links
 }
 
 func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, pageKey string) (string, bool) {
