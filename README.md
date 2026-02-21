@@ -4,7 +4,7 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 
 ## Structure
 - `backend/` Go + Fiber API
-- Frontend HTMX + Tailwind
+- Frontend HTMX
 - `docker-compose.yml` containerized API with persistent SQLite volume
 
 ## Local Run
