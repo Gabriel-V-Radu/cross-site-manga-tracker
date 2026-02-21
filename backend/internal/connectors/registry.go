@@ -110,8 +110,6 @@ func normalizeConnectorKey(raw string) string {
 	switch key {
 	case "mangadex.org":
 		return "mangadex"
-	case "mangaplus.shueisha.co.jp":
-		return "mangaplus"
 	case "mangafire.to":
 		return "mangafire"
 	case "asuracomic.net":

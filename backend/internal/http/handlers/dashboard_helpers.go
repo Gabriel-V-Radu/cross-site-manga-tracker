@@ -144,8 +144,6 @@ func sourceLogoForKey(sourceKey string) (string, string) {
 		return "/assets/tracking-sites-logos/mangadex-logo.png", "MangaDex"
 	case "mangafire":
 		return "/assets/tracking-sites-logos/mangafire-logo.png", "MangaFire"
-	case "mangaplus":
-		return "/assets/tracking-sites-logos/mangaplus-logo.png", "Manga Plus"
 	case "webtoons":
 		return "/assets/tracking-sites-logos/webtoon-logo.png", "WEBTOON"
 	default:
@@ -326,8 +324,6 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "mangadex"
 	case strings.Contains(host, "mangafire"):
 		return "mangafire"
-	case strings.Contains(host, "mangaplus") || strings.Contains(host, "shueisha"):
-		return "mangaplus"
 	case strings.Contains(host, "asura"):
 		return "asuracomic"
 	case strings.Contains(host, "flame"):

@@ -51,7 +51,7 @@ func setupAppForConnectors(t *testing.T) (*sql.DB, *fiber.App, func()) {
 
 	registry := connectors.NewRegistry()
 	_ = registry.Register(&fakeConnector{key: "mangadex"})
-	_ = registry.Register(&fakeConnector{key: "mangaplus"})
+	_ = registry.Register(&fakeConnector{key: "mangafire"})
 
 	app := apihttp.NewServerWithRegistry(config.Config{AppName: "test"}, db, registry)
 	cleanup := func() {

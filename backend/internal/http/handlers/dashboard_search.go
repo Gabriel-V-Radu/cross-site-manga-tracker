@@ -40,7 +40,7 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	}
 
 	searchTimeout := 5 * time.Second
-	if source.Key == "mangaplus" || source.Key == "mangafire" {
+	if source.Key == "mangafire" {
 		searchTimeout = 12 * time.Second
 	}
 

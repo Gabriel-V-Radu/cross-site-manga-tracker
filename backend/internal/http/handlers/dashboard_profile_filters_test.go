@@ -57,13 +57,13 @@ func TestEditTrackerDeletingOriginalLinkedSourcePromotesRemainingSource(t *testi
 		VALUES (?, ?, ?, ?), (?, ?, ?, ?)
 	`,
 		trackerID, 1, "original", "https://mangadex.org/title/original",
-		trackerID, 2, "replacement", "https://mangaplus.shueisha.co.jp/titles/100",
+		trackerID, 2, "replacement", "https://mangafire.to/manga/100",
 	)
 	if err != nil {
 		t.Fatalf("seed tracker sources: %v", err)
 	}
 
-	linkedJSON := `[{"sourceId":2,"sourceItemId":"replacement","sourceUrl":"https://mangaplus.shueisha.co.jp/titles/100"}]`
+	linkedJSON := `[{"sourceId":2,"sourceItemId":"replacement","sourceUrl":"https://mangafire.to/manga/100"}]`
 	form := url.Values{}
 	form.Set("title", "Linked Source Switch")
 	form.Set("source_id", "1")
@@ -94,7 +94,7 @@ func TestEditTrackerDeletingOriginalLinkedSourcePromotesRemainingSource(t *testi
 	if sourceID != 2 {
 		t.Fatalf("expected tracker source_id to switch to linked source 2, got %d", sourceID)
 	}
-	if sourceURL != "https://mangaplus.shueisha.co.jp/titles/100" {
+	if sourceURL != "https://mangafire.to/manga/100" {
 		t.Fatalf("expected tracker source_url to switch to linked source URL, got %s", sourceURL)
 	}
 
@@ -248,7 +248,7 @@ func TestDashboardLinkedSitesFilterSupportsMultipleSelections(t *testing.T) {
 	`,
 		1, "Linked Sites Match", 1, "https://mangadex.org/title/linked-sites-match", "reading", 2.0, 8.0,
 		1, "Linked Sites Partial", 1, "https://mangadex.org/title/linked-sites-partial", "reading", 3.0, 7.0,
-		1, "Linked Sites Other", 2, "https://mangaplus.shueisha.co.jp/titles/other", "reading", 1.0, 9.0,
+		1, "Linked Sites Other", 2, "https://mangafire.to/manga/other", "reading", 1.0, 9.0,
 	)
 	if err != nil {
 		t.Fatalf("seed trackers: %v", err)
@@ -274,9 +274,9 @@ func TestDashboardLinkedSitesFilterSupportsMultipleSelections(t *testing.T) {
 		VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)
 	`,
 		matchTrackerID, 1, "match-1", "https://mangadex.org/title/linked-sites-match",
-		matchTrackerID, 2, "match-2", "https://mangaplus.shueisha.co.jp/titles/match",
+		matchTrackerID, 2, "match-2", "https://mangafire.to/manga/match",
 		partialTrackerID, 1, "partial-1", "https://mangadex.org/title/linked-sites-partial",
-		otherTrackerID, 2, "other-2", "https://mangaplus.shueisha.co.jp/titles/other",
+		otherTrackerID, 2, "other-2", "https://mangafire.to/manga/other",
 	)
 	if err != nil {
 		t.Fatalf("seed tracker sources: %v", err)
@@ -331,7 +331,7 @@ func TestProfileLinkedSitesPartialPreservesSelectedValues(t *testing.T) {
 		VALUES (?, ?, ?, ?), (?, ?, ?, ?)
 	`,
 		trackerID, 1, "partial-endpoint-1", "https://mangadex.org/title/linked-sites-partial-endpoint",
-		trackerID, 2, "partial-endpoint-2", "https://mangaplus.shueisha.co.jp/titles/partial-endpoint",
+		trackerID, 2, "partial-endpoint-2", "https://mangafire.to/manga/partial-endpoint",
 	)
 	if err != nil {
 		t.Fatalf("seed tracker sources: %v", err)
