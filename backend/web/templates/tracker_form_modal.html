@@ -95,16 +95,47 @@
 
             <input type="hidden" name="latest_release_at" value="{{if .Tracker}}{{timeInputValue .Tracker.LatestReleaseAt}}{{end}}">
 
-            <label>
-                Status
-                <select name="status" required>
-                    <option value="reading" {{if and .Tracker (eq .Tracker.Status "reading")}}selected{{end}}>Reading</option>
-                    <option value="completed" {{if and .Tracker (eq .Tracker.Status "completed")}}selected{{end}}>Completed</option>
-                    <option value="on_hold" {{if and .Tracker (eq .Tracker.Status "on_hold")}}selected{{end}}>On hold</option>
-                    <option value="dropped" {{if and .Tracker (eq .Tracker.Status "dropped")}}selected{{end}}>Dropped</option>
-                    <option value="plan_to_read" {{if and .Tracker (eq .Tracker.Status "plan_to_read")}}selected{{end}}>Plan to read</option>
-                </select>
-            </label>
+            <fieldset class="tracker-status-field">
+                <legend>Status</legend>
+                <div class="tracker-status-segmented" role="radiogroup" aria-label="Tracker status">
+                    <label class="tracker-status-option">
+                        <input type="radio"
+                               name="status"
+                               value="reading"
+                               required
+                               {{if or (not .Tracker) (eq .Tracker.Status "reading")}}checked{{end}}>
+                        <span>Reading</span>
+                    </label>
+                    <label class="tracker-status-option">
+                        <input type="radio"
+                               name="status"
+                               value="completed"
+                               {{if and .Tracker (eq .Tracker.Status "completed")}}checked{{end}}>
+                        <span>Completed</span>
+                    </label>
+                    <label class="tracker-status-option">
+                        <input type="radio"
+                               name="status"
+                               value="on_hold"
+                               {{if and .Tracker (eq .Tracker.Status "on_hold")}}checked{{end}}>
+                        <span>On Hold</span>
+                    </label>
+                    <label class="tracker-status-option">
+                        <input type="radio"
+                               name="status"
+                               value="dropped"
+                               {{if and .Tracker (eq .Tracker.Status "dropped")}}checked{{end}}>
+                        <span>Dropped</span>
+                    </label>
+                    <label class="tracker-status-option">
+                        <input type="radio"
+                               name="status"
+                               value="plan_to_read"
+                               {{if and .Tracker (eq .Tracker.Status "plan_to_read")}}checked{{end}}>
+                        <span>Plan to read</span>
+                    </label>
+                </div>
+            </fieldset>
 
             <div class="split-row">
                 <label>
@@ -126,10 +157,13 @@
                 {{else}}
                 {{range .ProfileTags}}
                 <label class="tracker-tag-check">
-                    <span class="tracker-tag-check__input-wrap">
-                        <input type="checkbox" name="tag_ids" value="{{.ID}}" {{if hasTagID $.TrackerTags .ID}}checked{{end}}>
+                    <input type="checkbox" name="tag_ids" value="{{.ID}}" {{if hasTagID $.TrackerTags .ID}}checked{{end}}>
+                    <span class="tracker-tag-chip">
+                        {{if .IconPath}}
+                        <img class="tracker-tag-chip__icon" src="{{.IconPath}}" alt="{{.Name}}" title="{{.Name}}" loading="lazy">
+                        {{end}}
+                        {{.Name}}
                     </span>
-                    <span class="tracker-tag-chip">{{.Name}}</span>
                 </label>
                 {{end}}
                 {{end}}

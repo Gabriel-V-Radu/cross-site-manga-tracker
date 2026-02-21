@@ -1233,6 +1233,92 @@ input:focus, select:focus {
     font-size: 1.15rem;
 }
 
+.tracker-status-field {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+    display: grid;
+    gap: 0;
+}
+
+.tracker-status-field legend {
+    padding: 0;
+    margin: 0 0 4px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+}
+
+.tracker-status-segmented {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    border: 1px solid #274160;
+    border-radius: 8px;
+    overflow: hidden;
+    background: linear-gradient(180deg, #101a2c 0%, #0a1322 100%);
+    box-shadow: inset 0 1px 0 rgba(101, 139, 190, 0.18);
+}
+
+.tracker-form .tracker-status-option {
+    display: block;
+    position: relative;
+    margin: 0;
+    gap: 0;
+    font-size: inherit;
+    letter-spacing: normal;
+    text-transform: none;
+    color: inherit;
+}
+
+.tracker-form .tracker-status-option:not(:last-child) {
+    border-right: 1px solid rgba(73, 103, 140, 0.45);
+}
+
+.tracker-status-option input[type="radio"] {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    padding: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.tracker-status-option span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 4px 8px;
+    font-size: clamp(0.7rem, 1.2vw, 0.9rem);
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    color: #8ea3c3;
+    background: rgba(8, 14, 24, 0.55);
+    transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.tracker-status-option:hover span {
+    color: #a4b8d8;
+    background: rgba(22, 35, 53, 0.9);
+}
+
+.tracker-status-option input[type="radio"]:focus-visible + span {
+    box-shadow: inset 0 0 0 2px rgba(115, 175, 245, 0.58);
+}
+
+.tracker-status-option input[type="radio"]:checked + span {
+    color: #67b2ff;
+    text-shadow: 0 0 12px rgba(84, 162, 255, 0.32);
+    background: linear-gradient(180deg, rgba(37, 70, 113, 0.9), rgba(23, 48, 81, 0.95));
+    box-shadow: inset 0 0 0 1px rgba(103, 159, 230, 0.48);
+}
+
 .search-loading {
     margin: -1px 0 0;
     color: var(--ink-soft);
@@ -1297,13 +1383,45 @@ input:focus, select:focus {
     height: 36px;
 }
 
-.tracker-tag-check {
+.tracker-form .tracker-tags-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+
+.tracker-form .tracker-tag-check {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    position: relative;
+    gap: 0;
     width: auto;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    margin: 0;
+    letter-spacing: normal;
+    text-transform: none;
+    color: inherit;
+}
+
+.tracker-form .tracker-tag-check .tracker-tag-chip {
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: none;
+    border-color: #314d71;
+    background: linear-gradient(180deg, rgba(20, 31, 49, 0.95), rgba(12, 22, 36, 0.96));
+    color: #8ea5c6;
+    font-size: clamp(0.9rem, 0.85rem + 0.14vw, 1rem);
+    min-height: 24px;
+    line-height: 1;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 4px 14px;
+    border-radius: 16px;
+    transition: border-color 140ms ease, color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.tracker-form .tracker-tag-check .tracker-tag-chip__icon {
+    width: 14px;
+    height: 14px;
 }
 
 .tracker-tag-check__input-wrap {
@@ -1312,9 +1430,31 @@ input:focus, select:focus {
     justify-content: center;
 }
 
-.tracker-tag-check input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
+.tracker-form .tracker-tag-check input[type="checkbox"] {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.tracker-form .tracker-tag-check:hover .tracker-tag-chip {
+    border-color: #3e618e;
+    color: #b0c2df;
+    background: linear-gradient(180deg, rgba(26, 40, 62, 0.96), rgba(17, 28, 45, 0.96));
+}
+
+.tracker-form .tracker-tag-check input[type="checkbox"]:focus-visible + .tracker-tag-chip {
+    box-shadow: 0 0 0 2px rgba(115, 175, 245, 0.42);
+}
+
+.tracker-form .tracker-tag-check input[type="checkbox"]:checked + .tracker-tag-chip {
+    border-color: rgba(103, 159, 230, 0.85);
+    color: #67b2ff;
+    background: linear-gradient(180deg, rgba(37, 70, 113, 0.92), rgba(23, 48, 81, 0.95));
+    box-shadow: inset 0 0 0 1px rgba(103, 159, 230, 0.48);
 }
 
 .profile-tag-row {
@@ -1803,6 +1943,15 @@ input:focus, select:focus {
     .filters-grid,
     .split-row {
         grid-template-columns: 1fr;
+    }
+
+    .tracker-status-option span {
+        min-height: 22px;
+        font-size: clamp(0.65rem, 2.7vw, 0.82rem);
+    }
+
+    .tracker-form .tracker-tag-check .tracker-tag-chip {
+        min-height: 22px;
     }
 
     .panel-actions {
