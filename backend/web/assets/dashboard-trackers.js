@@ -600,17 +600,6 @@ document.addEventListener('click', function (event) {
     window.dismissModalZone();
 });
 
-var cancelPendingTrackersRefresh = function () {
-    if (!window.__pendingTrackersRefreshTimer) {
-        return;
-    }
-    window.clearTimeout(window.__pendingTrackersRefreshTimer);
-    window.__pendingTrackersRefreshTimer = null;
-};
-
-document.addEventListener('pointerdown', cancelPendingTrackersRefresh, true);
-document.addEventListener('keydown', cancelPendingTrackersRefresh, true);
-
 document.addEventListener('click', function (event) {
     var button = event.target && event.target.closest ? event.target.closest('.js-page-btn') : null;
     if (!button) {

@@ -16,6 +16,12 @@ window.dispatchTrackersChanged = function (reason) {
     if (kind === 'user') {
         window.__freezeTrackersOrder = false;
         window.__pinnedTrackerID = '';
+        window.__scrollTrackersToTop = true;
+
+        if (window.__pendingTrackersRefreshTimer) {
+            window.clearTimeout(window.__pendingTrackersRefreshTimer);
+            window.__pendingTrackersRefreshTimer = null;
+        }
     }
 
     document.body.dispatchEvent(new CustomEvent('trackersChanged', {
