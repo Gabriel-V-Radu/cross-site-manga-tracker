@@ -22,20 +22,48 @@ import (
 )
 
 var (
-	hrefAnyPattern     = regexp.MustCompile(`(?is)<a([^>]*)href=["'](/manga/[^"'#?]+)["']([^>]*)>(.*?)</a>`)
-	titleAttrPattern   = regexp.MustCompile(`(?is)\btitle=["']([^"']+)["']`)
-	imgSrcPattern      = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["']`)
-	imgAltPattern      = regexp.MustCompile(`(?is)<img[^>]+alt=["']([^"']+)["']`)
-	htmlTagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
-	infoAliasPattern   = regexp.MustCompile(`(?is)<h1[^>]*>.*?</h1>\s*<h6[^>]*>(.*?)</h6>`)
-	chapterURLPattern  = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
-	chapterDatePattern = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
-	chapterAgoPattern  = regexp.MustCompile(`(?i)\b((\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|an?\s+(minute|hour|day|week|month|year)|just\s+now)\s+ago\b`)
-	metaTagPattern     = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
-	imageTagPattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
-	updatedTagPattern  = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property|name)=["'](?:og:updated_time|article:published_time|article:modified_time|datePublished|dateModified)["'][^>]*content=["']([^"']+)["']`)
-	posterImagePattern = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*poster[^"']*["'][^>]*>.*?<img[^>]+src=["']([^"']+)["']`)
-	sitemapLocPattern  = regexp.MustCompile(`(?is)<loc>([^<]+)</loc>`)
+	hrefAnyPattern          = regexp.MustCompile(`(?is)<a([^>]*)href=["'](/manga/[^"'#?]+)["']([^>]*)>(.*?)</a>`)
+	titleAttrPattern        = regexp.MustCompile(`(?is)\btitle=["']([^"']+)["']`)
+	imgSrcPattern           = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["']`)
+	imgAltPattern           = regexp.MustCompile(`(?is)<img[^>]+alt=["']([^"']+)["']`)
+	htmlTagPattern          = regexp.MustCompile(`(?is)<[^>]+>`)
+	infoAliasPattern        = regexp.MustCompile(`(?is)<h1[^>]*>.*?</h1>\s*<h6[^>]*>(.*?)</h6>`)
+	chapterURLPattern       = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
+	chapterDatePattern      = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
+	chapterAgoPattern       = regexp.MustCompile(`(?i)\b((\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|an?\s+(minute|hour|day|week|month|year)|just\s+now)\s+ago\b`)
+	metaTagPattern          = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
+	imageTagPattern         = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
+	updatedTagPattern       = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property|name)=["'](?:og:updated_time|article:published_time|article:modified_time|datePublished|dateModified)["'][^>]*content=["']([^"']+)["']`)
+	posterImagePattern      = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*poster[^"']*["'][^>]*>.*?<img[^>]+src=["']([^"']+)["']`)
+	sitemapLocPattern       = regexp.MustCompile(`(?is)<loc>([^<]+)</loc>`)
+	searchNormalizeReplacer = strings.NewReplacer(
+		"-", " ",
+		".", " ",
+		"_", " ",
+		",", " ",
+		":", " ",
+		";", " ",
+		"!", " ",
+		"?", " ",
+		"(", " ",
+		")", " ",
+		"[", " ",
+		"]", " ",
+		"{", " ",
+		"}", " ",
+		"'", " ",
+		"\"", " ",
+		"/", " ",
+		"\\", " ",
+	)
+	queryStopWords = map[string]struct{}{
+		"a":   {},
+		"an":  {},
+		"my":  {},
+		"of":  {},
+		"the": {},
+		"to":  {},
+	}
 )
 
 type Connector struct {
@@ -953,8 +981,7 @@ func (c *Connector) getMangaIDsFromSitemaps(ctx context.Context) ([]string, erro
 
 func normalizeForSearch(value string) string {
 	clean := strings.ToLower(strings.TrimSpace(value))
-	replacer := strings.NewReplacer("-", " ", ".", " ", "_", " ", ",", " ", ":", " ", ";", " ", "!", " ", "?", " ", "(", " ", ")", " ", "[", " ", "]", " ", "{", " ", "}", " ", "'", " ", "\"", " ", "/", " ", "\\", " ")
-	clean = replacer.Replace(clean)
+	clean = searchNormalizeReplacer.Replace(clean)
 	return strings.Join(strings.Fields(clean), " ")
 }
 
@@ -993,17 +1020,9 @@ func matchesAnyToken(itemID string, tokens []string) bool {
 }
 
 func filterQueryTokens(tokens []string) []string {
-	stopWords := map[string]struct{}{
-		"a":   {},
-		"an":  {},
-		"my":  {},
-		"of":  {},
-		"the": {},
-		"to":  {},
-	}
 	filtered := make([]string, 0, len(tokens))
 	for _, token := range tokens {
-		if _, stop := stopWords[token]; stop {
+		if _, stop := queryStopWords[token]; stop {
 			continue
 		}
 		filtered = append(filtered, token)

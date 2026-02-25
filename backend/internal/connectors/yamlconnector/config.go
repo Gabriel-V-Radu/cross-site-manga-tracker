@@ -36,6 +36,8 @@ func (c *Config) normalizeAndValidate() error {
 	c.Key = strings.TrimSpace(c.Key)
 	c.Name = strings.TrimSpace(c.Name)
 	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	c.Search.Path = ensurePathPrefix(c.Search.Path)
+	c.Resolve.Path = ensurePathPrefix(c.Resolve.Path)
 
 	if c.Key == "" {
 		return fmt.Errorf("key is required")
@@ -47,45 +49,71 @@ func (c *Config) normalizeAndValidate() error {
 		return fmt.Errorf("base_url is required")
 	}
 
-	if strings.TrimSpace(c.Search.Path) == "" {
+	if c.Search.Path == "" {
 		return fmt.Errorf("search.path is required")
 	}
-	if strings.TrimSpace(c.Resolve.Path) == "" {
+	if c.Resolve.Path == "" {
 		return fmt.Errorf("resolve.path is required")
 	}
 
-	if strings.TrimSpace(c.Search.QueryParam) == "" {
+	c.Search.QueryParam = strings.TrimSpace(c.Search.QueryParam)
+	if c.Search.QueryParam == "" {
 		c.Search.QueryParam = "q"
 	}
-	if strings.TrimSpace(c.Search.LimitParam) == "" {
+	c.Search.LimitParam = strings.TrimSpace(c.Search.LimitParam)
+	if c.Search.LimitParam == "" {
 		c.Search.LimitParam = "limit"
 	}
-	if strings.TrimSpace(c.Resolve.URLParam) == "" {
+	c.Resolve.URLParam = strings.TrimSpace(c.Resolve.URLParam)
+	if c.Resolve.URLParam == "" {
 		c.Resolve.URLParam = "url"
 	}
 
-	if strings.TrimSpace(c.HealthPath) == "" {
+	c.HealthPath = ensurePathPrefix(c.HealthPath)
+	if c.HealthPath == "" {
 		c.HealthPath = "/health"
 	}
 
-	if strings.TrimSpace(c.Response.SearchItemsPath) == "" {
+	c.Response.SearchItemsPath = strings.TrimSpace(c.Response.SearchItemsPath)
+	if c.Response.SearchItemsPath == "" {
 		c.Response.SearchItemsPath = "items"
 	}
-	if strings.TrimSpace(c.Response.ResolveItemPath) == "" {
+	c.Response.ResolveItemPath = strings.TrimSpace(c.Response.ResolveItemPath)
+	if c.Response.ResolveItemPath == "" {
 		c.Response.ResolveItemPath = "item"
 	}
-	if strings.TrimSpace(c.Response.IDField) == "" {
+	c.Response.IDField = strings.TrimSpace(c.Response.IDField)
+	if c.Response.IDField == "" {
 		c.Response.IDField = "id"
 	}
-	if strings.TrimSpace(c.Response.TitleField) == "" {
+	c.Response.TitleField = strings.TrimSpace(c.Response.TitleField)
+	if c.Response.TitleField == "" {
 		c.Response.TitleField = "title"
 	}
-	if strings.TrimSpace(c.Response.URLField) == "" {
+	c.Response.URLField = strings.TrimSpace(c.Response.URLField)
+	if c.Response.URLField == "" {
 		c.Response.URLField = "url"
 	}
-	if strings.TrimSpace(c.Response.LatestChapterField) == "" {
+	c.Response.LatestChapterField = strings.TrimSpace(c.Response.LatestChapterField)
+	if c.Response.LatestChapterField == "" {
 		c.Response.LatestChapterField = "latestChapter"
 	}
+	c.Response.LastUpdatedField = strings.TrimSpace(c.Response.LastUpdatedField)
+
+	normalizedHosts := make([]string, 0, len(c.AllowedHosts))
+	seenHosts := make(map[string]struct{}, len(c.AllowedHosts))
+	for _, rawHost := range c.AllowedHosts {
+		host := strings.ToLower(strings.TrimSpace(rawHost))
+		if host == "" {
+			continue
+		}
+		if _, exists := seenHosts[host]; exists {
+			continue
+		}
+		seenHosts[host] = struct{}{}
+		normalizedHosts = append(normalizedHosts, host)
+	}
+	c.AllowedHosts = normalizedHosts
 
 	if len(c.AllowedHosts) == 0 {
 		c.AllowedHosts = []string{}

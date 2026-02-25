@@ -215,23 +215,58 @@ func (r *TrackerRepository) ReplaceTrackerTags(profileID int64, trackerID int64,
 		return fmt.Errorf("delete tracker tags: %w", err)
 	}
 
-	for _, tagID := range dedupeInt64(tagIDs) {
-		if tagID <= 0 {
-			continue
+	uniqueTagIDs := dedupePositiveInt64(tagIDs)
+	if len(uniqueTagIDs) > 0 {
+		lookupArgs := make([]any, 0, len(uniqueTagIDs)+1)
+		lookupArgs = append(lookupArgs, profileID)
+		for _, tagID := range uniqueTagIDs {
+			lookupArgs = append(lookupArgs, tagID)
 		}
 
-		var tagExists int
-		if err := tx.QueryRow(`SELECT COUNT(1) FROM custom_tags WHERE id = ? AND profile_id = ?`, tagID, profileID).Scan(&tagExists); err != nil {
+		rows, err := tx.Query(`
+			SELECT id
+			FROM custom_tags
+			WHERE profile_id = ?
+			  AND id IN (`+sqlPlaceholders(len(uniqueTagIDs))+`)
+		`, lookupArgs...)
+		if err != nil {
 			tx.Rollback()
-			return fmt.Errorf("validate profile tag ownership: %w", err)
-		}
-		if tagExists == 0 {
-			continue
+			return fmt.Errorf("lookup profile tags: %w", err)
 		}
 
-		if _, err := tx.Exec(`INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?)`, trackerID, tagID); err != nil {
+		validTagIDs := make(map[int64]struct{}, len(uniqueTagIDs))
+		for rows.Next() {
+			var tagID int64
+			if err := rows.Scan(&tagID); err != nil {
+				rows.Close()
+				tx.Rollback()
+				return fmt.Errorf("scan profile tag id: %w", err)
+			}
+			validTagIDs[tagID] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
 			tx.Rollback()
-			return fmt.Errorf("insert tracker tag: %w", err)
+			return fmt.Errorf("iterate profile tag ids: %w", err)
+		}
+		rows.Close()
+
+		insertStmt, err := tx.Prepare(`INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?)`)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("prepare tracker tag insert: %w", err)
+		}
+		defer insertStmt.Close()
+
+		for _, tagID := range uniqueTagIDs {
+			if _, exists := validTagIDs[tagID]; !exists {
+				continue
+			}
+
+			if _, err := insertStmt.Exec(trackerID, tagID); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("insert tracker tag: %w", err)
+			}
 		}
 	}
 
@@ -248,11 +283,14 @@ func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []i
 		return result, nil
 	}
 
-	placeholders := make([]string, 0, len(trackerIDs))
-	args := make([]any, 0, len(trackerIDs)+1)
+	uniqueTrackerIDs := dedupePositiveInt64(trackerIDs)
+	if len(uniqueTrackerIDs) == 0 {
+		return result, nil
+	}
+
+	args := make([]any, 0, len(uniqueTrackerIDs)+1)
 	args = append(args, profileID)
-	for _, id := range trackerIDs {
-		placeholders = append(placeholders, "?")
+	for _, id := range uniqueTrackerIDs {
 		args = append(args, id)
 	}
 
@@ -268,7 +306,7 @@ func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []i
 		FROM tracker_tags tt
 		INNER JOIN custom_tags ct ON ct.id = tt.tag_id
 		WHERE ct.profile_id = ?
-		  AND tt.tracker_id IN (` + strings.Join(placeholders, ",") + `)
+		  AND tt.tracker_id IN (` + sqlPlaceholders(len(uniqueTrackerIDs)) + `)
 		ORDER BY tt.tracker_id ASC, ct.name ASC, ct.id ASC
 	`
 
@@ -326,14 +364,17 @@ func iconPathFromKey(iconKey string) *string {
 	}
 }
 
-func dedupeInt64(values []int64) []int64 {
-	seen := make(map[int64]bool, len(values))
+func dedupePositiveInt64(values []int64) []int64 {
+	seen := make(map[int64]struct{}, len(values))
 	result := make([]int64, 0, len(values))
 	for _, value := range values {
-		if seen[value] {
+		if value <= 0 {
 			continue
 		}
-		seen[value] = true
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
 		result = append(result, value)
 	}
 	return result

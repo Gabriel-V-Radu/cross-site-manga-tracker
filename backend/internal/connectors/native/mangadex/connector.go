@@ -158,7 +158,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.Tokenize(query)
+	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
 	if normalizedQuery == "" || len(queryTokens) == 0 {
 		return nil, fmt.Errorf("title is required")
 	}

@@ -14,8 +14,10 @@ import (
 )
 
 type Connector struct {
-	config     Config
-	httpClient *http.Client
+	config      Config
+	httpClient  *http.Client
+	searchPath  []string
+	resolvePath []string
 }
 
 func NewConnector(cfg Config, client *http.Client) (*Connector, error) {
@@ -25,7 +27,12 @@ func NewConnector(cfg Config, client *http.Client) (*Connector, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Connector{config: cfg, httpClient: client}, nil
+	return &Connector{
+		config:      cfg,
+		httpClient:  client,
+		searchPath:  splitDottedPath(cfg.Response.SearchItemsPath),
+		resolvePath: splitDottedPath(cfg.Response.ResolveItemPath),
+	}, nil
 }
 
 func (c *Connector) Key() string {
@@ -41,7 +48,7 @@ func (c *Connector) Kind() string {
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	endpoint := c.config.BaseURL + ensurePathPrefix(c.config.HealthPath)
+	endpoint := c.config.BaseURL + c.config.HealthPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create health request: %w", err)
@@ -76,7 +83,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 
 	values := url.Values{}
 	values.Set(c.config.Resolve.URLParam, trimmed)
-	endpoint := c.config.BaseURL + ensurePathPrefix(c.config.Resolve.Path) + "?" + values.Encode()
+	endpoint := c.config.BaseURL + c.config.Resolve.Path + "?" + values.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -98,7 +105,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("decode resolve payload: %w", err)
 	}
 
-	rawItem := getByPath(payload, c.config.Response.ResolveItemPath)
+	rawItem := getByPath(payload, c.resolvePath)
 	itemMap, ok := rawItem.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("resolve payload item is invalid")
@@ -124,7 +131,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	values := url.Values{}
 	values.Set(c.config.Search.QueryParam, query)
 	values.Set(c.config.Search.LimitParam, strconv.Itoa(limit))
-	endpoint := c.config.BaseURL + ensurePathPrefix(c.config.Search.Path) + "?" + values.Encode()
+	endpoint := c.config.BaseURL + c.config.Search.Path + "?" + values.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -146,7 +153,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("decode search payload: %w", err)
 	}
 
-	rawItems := getByPath(payload, c.config.Response.SearchItemsPath)
+	rawItems := getByPath(payload, c.searchPath)
 	itemList, ok := rawItems.([]any)
 	if !ok {
 		return nil, fmt.Errorf("search payload items are invalid")
@@ -224,10 +231,6 @@ func ensurePathPrefix(rawPath string) string {
 func hostAllowed(host string, allowedHosts []string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	for _, allowed := range allowedHosts {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if allowed == "" {
-			continue
-		}
 		if host == allowed || strings.HasSuffix(host, "."+allowed) {
 			return true
 		}
@@ -235,14 +238,22 @@ func hostAllowed(host string, allowedHosts []string) bool {
 	return false
 }
 
-func getByPath(input map[string]any, dottedPath string) any {
+func splitDottedPath(dottedPath string) []string {
 	dottedPath = strings.TrimSpace(dottedPath)
 	if dottedPath == "" {
+		return nil
+	}
+
+	return strings.Split(dottedPath, ".")
+}
+
+func getByPath(input map[string]any, path []string) any {
+	if len(path) == 0 {
 		return input
 	}
 
 	current := any(input)
-	for _, segment := range strings.Split(dottedPath, ".") {
+	for _, segment := range path {
 		asMap, ok := current.(map[string]any)
 		if !ok {
 			return nil

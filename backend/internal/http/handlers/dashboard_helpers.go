@@ -15,6 +15,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+var valueLabelReplacer = strings.NewReplacer("_", " ", "-", " ")
+
 func parseTagNames(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -22,14 +24,17 @@ func parseTagNames(raw string) []string {
 
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
-	seen := make(map[string]bool, len(parts))
+	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		tag := strings.TrimSpace(part)
 		normalized := strings.ToLower(tag)
-		if normalized == "" || seen[normalized] {
+		if normalized == "" {
 			continue
 		}
-		seen[normalized] = true
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
 		out = append(out, tag)
 	}
 	return out
@@ -64,13 +69,16 @@ func parseSourceIDs(raw string) []int64 {
 
 	parts := strings.Split(raw, ",")
 	out := make([]int64, 0, len(parts))
-	seen := make(map[int64]bool, len(parts))
+	seen := make(map[int64]struct{}, len(parts))
 	for _, part := range parts {
 		sourceID, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
-		if err != nil || sourceID <= 0 || seen[sourceID] {
+		if err != nil || sourceID <= 0 {
 			continue
 		}
-		seen[sourceID] = true
+		if _, exists := seen[sourceID]; exists {
+			continue
+		}
+		seen[sourceID] = struct{}{}
 		out = append(out, sourceID)
 	}
 
@@ -441,7 +449,7 @@ func humanizeValueLabel(value string) string {
 	if normalized == "" {
 		return "—"
 	}
-	parts := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(normalized))
+	parts := strings.Fields(valueLabelReplacer.Replace(normalized))
 	for index, part := range parts {
 		if len(part) == 0 {
 			continue

@@ -151,20 +151,29 @@ func (r *Registry) Health(ctx context.Context) []HealthStatus {
 	}
 	r.mu.RUnlock()
 
-	statuses := make([]HealthStatus, 0, len(list))
-	for _, connector := range list {
-		err := connector.HealthCheck(ctx)
-		status := HealthStatus{
-			Key:     connector.Key(),
-			Name:    connector.Name(),
-			Kind:    connector.Kind(),
-			Healthy: err == nil,
-		}
-		if err != nil {
-			status.Error = err.Error()
-		}
-		statuses = append(statuses, status)
+	statuses := make([]HealthStatus, len(list))
+	var wg sync.WaitGroup
+	wg.Add(len(list))
+	for index, connector := range list {
+		index := index
+		connector := connector
+		go func() {
+			defer wg.Done()
+
+			err := connector.HealthCheck(ctx)
+			status := HealthStatus{
+				Key:     connector.Key(),
+				Name:    connector.Name(),
+				Kind:    connector.Kind(),
+				Healthy: err == nil,
+			}
+			if err != nil {
+				status.Error = err.Error()
+			}
+			statuses[index] = status
+		}()
 	}
+	wg.Wait()
 
 	sort.Slice(statuses, func(i, j int) bool {
 		return statuses[i].Key < statuses[j].Key

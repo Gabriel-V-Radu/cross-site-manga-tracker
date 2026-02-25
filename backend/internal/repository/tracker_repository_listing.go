@@ -114,7 +114,7 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	if strings.TrimSpace(options.Query) != "" {
 		normalizedQuery := searchutil.Normalize(options.Query)
 		if normalizedQuery != "" {
-			queryTokens := searchutil.Tokenize(options.Query)
+			queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
 			if len(queryTokens) == 0 {
 				whereClauses = append(whereClauses, `(LOWER(trackers.title) LIKE ? OR LOWER(COALESCE(trackers.related_titles, '')) LIKE ?)`)
 				queryLike := "%" + normalizedQuery + "%"
@@ -130,44 +130,61 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	}
 
 	if len(options.Statuses) > 0 {
-		placeholders := make([]string, 0, len(options.Statuses))
+		statuses := make([]string, 0, len(options.Statuses))
+		seenStatuses := make(map[string]struct{}, len(options.Statuses))
 		hasReading := false
-		for _, status := range options.Statuses {
-			if strings.EqualFold(strings.TrimSpace(status), "reading") {
+		for _, rawStatus := range options.Statuses {
+			status := strings.TrimSpace(rawStatus)
+			if status == "" {
+				continue
+			}
+
+			normalizedStatus := strings.ToLower(status)
+			if _, exists := seenStatuses[normalizedStatus]; exists {
+				continue
+			}
+			seenStatuses[normalizedStatus] = struct{}{}
+			if normalizedStatus == "reading" {
 				hasReading = true
 			}
-			placeholders = append(placeholders, "?")
-			args = append(args, status)
+			statuses = append(statuses, status)
 		}
-		whereClauses = append(whereClauses, `status IN (`+strings.Join(placeholders, ",")+`)`)
+
+		if len(statuses) > 0 {
+			placeholders := sqlPlaceholders(len(statuses))
+			whereClauses = append(whereClauses, `status IN (`+placeholders+`)`)
+			for _, status := range statuses {
+				args = append(args, status)
+			}
+		}
+
 		if hasReading {
 			whereClauses = append(whereClauses, `(status <> 'reading' OR latest_known_chapter IS NULL OR last_read_chapter IS NULL OR last_read_chapter < latest_known_chapter)`)
 		}
 	}
 
 	if len(options.SourceIDs) > 0 {
-		seenSourceIDs := make(map[int64]bool, len(options.SourceIDs))
+		seenSourceIDs := make(map[int64]struct{}, len(options.SourceIDs))
 		filteredSourceIDs := make([]int64, 0, len(options.SourceIDs))
 		for _, sourceID := range options.SourceIDs {
-			if sourceID <= 0 || seenSourceIDs[sourceID] {
+			if sourceID <= 0 {
 				continue
 			}
-			seenSourceIDs[sourceID] = true
+			if _, exists := seenSourceIDs[sourceID]; exists {
+				continue
+			}
+			seenSourceIDs[sourceID] = struct{}{}
 			filteredSourceIDs = append(filteredSourceIDs, sourceID)
 		}
 
 		if len(filteredSourceIDs) > 0 {
-			placeholders := make([]string, 0, len(filteredSourceIDs))
-			for range filteredSourceIDs {
-				placeholders = append(placeholders, "?")
-			}
-			joinedPlaceholders := strings.Join(placeholders, ",")
+			placeholders := sqlPlaceholders(len(filteredSourceIDs))
 
-			whereClauses = append(whereClauses, `(trackers.source_id IN (`+joinedPlaceholders+`) OR EXISTS (
+			whereClauses = append(whereClauses, `(trackers.source_id IN (`+placeholders+`) OR EXISTS (
 				SELECT 1
 				FROM tracker_sources ts
 				WHERE ts.tracker_id = trackers.id
-				  AND ts.source_id IN (`+joinedPlaceholders+`)
+				  AND ts.source_id IN (`+placeholders+`)
 			))`)
 			for _, sourceID := range filteredSourceIDs {
 				args = append(args, sourceID)
@@ -179,11 +196,17 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	}
 
 	if len(options.TagNames) > 0 {
+		seenTagNames := make(map[string]struct{}, len(options.TagNames))
 		for _, tagName := range options.TagNames {
 			normalized := strings.TrimSpace(strings.ToLower(tagName))
 			if normalized == "" {
 				continue
 			}
+			if _, exists := seenTagNames[normalized]; exists {
+				continue
+			}
+			seenTagNames[normalized] = struct{}{}
+
 			whereClauses = append(whereClauses, `EXISTS (
 				SELECT 1
 				FROM tracker_tags tt

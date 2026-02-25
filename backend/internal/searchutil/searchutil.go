@@ -76,13 +76,13 @@ func Normalize(value string) string {
 	return strings.Join(strings.Fields(clean), " ")
 }
 
-func Tokenize(value string) []string {
-	normalized := Normalize(value)
-	if normalized == "" {
+func TokenizeNormalized(normalized string) []string {
+	trimmed := strings.TrimSpace(normalized)
+	if trimmed == "" {
 		return nil
 	}
 
-	parts := strings.Fields(normalized)
+	parts := strings.Fields(trimmed)
 	tokens := make([]string, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
