@@ -76,3 +76,15 @@ Current setup is local-first (single PC) with future-ready architecture for remo
   - Apply updates: `go run ./cmd/backfill-related-titles`
   - Single profile: `go run ./cmd/backfill-related-titles --profile-id 1`
   - Limit batch size: `go run ./cmd/backfill-related-titles --limit 100`
+
+## Cleanup Stale Sources (Removed Connectors / Old Custom Sites)
+- Removes source records that no longer exist in the current connector registry.
+- For trackers whose primary source is stale:
+  - If an active linked source exists, it is promoted to primary.
+  - Otherwise the tracker is deleted during cleanup.
+- Run from `backend/`:
+  - Preview only (default): `go run ./cmd/cleanup-stale-sources`
+  - Apply cleanup: `go run ./cmd/cleanup-stale-sources --apply`
+- Windows helper script from repo root:
+  - Preview only: `./scripts/cleanup-stale-sources.ps1`
+  - Apply cleanup: `./scripts/cleanup-stale-sources.ps1 -Apply`
