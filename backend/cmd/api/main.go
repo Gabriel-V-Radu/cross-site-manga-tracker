@@ -46,10 +46,7 @@ func main() {
 		}
 	}
 
-	connectorRegistry, registryErr := connectordefaults.NewRegistry(cfg.YAMLConnectorsPath)
-	if registryErr != nil {
-		slog.Warn("connector registry loaded with warnings", "error", registryErr)
-	}
+	connectorRegistry := connectordefaults.NewRegistry()
 
 	app := apihttp.NewServerWithRegistry(cfg, db, connectorRegistry)
 

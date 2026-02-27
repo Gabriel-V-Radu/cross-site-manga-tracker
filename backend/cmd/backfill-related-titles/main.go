@@ -67,10 +67,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	registry, registryErr := connectordefaults.NewRegistry(cfg.YAMLConnectorsPath)
-	if registryErr != nil {
-		slog.Warn("connector registry loaded with warnings", "error", registryErr)
-	}
+	registry := connectordefaults.NewRegistry()
 
 	items, err := listTrackersForBackfill(db, *profileID, *limit)
 	if err != nil {

@@ -32,7 +32,7 @@ func TestRegistryRegisterListHealth(t *testing.T) {
 	if err := r.Register(&fakeConnector{key: "b", name: "B", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "a", name: "A", kind: connectors.KindYAML, health: errors.New("down")}); err != nil {
+	if err := r.Register(&fakeConnector{key: "a", name: "A", kind: "custom", health: errors.New("down")}); err != nil {
 		t.Fatalf("register a: %v", err)
 	}
 

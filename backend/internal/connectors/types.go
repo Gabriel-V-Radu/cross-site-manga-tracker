@@ -7,7 +7,6 @@ import (
 
 const (
 	KindNative = "native"
-	KindYAML   = "yaml"
 )
 
 type MangaResult struct {

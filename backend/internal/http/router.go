@@ -2,7 +2,6 @@ package http
 
 import (
 	"database/sql"
-	"log/slog"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -26,11 +25,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)
 	if connectorRegistry == nil {
-		loadedRegistry, err := connectordefaults.NewRegistry(cfg.YAMLConnectorsPath)
-		if err != nil {
-			slog.Warn("yaml connectors loaded with warnings", "error", err)
-		}
-		connectorRegistry = loadedRegistry
+		connectorRegistry = connectordefaults.NewRegistry()
 	}
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)

@@ -10,31 +10,29 @@ import (
 )
 
 type Config struct {
-	Environment        string
-	AppName            string
-	Port               string
-	LogLevel           slog.Level
-	SQLitePath         string
-	MigrationsPath     string
-	YAMLConnectorsPath string
-	SeedDefaultData    bool
-	PollingEnabled     bool
-	PollingMinutes     int
+	Environment     string
+	AppName         string
+	Port            string
+	LogLevel        slog.Level
+	SQLitePath      string
+	MigrationsPath  string
+	SeedDefaultData bool
+	PollingEnabled  bool
+	PollingMinutes  int
 }
 
 func Load() (Config, error) {
 	_ = godotenv.Load()
 
 	cfg := Config{
-		Environment:        getEnv("APP_ENV", "development"),
-		AppName:            getEnv("APP_NAME", "cross-site-tracker"),
-		Port:               getEnv("APP_PORT", "8080"),
-		SQLitePath:         getEnv("SQLITE_PATH", "./data/app.sqlite"),
-		MigrationsPath:     getEnv("MIGRATIONS_PATH", "./migrations"),
-		YAMLConnectorsPath: getEnv("YAML_CONNECTORS_PATH", "./connectors"),
-		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
-		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),
-		PollingMinutes:     getEnvAsInt("POLLING_MINUTES", 30),
+		Environment:     getEnv("APP_ENV", "development"),
+		AppName:         getEnv("APP_NAME", "cross-site-tracker"),
+		Port:            getEnv("APP_PORT", "8080"),
+		SQLitePath:      getEnv("SQLITE_PATH", "./data/app.sqlite"),
+		MigrationsPath:  getEnv("MIGRATIONS_PATH", "./migrations"),
+		SeedDefaultData: getEnvAsBool("SEED_DEFAULT_DATA", true),
+		PollingEnabled:  getEnvAsBool("POLLING_ENABLED", true),
+		PollingMinutes:  getEnvAsInt("POLLING_MINUTES", 30),
 	}
 
 	if cfg.PollingMinutes <= 0 {
