@@ -25,6 +25,10 @@ var tinyPNG = []byte{
 	0x42, 0x60, 0x82,
 }
 
+var tinyJPEG = []byte{
+	0xff, 0xd8, 0xff, 0xd9,
+}
+
 func TestSaveSourceLogosFromMenuUploadsPNG(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
@@ -87,6 +91,112 @@ func TestSaveSourceLogosFromMenuUploadsPNG(t *testing.T) {
 	diskPath := filepath.Join("data", "uploads", "site-logos", filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
 	if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("cleanup uploaded logo file: %v", err)
+	}
+}
+
+func TestSaveSourceLogosFromMenuUploadsJPG(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	sourceID, _ := sourceMetaByKey(t, db, "mangadex")
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, 1, "Logo Upload JPG Seed", sourceID, "https://mangadex.org/title/logo-upload-jpg-seed", "reading", 1.0, 2.0)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	filePart, err := writer.CreateFormFile("source_logo_file_"+toString(int(sourceID)), "mangadex-logo.jpg")
+	if err != nil {
+		t.Fatalf("create multipart file part: %v", err)
+	}
+	if _, err := filePart.Write(tinyJPEG); err != nil {
+		t.Fatalf("write multipart file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/profile/source-logos?profile=profile1", &payload)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("save source logos request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read save source logos response: %v", err)
+	}
+	if !strings.Contains(string(body), "Linked site logos saved") {
+		t.Fatalf("expected source logo success message")
+	}
+
+	var logoPath string
+	if err := db.QueryRow(`
+		SELECT logo_url
+		FROM profile_source_logos
+		WHERE profile_id = ? AND source_id = ?
+	`, 1, sourceID).Scan(&logoPath); err != nil {
+		t.Fatalf("read saved source logo row: %v", err)
+	}
+	if !strings.HasSuffix(strings.ToLower(logoPath), ".jpg") {
+		t.Fatalf("expected saved logo path to end in .jpg, got %q", logoPath)
+	}
+
+	diskPath := filepath.Join("data", "uploads", "site-logos", filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
+	if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("cleanup uploaded logo file: %v", err)
+	}
+}
+
+func TestSaveSourceLogosFromMenuOversizedUploadShowsValidationMessage(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	sourceID, _ := sourceMetaByKey(t, db, "mangadex")
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	filePart, err := writer.CreateFormFile("source_logo_file_"+toString(int(sourceID)), "mangadex-logo.png")
+	if err != nil {
+		t.Fatalf("create multipart file part: %v", err)
+	}
+	largePNG := make([]byte, 3<<20)
+	if _, err := filePart.Write(largePNG); err != nil {
+		t.Fatalf("write multipart file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/profile/source-logos?profile=profile1", &payload)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("save source logos request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read save source logos response: %v", err)
+	}
+	if !strings.Contains(string(body), "file too large (max 2MB)") {
+		t.Fatalf("expected oversize validation message, got body: %s", string(body))
 	}
 }
 

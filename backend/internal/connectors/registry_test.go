@@ -67,6 +67,9 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	if err := r.Register(&fakeConnector{key: "flamecomics", name: "FlameComics", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register flamecomics: %v", err)
 	}
+	if err := r.Register(&fakeConnector{key: "mgeko", name: "Mgeko", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register mgeko: %v", err)
+	}
 	if err := r.Register(&fakeConnector{key: "webtoons", name: "WEBTOON", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register webtoons: %v", err)
 	}
@@ -110,6 +113,20 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	for _, key := range flameTests {
 		if _, ok := r.Get(key); !ok {
 			t.Fatalf("expected flamecomics connector for key %q", key)
+		}
+	}
+
+	mgekoTests := []string{
+		"mgeko",
+		"Mgeko",
+		"mgeko.cc",
+		"https://www.mgeko.cc/manga/the-100-girlfriends-who-really-really-really-really-really-love-you/",
+		"www.mgeko.cc",
+	}
+
+	for _, key := range mgekoTests {
+		if _, ok := r.Get(key); !ok {
+			t.Fatalf("expected mgeko connector for key %q", key)
 		}
 	}
 

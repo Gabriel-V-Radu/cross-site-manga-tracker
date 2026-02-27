@@ -144,8 +144,9 @@
                                id="source-logo-file-{{.ID}}"
                                class="profile-source-logo-file-input"
                                name="source_logo_file_{{.ID}}"
-                               accept=".png,.svg,image/png,image/svg+xml"
-                               onchange="this.form.requestSubmit()">
+                               accept=".png,.svg,.jpg,.jpeg,.webp,image/png,image/svg+xml,image/jpeg,image/webp"
+                               onclick="this.value='';"
+                               onchange="if (this.files && this.files.length) { if (this.form && this.form.requestSubmit) { this.form.requestSubmit(); } else if (this.form) { this.form.submit(); } }">
                         <label for="source-logo-file-{{.ID}}" class="linked-btn profile-source-logo-action">Upload</label>
                     </form>
 
@@ -162,7 +163,7 @@
                 </div>
                 {{end}}
             </div>
-            <p class="profile-source-logo-help">Upload/remove applies immediately. PNG/SVG only, up to 1MB.</p>
+            <p class="profile-source-logo-help">Upload/remove applies immediately. PNG, SVG, JPG, or WEBP up to 2MB.</p>
             {{end}}
         </section>
     </div>

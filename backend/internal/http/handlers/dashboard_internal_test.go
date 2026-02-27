@@ -29,3 +29,17 @@ func TestHasResolvedSourceMetadataRequiresReleaseDate(t *testing.T) {
 		t.Fatalf("expected metadata with source item id, latest chapter, and release date to be complete")
 	}
 }
+
+func TestSourceHomeURLForKeySupportsMgeko(t *testing.T) {
+	homeURL := sourceHomeURLForKey("mgeko")
+	if homeURL != "https://www.mgeko.cc" {
+		t.Fatalf("expected mgeko home url, got %q", homeURL)
+	}
+}
+
+func TestInferSourceKeyFromURLSupportsMgeko(t *testing.T) {
+	inferred := inferSourceKeyFromURL("https://www.mgeko.cc/manga/sample-series/")
+	if inferred != "mgeko" {
+		t.Fatalf("expected inferred source key mgeko, got %q", inferred)
+	}
+}

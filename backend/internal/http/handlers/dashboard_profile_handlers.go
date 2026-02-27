@@ -19,7 +19,8 @@ import (
 const (
 	sourceLogoUploadDir      = "data/uploads/site-logos"
 	sourceLogoPublicPrefix   = "/uploads/site-logos/"
-	maxSourceLogoUploadBytes = 1 << 20 // 1MB
+	maxSourceLogoUploadBytes = 2 << 20 // 2MB
+	maxSourceLogoUploadLabel = "2MB"
 )
 
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
@@ -254,7 +255,7 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 
 	logoBySourceID, err := readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.renderProfileMenu(c, activeProfile, err.Error(), "")
 	}
 
 	if err := h.sourceRepo.UpsertProfileSourceLogoURLs(activeProfile.ID, logoBySourceID); err != nil {
@@ -382,12 +383,14 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 		return "", nil, fmt.Errorf("missing upload")
 	}
 	if fileHeader.Size > maxSourceLogoUploadBytes {
-		return "", nil, fmt.Errorf("file too large (max 1MB)")
+		return "", nil, fmt.Errorf("file too large (max %s)", maxSourceLogoUploadLabel)
 	}
 
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
-	if ext != ".png" && ext != ".svg" {
-		return "", nil, fmt.Errorf("only .png or .svg files are allowed")
+	switch ext {
+	case ".png", ".svg", ".jpg", ".jpeg", ".webp":
+	default:
+		return "", nil, fmt.Errorf("only .png, .svg, .jpg, .jpeg, or .webp files are allowed")
 	}
 
 	file, err := fileHeader.Open()
@@ -401,7 +404,7 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 		return "", nil, fmt.Errorf("read upload: %w", err)
 	}
 	if int64(len(data)) > maxSourceLogoUploadBytes {
-		return "", nil, fmt.Errorf("file too large (max 1MB)")
+		return "", nil, fmt.Errorf("file too large (max %s)", maxSourceLogoUploadLabel)
 	}
 	if len(data) == 0 {
 		return "", nil, fmt.Errorf("empty upload")
@@ -411,8 +414,22 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 	contentType := http.DetectContentType(data[:sniffLen])
 
 	if ext == ".png" {
-		if contentType != "image/png" {
+		if contentType != "image/png" && !hasPNGSignature(data) {
 			return "", nil, fmt.Errorf("invalid PNG file")
+		}
+		return ext, data, nil
+	}
+
+	if ext == ".jpg" || ext == ".jpeg" {
+		if contentType != "image/jpeg" && !hasJPEGSignature(data) {
+			return "", nil, fmt.Errorf("invalid JPEG file")
+		}
+		return ext, data, nil
+	}
+
+	if ext == ".webp" {
+		if contentType != "image/webp" && !hasWEBPSignature(data) {
+			return "", nil, fmt.Errorf("invalid WEBP file")
 		}
 		return ext, data, nil
 	}
@@ -426,6 +443,33 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 	}
 
 	return ext, data, nil
+}
+
+func hasPNGSignature(data []byte) bool {
+	if len(data) < 8 {
+		return false
+	}
+	signature := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	for i := range signature {
+		if data[i] != signature[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasJPEGSignature(data []byte) bool {
+	if len(data) < 3 {
+		return false
+	}
+	return data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff
+}
+
+func hasWEBPSignature(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+	return string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP"
 }
 
 func removeStoredSourceLogoFile(publicPath string) error {
