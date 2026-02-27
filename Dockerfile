@@ -15,7 +15,6 @@ RUN adduser -D -g '' appuser
 COPY --from=builder /cross-site-tracker-api /usr/local/bin/cross-site-tracker-api
 COPY backend/migrations ./migrations
 COPY backend/web ./web
-COPY backend/connectors ./connectors
 
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 USER appuser
