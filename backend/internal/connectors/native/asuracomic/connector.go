@@ -29,6 +29,7 @@ var (
 	metaTitlePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
 	titleTagPattern            = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
 	metaImagePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content=["']([^"']+)["']`)
+	renderedCoverPattern       = regexp.MustCompile(`(?is)<img\s+[^>]*src=["']([^"']*asura-images/covers/[^"']+)["'][^>]*>`)
 	updatedOnPattern           = regexp.MustCompile(`(?i)Updated\s+On\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4})`)
 	monthDayOrdinalYearPattern = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
 )
@@ -241,7 +242,7 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		title = prettifySeriesID(seriesID)
 	}
 	latestChapter, releaseAtByChapter := extractLatestChapterAndReleaseAt(body, seriesID)
-	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
+	coverImageURL := extractCoverImageURL(body)
 	coverImageURL = c.absoluteURL(coverImageURL)
 	lastUpdatedAt := releaseAtByChapter
 	if lastUpdatedAt == nil {
@@ -427,6 +428,15 @@ func extractTitle(body string) string {
 	title = strings.ReplaceAll(title, "| Asura Scans", "")
 	title = strings.TrimSpace(title)
 	return title
+}
+
+func extractCoverImageURL(body string) string {
+	renderedCover := strings.TrimSpace(html.UnescapeString(firstSubmatch(renderedCoverPattern, body)))
+	if renderedCover != "" {
+		return renderedCover
+	}
+
+	return strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
 }
 
 func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {

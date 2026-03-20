@@ -33,9 +33,10 @@ func TestAsuraComicConnectorResolveAndSearch(t *testing.T) {
 <html>
 <head>
   <meta property="og:title" content="Nano Machine - Asura Scans">
-  <meta property="og:image" content="https://cdn.asurascans.com/asura-images/covers/nano.webp">
+	<meta property="og:image" content="https://cdn.asurascans.com/asura-images/covers/nano-social.webp">
 </head>
 <body>
+	<img src="https://cdn.asurascans.com/asura-images/covers/nano-rendered-400.webp" alt="Nano Machine">
   <h1>Nano Machine</h1>
   <div>Alternative Names: Mechanical Cultivator | Nano Machine Reloaded</div>
   <div>Updated On</div><div>February 17th 2026</div>
@@ -77,7 +78,7 @@ func TestAsuraComicConnectorResolveAndSearch(t *testing.T) {
 	if resolved.Title != "Nano Machine" {
 		t.Fatalf("expected title Nano Machine, got %s", resolved.Title)
 	}
-	if resolved.CoverImageURL != "https://cdn.asurascans.com/asura-images/covers/nano.webp" {
+	if resolved.CoverImageURL != "https://cdn.asurascans.com/asura-images/covers/nano-rendered-400.webp" {
 		t.Fatalf("unexpected cover image: %s", resolved.CoverImageURL)
 	}
 	if resolved.LatestChapter == nil || *resolved.LatestChapter != 304 {
@@ -97,8 +98,43 @@ func TestAsuraComicConnectorResolveAndSearch(t *testing.T) {
 	if results[0].SourceItemID != "nano-machine-7f873ca6" {
 		t.Fatalf("unexpected source id %s", results[0].SourceItemID)
 	}
+	if results[0].CoverImageURL != "https://cdn.asurascans.com/asura-images/covers/nano-rendered-400.webp" {
+		t.Fatalf("unexpected search cover image: %s", results[0].CoverImageURL)
+	}
 	if results[0].LatestChapter == nil || *results[0].LatestChapter != 304 {
 		t.Fatalf("expected latest chapter 304 from search, got %v", results[0].LatestChapter)
+	}
+}
+
+func TestAsuraComicConnectorFallsBackToMetaCoverImage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+	})
+	mux.HandleFunc("/comics/nano-machine-7f873ca6", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Nano Machine - Asura Scans">
+  <meta property="og:image" content="https://cdn.asurascans.com/asura-images/covers/nano-social.webp">
+</head>
+<body>
+  <a href="/comics/nano-machine-7f873ca6/chapter/304">Chapter 304</a>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	resolved, err := conn.ResolveByURL(context.Background(), "https://asurascans.com/comics/nano-machine-7f873ca6")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if resolved.CoverImageURL != "https://cdn.asurascans.com/asura-images/covers/nano-social.webp" {
+		t.Fatalf("unexpected fallback cover image: %s", resolved.CoverImageURL)
 	}
 }
 
