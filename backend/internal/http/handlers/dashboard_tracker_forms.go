@@ -237,6 +237,9 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 			tracker.SourceItemID = &resolvedItemID
 		}
 	}
+	if resolvedURL := strings.TrimSpace(resolved.URL); resolvedURL != "" {
+		tracker.SourceURL = resolvedURL
+	}
 
 	if (tracker.LatestKnownChapter == nil || *tracker.LatestKnownChapter <= 0) && resolved.LatestChapter != nil {
 		tracker.LatestKnownChapter = resolved.LatestChapter
@@ -824,6 +827,9 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 		resolvedItemID := strings.TrimSpace(resolved.SourceItemID)
 		if source.SourceItemID == nil && resolvedItemID != "" {
 			source.SourceItemID = &resolvedItemID
+		}
+		if resolvedURL := strings.TrimSpace(resolved.URL); resolvedURL != "" {
+			source.SourceURL = resolvedURL
 		}
 		resolvedRelatedTitles := searchutil.FilterEnglishAlphabetNames(resolved.RelatedTitles)
 		if idx == bestIndex && len(bestRelatedTitles) == 0 && len(resolvedRelatedTitles) > 0 {

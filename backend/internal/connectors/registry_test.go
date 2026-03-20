@@ -92,8 +92,11 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 		"asuracomic",
 		"AsuraComic",
 		"asuracomic.net",
+		"asurascans.com",
 		"https://asuracomic.net/series/nano-machine-11b89554",
+		"https://asurascans.com/comics/nano-machine-7f873ca6",
 		"www.asuracomic.net",
+		"www.asurascans.com",
 	}
 
 	for _, key := range asuraTests {

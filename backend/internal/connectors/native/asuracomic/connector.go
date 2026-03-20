@@ -2,6 +2,7 @@ package asuracomic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -19,7 +20,7 @@ import (
 )
 
 var (
-	seriesHrefPattern          = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/?series/([a-z0-9-]+)["']`)
+	seriesHrefPattern          = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/?(?:series|comics)/([a-z0-9-]+)["']`)
 	htmlTagPattern             = regexp.MustCompile(`(?is)<[^>]+>`)
 	whitespacePattern          = regexp.MustCompile(`\s+`)
 	chapterHrefPattern         = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
@@ -32,6 +33,18 @@ var (
 	monthDayOrdinalYearPattern = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
 )
 
+type httpStatusError struct {
+	statusCode int
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("unexpected status: %d", e.statusCode)
+}
+
+func (e *httpStatusError) StatusCode() int {
+	return e.statusCode
+}
+
 type Connector struct {
 	baseURL     string
 	allowedHost []string
@@ -40,8 +53,8 @@ type Connector struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     "https://asuracomic.net",
-		allowedHost: []string{"asuracomic.net"},
+		baseURL:     "https://asurascans.com",
+		allowedHost: []string{"asurascans.com", "asuracomic.net"},
 		httpClient: &http.Client{
 			Timeout: 12 * time.Second,
 		},
@@ -53,7 +66,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		client = &http.Client{Timeout: 12 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"asuracomic.net"}
+		allowedHost = []string{"asurascans.com", "asuracomic.net"}
 	}
 	return &Connector{baseURL: strings.TrimRight(baseURL, "/"), allowedHost: allowedHost, httpClient: client}
 }
@@ -71,7 +84,7 @@ func (c *Connector) Kind() string {
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/series?page=1")
+	_, err := c.fetchPage(ctx, c.searchPageURL("nano"))
 	return err
 }
 
@@ -89,12 +102,12 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("url does not belong to asuracomic")
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "series" {
-		return nil, fmt.Errorf("asuracomic url must match /series/{id}")
+	seriesID, _, err := parseSeriesIDFromPath(parsed.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	seriesID := strings.TrimSpace(segments[1])
+	seriesID = strings.TrimSpace(seriesID)
 	if seriesID == "" || !isValidSeriesID(seriesID) {
 		return nil, fmt.Errorf("invalid asuracomic series id")
 	}
@@ -120,7 +133,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		limit = 50
 	}
 
-	body, err := c.fetchPage(ctx, c.baseURL+"/series?page=1&name="+url.QueryEscape(title))
+	body, err := c.fetchPage(ctx, c.searchPageURL(title))
 	if err != nil {
 		return nil, fmt.Errorf("fetch asuracomic search page: %w", err)
 	}
@@ -139,7 +152,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		seriesSlugTitle := strings.ReplaceAll(seriesID, "-", " ")
 		anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
 
-		resolved, resolveErr := c.resolveBySeriesID(ctx, seriesID)
+		resolved, resolveErr := c.resolveBySeriesIDExact(ctx, seriesID)
 		if resolveErr != nil {
 			continue
 		}
@@ -158,7 +171,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	return results, nil
 }
 
-func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter float64) (string, error) {
+func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
 	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
 		return "", fmt.Errorf("invalid chapter")
 	}
@@ -176,22 +189,49 @@ func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter 
 		return "", fmt.Errorf("url does not belong to asuracomic")
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "series" {
-		return "", fmt.Errorf("asuracomic url must match /series/{id}")
+	seriesID, routeKind, err := parseSeriesIDFromPath(parsed.Path)
+	if err != nil {
+		return "", err
 	}
 
-	seriesID := strings.TrimSpace(segments[1])
+	seriesID = strings.TrimSpace(seriesID)
 	if seriesID == "" || !isValidSeriesID(seriesID) {
 		return "", fmt.Errorf("invalid asuracomic series id")
 	}
+	if routeKind == "series" {
+		canonicalSeriesID, resolveErr := c.findCanonicalSeriesID(ctx, seriesID)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		seriesID = canonicalSeriesID
+	}
 
 	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
-	return "https://asuracomic.net/series/" + seriesID + "/chapter/" + chapterSegment, nil
+	return c.absoluteURL("/comics/" + seriesID + "/chapter/" + chapterSegment), nil
 }
 
 func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
-	body, err := c.fetchPage(ctx, c.baseURL+"/series/"+url.PathEscape(seriesID))
+	result, err := c.resolveBySeriesIDExact(ctx, seriesID)
+	if err == nil {
+		return result, nil
+	}
+	if !isHTTPStatus(err, http.StatusNotFound) {
+		return nil, err
+	}
+
+	canonicalSeriesID, findErr := c.findCanonicalSeriesID(ctx, seriesID)
+	if findErr != nil {
+		return nil, err
+	}
+	if canonicalSeriesID == seriesID {
+		return nil, err
+	}
+
+	return c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
+}
+
+func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
+	body, err := c.fetchPage(ctx, c.absoluteURL("/comics/"+url.PathEscape(seriesID)))
 	if err != nil {
 		return nil, fmt.Errorf("fetch series page: %w", err)
 	}
@@ -212,11 +252,52 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		SourceKey:     c.Key(),
 		SourceItemID:  seriesID,
 		Title:         title,
-		URL:           "https://asuracomic.net/series/" + seriesID,
+		URL:           c.absoluteURL("/comics/" + seriesID),
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
 	}, nil
+}
+
+func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) (string, error) {
+	trimmedSeriesID := strings.TrimSpace(strings.ToLower(seriesID))
+	if trimmedSeriesID == "" {
+		return "", fmt.Errorf("invalid asuracomic series id")
+	}
+
+	query := legacySearchQueryFromSeriesID(trimmedSeriesID)
+	if query == "" {
+		query = strings.ReplaceAll(trimmedSeriesID, "-", " ")
+	}
+
+	body, err := c.fetchPage(ctx, c.searchPageURL(query))
+	if err != nil {
+		return "", fmt.Errorf("search asuracomic catalog: %w", err)
+	}
+
+	seriesIDs := collectUniqueSeriesIDs(body)
+	if len(seriesIDs) == 0 {
+		return "", fmt.Errorf("series not found in asuracomic catalog")
+	}
+
+	targetBase := stripSeriesIDHashSuffix(trimmedSeriesID)
+	targetNorm := searchutil.Normalize(strings.ReplaceAll(targetBase, "-", " "))
+	for _, candidateID := range seriesIDs {
+		if stripSeriesIDHashSuffix(candidateID) == targetBase {
+			return candidateID, nil
+		}
+
+		candidateTitle := extractAnchorTextForSeriesID(body, candidateID)
+		if candidateTitle != "" && searchutil.Normalize(candidateTitle) == targetNorm {
+			return candidateID, nil
+		}
+	}
+
+	return "", fmt.Errorf("series not found in asuracomic catalog")
+}
+
+func (c *Connector) searchPageURL(query string) string {
+	return c.absoluteURL("/browse?page=1&q=" + url.QueryEscape(strings.TrimSpace(query)))
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
@@ -236,7 +317,7 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return "", &httpStatusError{statusCode: res.StatusCode}
 	}
 
 	rawBody, err := io.ReadAll(res.Body)
@@ -245,6 +326,14 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 	}
 
 	return string(rawBody), nil
+}
+
+func isHTTPStatus(err error, statusCode int) bool {
+	var statusErr *httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode() == statusCode
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
@@ -305,7 +394,7 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 	if seriesID == "" {
 		return ""
 	}
-	pattern := regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/?series/` + regexp.QuoteMeta(seriesID) + `["'][^>]*>(.*?)</a>`)
+	pattern := regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/?(?:series|comics)/` + regexp.QuoteMeta(seriesID) + `["'][^>]*>(.*?)</a>`)
 	matches := pattern.FindAllStringSubmatch(body, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
@@ -343,7 +432,7 @@ func extractTitle(body string) string {
 func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {
 	chapterPattern := chapterHrefPattern
 	if strings.TrimSpace(seriesID) != "" {
-		chapterPattern = regexp.MustCompile(`(?i)(?:/series/)?` + regexp.QuoteMeta(seriesID) + `/chapter/(\d+(?:\.\d+)?)`)
+		chapterPattern = regexp.MustCompile(`(?i)(?:/(?:series|comics)/)?` + regexp.QuoteMeta(seriesID) + `/chapter/(\d+(?:\.\d+)?)`)
 	}
 
 	chapterIndexes := chapterPattern.FindAllStringSubmatchIndex(body, -1)
@@ -517,6 +606,66 @@ func cleanText(raw string) string {
 	text = html.UnescapeString(text)
 	text = whitespacePattern.ReplaceAllString(text, " ")
 	return strings.TrimSpace(text)
+}
+
+func parseSeriesIDFromPath(rawPath string) (string, string, error) {
+	segments := strings.Split(strings.Trim(path.Clean(rawPath), "/"), "/")
+	if len(segments) < 2 {
+		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
+	}
+
+	routeKind := strings.ToLower(strings.TrimSpace(segments[0]))
+	if routeKind != "series" && routeKind != "comics" {
+		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
+	}
+
+	return strings.TrimSpace(segments[1]), routeKind, nil
+}
+
+func legacySearchQueryFromSeriesID(seriesID string) string {
+	trimmed := stripSeriesIDHashSuffix(strings.TrimSpace(strings.ToLower(seriesID)))
+	trimmed = strings.ReplaceAll(trimmed, "-", " ")
+	return strings.Join(strings.Fields(trimmed), " ")
+}
+
+func stripSeriesIDHashSuffix(seriesID string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(seriesID))
+	if trimmed == "" {
+		return ""
+	}
+
+	lastDash := strings.LastIndex(trimmed, "-")
+	if lastDash <= 0 || lastDash >= len(trimmed)-1 {
+		return trimmed
+	}
+
+	suffix := trimmed[lastDash+1:]
+	if !looksLikeHashedSuffix(suffix) {
+		return trimmed
+	}
+
+	return trimmed[:lastDash]
+}
+
+func looksLikeHashedSuffix(suffix string) bool {
+	if len(suffix) < 6 || len(suffix) > 12 {
+		return false
+	}
+
+	hasLetter := false
+	hasDigit := false
+	for _, r := range suffix {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'a' && r <= 'f':
+			hasLetter = true
+		default:
+			return false
+		}
+	}
+
+	return hasLetter && hasDigit
 }
 
 func firstSubmatch(pattern *regexp.Regexp, raw string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -12,7 +13,7 @@ import (
 
 type pollRepository interface {
 	ListForPolling() ([]repository.PollingTracker, error)
-	UpdatePollingState(id int64, latestKnownChapter *float64, latestReleaseAt *time.Time, checkedAt time.Time) error
+	UpdatePollingState(id int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, clearLatestReleaseAt bool, checkedAt time.Time) error
 }
 
 type Poller struct {
@@ -106,11 +107,21 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 
 		latestReleaseAt := result.LastUpdatedAt
-		if latestReleaseAt == nil && isNewChapter(tracker.LatestKnownChapter, result.LatestChapter) {
-			latestReleaseAt = &now
+		clearLatestReleaseAt := latestReleaseAt == nil && isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
+
+		var canonicalSourceItemID *string
+		resolvedSourceItemID := strings.TrimSpace(result.SourceItemID)
+		if resolvedSourceItemID != "" {
+			canonicalSourceItemID = &resolvedSourceItemID
+		} else {
+			canonicalSourceItemID = tracker.SourceItemID
+		}
+		canonicalSourceURL := strings.TrimSpace(result.URL)
+		if canonicalSourceURL == "" {
+			canonicalSourceURL = tracker.SourceURL
 		}
 
-		if err := p.repo.UpdatePollingState(tracker.ID, latest, latestReleaseAt, now); err != nil {
+		if err := p.repo.UpdatePollingState(tracker.ID, tracker.SourceID, tracker.SourceURL, canonicalSourceItemID, canonicalSourceURL, latest, latestReleaseAt, clearLatestReleaseAt, now); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
 		}

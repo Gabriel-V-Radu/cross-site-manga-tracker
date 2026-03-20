@@ -145,7 +145,7 @@ func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
 func sourceHomeURLForKey(sourceKey string) string {
 	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
 	case "asuracomic":
-		return "https://asuracomic.net"
+		return "https://asurascans.com"
 	case "flamecomics":
 		return "https://flamecomics.xyz"
 	case "mangadex":
@@ -298,6 +298,47 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	return "", fmt.Errorf("cover not found")
 }
 
+func (h *DashboardHandler) fetchCanonicalSourceURL(parent context.Context, sourceKey, sourceURL string) (string, error) {
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceKey == "" {
+		return trimmedSourceURL, fmt.Errorf("missing source key")
+	}
+	if trimmedSourceURL == "" {
+		return "", fmt.Errorf("missing source url")
+	}
+
+	cacheKey := buildSourceURLCacheKey(trimmedSourceKey, trimmedSourceURL)
+	if cachedURL, found, ok := h.getCachedSourceURL(cacheKey); ok {
+		if found {
+			return cachedURL, nil
+		}
+		return trimmedSourceURL, fmt.Errorf("source url not found")
+	}
+
+	tryKeys := make([]string, 0, 2)
+	tryKeys = append(tryKeys, trimmedSourceKey)
+	if fallbackKey := inferSourceKeyFromURL(trimmedSourceURL); fallbackKey != "" && fallbackKey != trimmedSourceKey {
+		tryKeys = append(tryKeys, fallbackKey)
+	}
+
+	for _, key := range tryKeys {
+		canonicalURL, err := h.resolveCanonicalSourceURL(parent, key, trimmedSourceURL)
+		if err != nil {
+			continue
+		}
+		if canonicalURL == "" {
+			continue
+		}
+
+		h.setCachedSourceURL(cacheKey, canonicalURL, true, 12*time.Hour)
+		return canonicalURL, nil
+	}
+
+	h.setCachedSourceURL(cacheKey, "", false, 2*time.Minute)
+	return trimmedSourceURL, fmt.Errorf("source url not found")
+}
+
 func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sourceKey, sourceURL string) (string, error) {
 	connector, ok := h.registry.Get(strings.TrimSpace(sourceKey))
 	if !ok {
@@ -320,6 +361,26 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 	}
 
 	return strings.TrimSpace(result.CoverImageURL), nil
+}
+
+func (h *DashboardHandler) resolveCanonicalSourceURL(parent context.Context, sourceKey, sourceURL string) (string, error) {
+	connector, ok := h.registry.Get(strings.TrimSpace(sourceKey))
+	if !ok {
+		return "", fmt.Errorf("connector not found")
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	result, err := connector.ResolveByURL(ctx, sourceURL)
+	if err != nil {
+		return "", err
+	}
+	if result == nil {
+		return "", fmt.Errorf("empty result")
+	}
+
+	return strings.TrimSpace(result.URL), nil
 }
 
 func inferSourceKeyFromURL(rawURL string) string {
@@ -366,6 +427,14 @@ func buildCoverCacheKey(sourceKey, sourceURL string, sourceItemID *string) strin
 	return base + "missing"
 }
 
+func buildSourceURLCacheKey(sourceKey, sourceURL string) string {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return strings.ToLower(strings.TrimSpace(sourceKey)) + "|missing"
+	}
+	return strings.ToLower(strings.TrimSpace(sourceKey)) + "|" + strings.ToLower(trimmedSourceURL)
+}
+
 func (h *DashboardHandler) getCachedCover(titleID string) (coverURL string, found bool, ok bool) {
 	h.cacheMu.RLock()
 	entry, exists := h.coverCache[titleID]
@@ -388,6 +457,34 @@ func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, 
 	h.cacheMu.Lock()
 	h.coverCache[titleID] = coverCacheEntry{
 		CoverURL:  coverURL,
+		Found:     found,
+		ExpiresAt: time.Now().UTC().Add(ttl),
+	}
+	h.cacheMu.Unlock()
+}
+
+func (h *DashboardHandler) getCachedSourceURL(cacheKey string) (sourceURL string, found bool, ok bool) {
+	h.cacheMu.RLock()
+	entry, exists := h.sourceURLCache[cacheKey]
+	h.cacheMu.RUnlock()
+	if !exists {
+		return "", false, false
+	}
+
+	if time.Now().UTC().After(entry.ExpiresAt) {
+		h.cacheMu.Lock()
+		delete(h.sourceURLCache, cacheKey)
+		h.cacheMu.Unlock()
+		return "", false, false
+	}
+
+	return entry.SourceURL, entry.Found, true
+}
+
+func (h *DashboardHandler) setCachedSourceURL(cacheKey, sourceURL string, found bool, ttl time.Duration) {
+	h.cacheMu.Lock()
+	h.sourceURLCache[cacheKey] = sourceURLCacheEntry{
+		SourceURL: sourceURL,
 		Found:     found,
 		ExpiresAt: time.Now().UTC().Add(ttl),
 	}

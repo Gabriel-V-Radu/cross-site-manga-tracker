@@ -12,6 +12,8 @@ import (
 type fakeRepo struct {
 	items         []repository.PollingTracker
 	updatedCount  int
+	updatedItemID *string
+	updatedURL    string
 	updatedLatest *float64
 	updatedAt     *time.Time
 }
@@ -20,8 +22,10 @@ func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(_ int64, latestKnownChapter *float64, latestReleaseAt *time.Time, _ time.Time) error {
+func (f *fakeRepo) UpdatePollingState(_ int64, _ int64, _ string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, _ bool, _ time.Time) error {
 	f.updatedCount++
+	f.updatedItemID = sourceItemID
+	f.updatedURL = sourceURL
 	f.updatedLatest = latestKnownChapter
 	f.updatedAt = latestReleaseAt
 	return nil
@@ -63,6 +67,12 @@ func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	if repo.updatedLatest == nil || *repo.updatedLatest != next {
 		t.Fatalf("expected latest chapter %.2f, got %#v", next, repo.updatedLatest)
 	}
+	if repo.updatedURL != "u" {
+		t.Fatalf("expected canonical source url to be saved, got %q", repo.updatedURL)
+	}
+	if repo.updatedItemID == nil || *repo.updatedItemID != "a" {
+		t.Fatalf("expected canonical source item id to be saved, got %#v", repo.updatedItemID)
+	}
 }
 
 func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T) {
@@ -87,7 +97,7 @@ func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T
 	}
 }
 
-func TestPollerRunOnce_UsesCheckedTimeWhenNewChapterHasNoReleaseDate(t *testing.T) {
+func TestPollerRunOnce_LeavesReleaseDateUnsetWhenNewChapterHasNoReleaseDate(t *testing.T) {
 	prev := 340.0
 	next := 341.0
 	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
@@ -101,7 +111,7 @@ func TestPollerRunOnce_UsesCheckedTimeWhenNewChapterHasNoReleaseDate(t *testing.
 		t.Fatalf("run once failed: %v", err)
 	}
 
-	if repo.updatedAt == nil {
-		t.Fatalf("expected fallback release date to be set when chapter increases")
+	if repo.updatedAt != nil {
+		t.Fatalf("expected release date to remain unset when source does not provide one")
 	}
 }

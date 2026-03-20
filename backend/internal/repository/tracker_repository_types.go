@@ -24,6 +24,8 @@ type PollingTracker struct {
 	ID                 int64
 	Title              string
 	Status             string
+	SourceID           int64
+	SourceItemID       *string
 	SourceURL          string
 	LatestKnownChapter *float64
 	SourceKey          string

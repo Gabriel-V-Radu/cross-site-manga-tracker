@@ -217,9 +217,6 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		if item.LatestReleaseAt != nil {
 			card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
 			card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
-		} else if item.LastCheckedAt != nil {
-			card.LatestReleaseFormatted = item.LastCheckedAt.Format("2006-01-02 15:04")
-			card.LatestReleaseAgo = relativeTime(*item.LastCheckedAt)
 		}
 
 		if item.LatestKnownChapter != nil {
@@ -251,6 +248,12 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 
 		card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[item.SourceID])
 		card.SourceLogoLabel = sourceName
+
+		canonicalSourceURL, waitingSourceURL := h.getCachedOrQueueSourceURL(sourceKey, item.SourceURL, pageKey)
+		card.SourceURL = canonicalSourceURL
+		if waitingSourceURL {
+			pendingCovers = true
+		}
 
 		if item.LatestKnownChapter != nil {
 			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, pageKey)
@@ -357,6 +360,56 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 		}
 
 		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID)
+	}()
+}
+
+func (h *DashboardHandler) getCachedOrQueueSourceURL(sourceKey, sourceURL string, pageKey string) (string, bool) {
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	if trimmedSourceURL == "" {
+		return "", false
+	}
+
+	trimmedSourceKey := strings.TrimSpace(sourceKey)
+	if trimmedSourceKey == "" {
+		return trimmedSourceURL, false
+	}
+
+	cacheKey := buildSourceURLCacheKey(trimmedSourceKey, trimmedSourceURL)
+	if cachedSourceURL, found, ok := h.getCachedSourceURL(cacheKey); ok {
+		if found {
+			return cachedSourceURL, false
+		}
+		h.queueSourceURLResolve(trimmedSourceKey, trimmedSourceURL, cacheKey, pageKey)
+		return trimmedSourceURL, true
+	}
+
+	h.queueSourceURLResolve(trimmedSourceKey, trimmedSourceURL, cacheKey, pageKey)
+	return trimmedSourceURL, true
+}
+
+func (h *DashboardHandler) queueSourceURLResolve(sourceKey, sourceURL string, cacheKey string, pageKey string) {
+	h.sourceURLFetchMu.Lock()
+	if h.sourceURLInFlight[cacheKey] {
+		h.sourceURLFetchMu.Unlock()
+		return
+	}
+	h.sourceURLInFlight[cacheKey] = true
+	h.sourceURLFetchMu.Unlock()
+
+	go func() {
+		h.sourceURLFetchSem <- struct{}{}
+		defer func() {
+			<-h.sourceURLFetchSem
+			h.sourceURLFetchMu.Lock()
+			delete(h.sourceURLInFlight, cacheKey)
+			h.sourceURLFetchMu.Unlock()
+		}()
+
+		if pageKey != "" && !h.isActiveTrackersPageKey(pageKey) {
+			return
+		}
+
+		_, _ = h.fetchCanonicalSourceURL(context.Background(), sourceKey, sourceURL)
 	}()
 }
 

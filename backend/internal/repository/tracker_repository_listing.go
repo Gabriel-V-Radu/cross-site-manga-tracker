@@ -225,7 +225,7 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	query := `
 		SELECT
-			t.id, t.title, t.status, t.source_url, t.latest_known_chapter, s.key
+			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url, t.latest_known_chapter, s.key
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
 	`
@@ -239,9 +239,13 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	items := make([]PollingTracker, 0)
 	for rows.Next() {
 		var item PollingTracker
+		var sourceItemID sql.NullString
 		var latest sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.SourceURL, &latest, &item.SourceKey); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL, &latest, &item.SourceKey); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
+		}
+		if sourceItemID.Valid {
+			item.SourceItemID = &sourceItemID.String
 		}
 		if latest.Valid {
 			item.LatestKnownChapter = &latest.Float64
@@ -256,19 +260,62 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	return items, nil
 }
 
-func (r *TrackerRepository) UpdatePollingState(id int64, latestKnownChapter *float64, latestReleaseAt *time.Time, checkedAt time.Time) error {
+func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, clearLatestReleaseAt bool, checkedAt time.Time) error {
 	var latestReleaseValue any
 	if latestReleaseAt != nil {
 		latestReleaseValue = latestReleaseAt.UTC()
 	}
+	trimmedSourceURL := strings.TrimSpace(sourceURL)
+	trimmedCurrentSourceURL := strings.TrimSpace(currentSourceURL)
+	var sourceURLValue any
+	if trimmedSourceURL != "" {
+		sourceURLValue = trimmedSourceURL
+	}
+	var sourceItemIDValue any
+	if sourceItemID != nil {
+		trimmedSourceItemID := strings.TrimSpace(*sourceItemID)
+		if trimmedSourceItemID != "" {
+			sourceItemIDValue = trimmedSourceItemID
+		}
+	}
 
 	_, err := r.db.Exec(`
 		UPDATE trackers
-		SET latest_known_chapter = ?, latest_release_at = COALESCE(?, latest_release_at), last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
+		SET source_item_id = COALESCE(?, source_item_id),
+			source_url = COALESCE(?, source_url),
+			latest_known_chapter = ?,
+			latest_release_at = CASE
+				WHEN ? THEN NULL
+				WHEN ? IS NOT NULL THEN ?
+				ELSE latest_release_at
+			END,
+			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, latestKnownChapter, latestReleaseValue, checkedAt.UTC(), id)
+	`, sourceItemIDValue, sourceURLValue, latestKnownChapter, clearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt.UTC(), id)
 	if err != nil {
 		return fmt.Errorf("update polling state: %w", err)
+	}
+
+	if sourceID > 0 && trimmedSourceURL != "" {
+		if trimmedCurrentSourceURL != "" && !strings.EqualFold(trimmedCurrentSourceURL, trimmedSourceURL) {
+			if _, err := r.db.Exec(`
+				DELETE FROM tracker_sources
+				WHERE tracker_id = ? AND source_id = ? AND LOWER(source_url) = LOWER(?)
+			`, id, sourceID, trimmedCurrentSourceURL); err != nil {
+				return fmt.Errorf("delete stale polling tracker source: %w", err)
+			}
+		}
+
+		if _, err := r.db.Exec(`
+			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(tracker_id, source_id, source_url)
+			DO UPDATE SET
+				source_item_id = excluded.source_item_id,
+				updated_at = CURRENT_TIMESTAMP
+		`, id, sourceID, sourceItemID, trimmedSourceURL); err != nil {
+			return fmt.Errorf("upsert polling tracker source: %w", err)
+		}
 	}
 	return nil
 }
