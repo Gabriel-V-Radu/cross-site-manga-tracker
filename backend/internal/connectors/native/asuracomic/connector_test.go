@@ -221,6 +221,48 @@ func TestAsuraComicConnectorUsesPublishedAtForLatestChapter(t *testing.T) {
 	}
 }
 
+func TestAsuraComicConnectorUsesPublishedAtFromHTMLSerializedChapters(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+	})
+	mux.HandleFunc("/comics/a-villains-will-to-survive-7f873ca6", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="A Villain's Will to Survive - Asura Scans">
+</head>
+<body>
+  <astro-island props="{&quot;chapters&quot;:[3,[[0,{&quot;number&quot;:[0,49],&quot;published_at&quot;:[0,&quot;2026-03-20T14:38:02Z&quot;]}],[0,{&quot;number&quot;:[0,48],&quot;published_at&quot;:[0,&quot;2026-03-14T14:06:02Z&quot;]}]]}"></astro-island>
+  <a href="/comics/a-villains-will-to-survive-7f873ca6/chapter/49">Chapter 49</a>
+  <div class="text-sm text-white/40">1 hour ago</div>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	resolved, err := conn.ResolveByURL(context.Background(), "https://asurascans.com/comics/a-villains-will-to-survive-7f873ca6")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+
+	if resolved.LatestChapter == nil || *resolved.LatestChapter != 49 {
+		t.Fatalf("expected latest chapter 49, got %v", resolved.LatestChapter)
+	}
+	if resolved.LastUpdatedAt == nil {
+		t.Fatalf("expected published_at timestamp for latest chapter")
+	}
+
+	expected := time.Date(2026, time.March, 20, 14, 38, 2, 0, time.UTC)
+	if !resolved.LastUpdatedAt.Equal(expected) {
+		t.Fatalf("expected latest chapter release time %s, got %s", expected.Format(time.RFC3339), resolved.LastUpdatedAt.UTC().Format(time.RFC3339))
+	}
+}
+
 func TestAsuraComicConnectorSearchSupportsSeriesHrefWithoutLeadingSlash(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/browse", func(w http.ResponseWriter, r *http.Request) {

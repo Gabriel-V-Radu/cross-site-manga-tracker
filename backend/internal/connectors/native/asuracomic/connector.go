@@ -26,6 +26,8 @@ var (
 	chapterHrefPattern         = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
 	chapterPublishedEscPattern = regexp.MustCompile(`(?is)\\"name\\":\s*(\d+(?:\.\d+)?).*?\\"published_at\\":\\"([^\\"]+)\\"`)
 	chapterPublishedRawPattern = regexp.MustCompile(`(?is)"name":\s*(\d+(?:\.\d+)?).*?"published_at":"([^"]+)"`)
+	chapterPublishedEscNumberPattern = regexp.MustCompile(`(?is)\\"number\\":\s*(?:\[0,)?\s*(\d+(?:\.\d+)?)\s*\]?[^\r\n]*?\\"published_at\\":\s*(?:\[0,)?\\"([^\\"]+)\\"\]?`)
+	chapterPublishedHTMLPattern      = regexp.MustCompile(`(?is)&quot;number&quot;:\s*\[0,(\d+(?:\.\d+)?)\].*?&quot;published_at&quot;:\s*\[0,&quot;([^&]+)&quot;\]`)
 	metaTitlePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
 	titleTagPattern            = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
 	metaImagePattern           = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content=["']([^"']+)["']`)
@@ -548,7 +550,7 @@ func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
 		return nil
 	}
 
-	for _, pattern := range []*regexp.Regexp{chapterPublishedEscPattern, chapterPublishedRawPattern} {
+	for _, pattern := range []*regexp.Regexp{chapterPublishedEscPattern, chapterPublishedRawPattern, chapterPublishedEscNumberPattern, chapterPublishedHTMLPattern} {
 		matches := pattern.FindAllStringSubmatch(body, -1)
 		for _, match := range matches {
 			if len(match) < 3 {
