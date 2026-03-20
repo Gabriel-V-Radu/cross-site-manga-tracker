@@ -18,15 +18,11 @@ type DashboardHandler struct {
 	profileResolver    *profileContextResolver
 	registry           *connectors.Registry
 	coverCache         map[string]coverCacheEntry
-	sourceURLCache     map[string]sourceURLCacheEntry
 	cacheMu            sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}
 	mangafireCoverSem  chan struct{}
-	sourceURLFetchMu   sync.Mutex
-	sourceURLInFlight  map[string]bool
-	sourceURLFetchSem  chan struct{}
 	chapterURLCache    map[string]chapterURLCacheEntry
 	chapterURLCacheMu  sync.RWMutex
 	chapterURLFetchMu  sync.Mutex
@@ -41,12 +37,6 @@ type DashboardHandler struct {
 
 type coverCacheEntry struct {
 	CoverURL  string
-	Found     bool
-	ExpiresAt time.Time
-}
-
-type sourceURLCacheEntry struct {
-	SourceURL string
 	Found     bool
 	ExpiresAt time.Time
 }
@@ -198,12 +188,9 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,
 		coverCache:         make(map[string]coverCacheEntry),
-		sourceURLCache:     make(map[string]sourceURLCacheEntry),
 		coverInFlight:      make(map[string]bool),
 		coverFetchSem:      make(chan struct{}, 8),
 		mangafireCoverSem:  make(chan struct{}, 3),
-		sourceURLInFlight:  make(map[string]bool),
-		sourceURLFetchSem:  make(chan struct{}, 8),
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 10),
