@@ -69,23 +69,15 @@ var (
 )
 
 type Connector struct {
-	baseURL            string
-	allowedHost        []string
-	httpClient         *http.Client
-	flareSolverrURL    string
-	flareSolverrClient *http.Client
-	cfClearanceCookie  string // value of cf_clearance cookie; bypasses Cloudflare rate-limit (1015)
+	baseURL         string
+	allowedHost     []string
+	httpClient      *http.Client
+	cfBrowserURL    string
+	cfBrowserClient *http.Client
 
 	requestMu          sync.Mutex
 	nextAllowedRequest time.Time
 	minRequestInterval time.Duration
-
-	fsSessMu        sync.Mutex
-	fsSessID        string
-	fsSessErr       bool
-	fsSessCreatedAt time.Time
-	fsSessRedirects  int       // consecutive redirect errors; triggers recreation at threshold
-	fsCooldownUntil time.Time // when set, requests fail fast (CF challenge timeouts indicate expired cookie)
 
 	indexMu        sync.RWMutex
 	cachedMangaIDs []string
@@ -103,26 +95,11 @@ func NewConnector() *Connector {
 	}
 }
 
-func (c *Connector) WithFlareSolverrURL(u string) *Connector {
-	c.flareSolverrURL = strings.TrimRight(u, "/")
-	c.flareSolverrClient = &http.Client{Timeout: 90 * time.Second}
+func (c *Connector) WithCFBrowserURL(u string) *Connector {
+	c.cfBrowserURL = strings.TrimRight(u, "/")
+	c.cfBrowserClient = &http.Client{Timeout: 60 * time.Second}
 	c.minRequestInterval = 10 * time.Second
 	return c
-}
-
-func (c *Connector) WithCFClearanceCookie(v string) *Connector {
-	c.cfClearanceCookie = strings.TrimSpace(v)
-	return c
-}
-
-// SetCFClearanceCookie updates the cf_clearance cookie at runtime and forces
-// the FlareSolverr session to be recreated so the new cookie takes effect.
-func (c *Connector) SetCFClearanceCookie(v string) {
-	c.fsSessMu.Lock()
-	defer c.fsSessMu.Unlock()
-	c.cfClearanceCookie = strings.TrimSpace(v)
-	c.fsSessErr = true        // trigger session recreation on next request
-	c.fsCooldownUntil = time.Time{} // clear any active CF cooldown
 }
 
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
@@ -424,289 +401,64 @@ func (c *Connector) enrichSearchResult(ctx context.Context, result *connectors.M
 	}
 }
 
-// fsPost sends an arbitrary command to the FlareSolverr /v1 endpoint and returns
-// the raw decoded response struct. ctx must already carry a deadline.
-func (c *Connector) fsPost(ctx context.Context, payload any) (fsSolution struct {
-	Status   int    `json:"status"`
-	URL      string `json:"url"`
-	Response string `json:"response"`
-}, fsStatus string, fsMessage string, err error) {
-	type fsResponseEnvelope struct {
-		Status   string `json:"status"`
-		Message  string `json:"message"`
-		Solution struct {
-			Status   int    `json:"status"`
-			URL      string `json:"url"`
-			Response string `json:"response"`
-		} `json:"solution"`
+// fetchViaCFBrowser fetches a page via the CF browser sidecar and returns the HTML.
+func (c *Connector) fetchViaCFBrowser(ctx context.Context, endpoint string) (string, error) {
+	type fetchReq struct {
+		URL     string `json:"url"`
+		Timeout int    `json:"timeout"`
+	}
+	type fetchResp struct {
+		URL  string `json:"url"`
+		HTML string `json:"html"`
 	}
 
-	body, err := json.Marshal(payload)
+	body, _ := json.Marshal(fetchReq{URL: endpoint, Timeout: 30000})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfBrowserURL+"/fetch", bytes.NewReader(body))
 	if err != nil {
-		return fsSolution, "", "", fmt.Errorf("flaresolverr marshal: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.flareSolverrURL+"/v1", bytes.NewReader(body))
-	if err != nil {
-		return fsSolution, "", "", fmt.Errorf("flaresolverr create request: %w", err)
+		return "", fmt.Errorf("cf-browser create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := c.flareSolverrClient.Do(req)
+	res, err := c.cfBrowserClient.Do(req)
 	if err != nil {
-		return fsSolution, "", "", fmt.Errorf("flaresolverr request failed: %w", err)
+		return "", fmt.Errorf("cf-browser request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	rawBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		return fsSolution, "", "", fmt.Errorf("flaresolverr read response: %w", err)
-	}
-	var env fsResponseEnvelope
-	if err := json.Unmarshal(rawBody, &env); err != nil {
-		return fsSolution, "", "", fmt.Errorf("flaresolverr parse response: %w", err)
-	}
-	return env.Solution, env.Status, env.Message, nil
-}
-
-// ensureFSSession guarantees that c.fsSessID is set and that the session has
-// already visited the MangaFire homepage (so Cloudflare cookies are primed).
-// Must be called with the requestMu already held or otherwise serialised.
-func (c *Connector) ensureFSSession(ctx context.Context) error {
-	c.fsSessMu.Lock()
-	defer c.fsSessMu.Unlock()
-
-	const sessionMaxAge = 20 * time.Minute
-	const maxConsecutiveRedirects = 3
-	if c.fsSessID != "" && !c.fsSessErr {
-		if c.fsSessRedirects < maxConsecutiveRedirects && time.Since(c.fsSessCreatedAt) < sessionMaxAge {
-			return nil
-		}
-		// Session is stale or poisoned — force recreation.
+		return "", fmt.Errorf("cf-browser read response: %w", err)
 	}
 
-	// Destroy the old broken session if one exists.
-	if c.fsSessID != "" {
-		_ = c.destroyFSSession(ctx, c.fsSessID)
-		c.fsSessID = ""
-		c.fsSessErr = false
-		c.fsSessRedirects = 0
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("cf-browser error (status %d): %s", res.StatusCode, string(rawBody))
 	}
 
-	// Create a new session.
-	type createReq struct {
-		Cmd     string `json:"cmd"`
-		Session string `json:"session"`
-	}
-	type createResp struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-		Session string `json:"session"`
-	}
-	createBody, _ := json.Marshal(createReq{Cmd: "sessions.create", Session: "mangafire"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.flareSolverrURL+"/v1", bytes.NewReader(createBody))
-	if err != nil {
-		return fmt.Errorf("flaresolverr create session: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.flareSolverrClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("flaresolverr create session request: %w", err)
-	}
-	defer res.Body.Close()
-	rawBody, _ := io.ReadAll(res.Body)
-	var cr createResp
-	_ = json.Unmarshal(rawBody, &cr)
-	if cr.Status != "ok" && cr.Session == "" {
-		return fmt.Errorf("flaresolverr create session failed: %s", cr.Message)
-	}
-	sessID := cr.Session
-	if sessID == "" {
-		sessID = "mangafire"
+	var resp fetchResp
+	if err := json.Unmarshal(rawBody, &resp); err != nil {
+		return "", fmt.Errorf("cf-browser parse response: %w", err)
 	}
 
-	// Warm up the session by visiting the homepage so MangaFire sets its cookies.
-	type fsCookie struct {
-		Name   string `json:"name"`
-		Value  string `json:"value"`
-		Domain string `json:"domain"`
-	}
-	type getReq struct {
-		Cmd        string     `json:"cmd"`
-		URL        string     `json:"url"`
-		Session    string     `json:"session"`
-		MaxTimeout int        `json:"maxTimeout"`
-		Cookies    []fsCookie `json:"cookies,omitempty"`
-	}
-	buildCookies := func() []fsCookie {
-		if c.cfClearanceCookie == "" {
-			return nil
-		}
-		return []fsCookie{{Name: "cf_clearance", Value: c.cfClearanceCookie, Domain: "mangafire.to"}}
-	}
-	sol, status, msg, err := c.fsPost(ctx, getReq{
-		Cmd: "request.get", URL: c.baseURL + "/home",
-		Session: sessID, MaxTimeout: 60000,
-		Cookies: buildCookies(),
-	})
-	if err != nil {
-		_ = c.destroyFSSession(ctx, sessID)
-		return fmt.Errorf("flaresolverr warm-up: %w", err)
-	}
-	if status != "ok" {
-		_ = c.destroyFSSession(ctx, sessID)
-		if strings.Contains(msg, "Timeout after") {
-			c.fsCooldownUntil = time.Now().Add(10 * time.Minute)
-		}
-		return fmt.Errorf("flaresolverr warm-up error: %s", msg)
-	}
-	if sol.Status < 200 || sol.Status >= 300 {
-		_ = c.destroyFSSession(ctx, sessID)
-		return fmt.Errorf("flaresolverr warm-up bad status: %d", sol.Status)
-	}
-
-	c.fsSessID = sessID
-	c.fsSessCreatedAt = time.Now()
-	c.fsSessRedirects = 0
-	return nil
-}
-
-func (c *Connector) destroyFSSession(ctx context.Context, sessID string) error {
-	type destroyReq struct {
-		Cmd     string `json:"cmd"`
-		Session string `json:"session"`
-	}
-	body, _ := json.Marshal(destroyReq{Cmd: "sessions.destroy", Session: sessID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.flareSolverrURL+"/v1", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.flareSolverrClient.Do(req)
-	if err != nil {
-		return err
-	}
-	res.Body.Close()
-	return nil
-}
-
-func (c *Connector) fetchViaFlareSolverr(ctx context.Context, endpoint string) (string, error) {
-	// Fail fast if CF is actively challenging (cookie likely expired).
-	c.fsSessMu.Lock()
-	cooldownUntil := c.fsCooldownUntil
-	c.fsSessMu.Unlock()
-	if time.Now().Before(cooldownUntil) {
-		return "", fmt.Errorf("flaresolverr CF cooldown active for %s (cf_clearance may be expired)", time.Until(cooldownUntil).Round(time.Second))
-	}
-
-	if err := c.ensureFSSession(ctx); err != nil {
-		return "", fmt.Errorf("flaresolverr session: %w", err)
-	}
-
-	c.fsSessMu.Lock()
-	sessID := c.fsSessID
-	cfClearance := c.cfClearanceCookie
-	c.fsSessMu.Unlock()
-
-	type fsCookie struct {
-		Name   string `json:"name"`
-		Value  string `json:"value"`
-		Domain string `json:"domain"`
-	}
-	type getReq struct {
-		Cmd        string     `json:"cmd"`
-		URL        string     `json:"url"`
-		Session    string     `json:"session"`
-		MaxTimeout int        `json:"maxTimeout"`
-		Cookies    []fsCookie `json:"cookies,omitempty"`
-	}
-	buildPayload := func(url string) getReq {
-		var cookies []fsCookie
-		if cfClearance != "" {
-			cookies = []fsCookie{{Name: "cf_clearance", Value: cfClearance, Domain: "mangafire.to"}}
-		}
-		return getReq{
-			Cmd: "request.get", URL: url,
-			Session: sessID, MaxTimeout: 60000,
-			Cookies: cookies,
+	// Check if the browser was redirected away from the requested page.
+	if resp.URL != "" {
+		reqURL, err1 := url.Parse(endpoint)
+		retURL, err2 := url.Parse(resp.URL)
+		if err1 == nil && err2 == nil && path.Clean(retURL.Path) != path.Clean(reqURL.Path) {
+			return "", fmt.Errorf("cf-browser redirected to %s (expected %s)", resp.URL, endpoint)
 		}
 	}
 
-	isRedirected := func(requestedURL, finalURL string) bool {
-		if finalURL == "" {
-			return false
-		}
-		req, err1 := url.Parse(requestedURL)
-		ret, err2 := url.Parse(finalURL)
-		if err1 != nil || err2 != nil {
-			return false
-		}
-		return path.Clean(ret.Path) != path.Clean(req.Path)
-	}
-
-	sol, status, msg, err := c.fsPost(ctx, buildPayload(endpoint))
-	if err != nil {
-		return "", fmt.Errorf("flaresolverr request failed: %w", err)
-	}
-	if status != "ok" {
-		if strings.Contains(msg, "Timeout after") {
-			c.fsSessMu.Lock()
-			c.fsCooldownUntil = time.Now().Add(10 * time.Minute)
-			c.fsSessMu.Unlock()
-		}
-		return "", fmt.Errorf("flaresolverr error: %s", msg)
-	}
-	if sol.Status < 200 || sol.Status >= 300 {
-		return "", &httpStatusError{StatusCode: sol.Status}
-	}
-
-	// MangaFire redirected us — session cookies may have expired. Re-warm the
-	// session by visiting the homepage to refresh them, then retry once.
-	if isRedirected(endpoint, sol.URL) {
-		// Re-warm: visit homepage to refresh MangaFire's session cookies.
-		_, _, _, _ = c.fsPost(ctx, buildPayload(c.baseURL+"/home"))
-
-		// Retry the original request with freshened cookies.
-		sol, status, msg, err = c.fsPost(ctx, buildPayload(endpoint))
-		if err != nil {
-			return "", fmt.Errorf("flaresolverr request failed (after rewarm): %w", err)
-		}
-		if status != "ok" {
-			if strings.Contains(msg, "Timeout after") {
-				c.fsSessMu.Lock()
-				c.fsCooldownUntil = time.Now().Add(10 * time.Minute)
-				c.fsSessMu.Unlock()
-			}
-			return "", fmt.Errorf("flaresolverr error (after rewarm): %s", msg)
-		}
-		if sol.Status < 200 || sol.Status >= 300 {
-			return "", &httpStatusError{StatusCode: sol.Status}
-		}
-
-		// If still redirected after re-warm, the session is likely poisoned.
-		if isRedirected(endpoint, sol.URL) {
-			c.fsSessMu.Lock()
-			c.fsSessRedirects++
-			c.fsSessMu.Unlock()
-			return "", fmt.Errorf("flaresolverr redirected to %s (expected %s)", sol.URL, endpoint)
-		}
-	}
-
-	// Successful fetch — reset the redirect counter.
-	c.fsSessMu.Lock()
-	c.fsSessRedirects = 0
-	c.fsSessMu.Unlock()
-
-	return sol.Response, nil
+	return resp.HTML, nil
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
 	const maxAttempts = 3
 
-	if c.flareSolverrURL != "" {
+	if c.cfBrowserURL != "" {
 		if err := c.waitForRequestWindow(ctx); err != nil {
 			return "", err
 		}
-		body, err := c.fetchViaFlareSolverr(ctx, endpoint)
+		body, err := c.fetchViaCFBrowser(ctx, endpoint)
 		c.deferRequests(c.minRequestInterval)
 		return body, err
 	}

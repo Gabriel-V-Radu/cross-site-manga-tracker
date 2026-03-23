@@ -15,11 +15,8 @@ func NewRegistry(cfg config.Config) *connectors.Registry {
 	registry := connectors.NewRegistry()
 
 	mf := mangafire.NewConnector()
-	if cfg.FlareSolverrURL != "" {
-		mf.WithFlareSolverrURL(cfg.FlareSolverrURL)
-	}
-	if cfg.MangafireCFClearance != "" {
-		mf.WithCFClearanceCookie(cfg.MangafireCFClearance)
+	if cfg.CFBrowserURL != "" {
+		mf.WithCFBrowserURL(cfg.CFBrowserURL)
 	}
 
 	_ = registry.Register(mangadex.NewConnector())

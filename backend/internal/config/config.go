@@ -10,33 +10,31 @@ import (
 )
 
 type Config struct {
-	Environment          string
-	AppName              string
-	Port                 string
-	LogLevel             slog.Level
-	SQLitePath           string
-	MigrationsPath       string
-	SeedDefaultData      bool
-	PollingEnabled       bool
-	PollingMinutes       int
-	FlareSolverrURL      string
-	MangafireCFClearance string
+	Environment     string
+	AppName         string
+	Port            string
+	LogLevel        slog.Level
+	SQLitePath      string
+	MigrationsPath  string
+	SeedDefaultData bool
+	PollingEnabled  bool
+	PollingMinutes  int
+	CFBrowserURL    string
 }
 
 func Load() (Config, error) {
 	_ = godotenv.Load()
 
 	cfg := Config{
-		Environment:          getEnv("APP_ENV", "development"),
-		AppName:              getEnv("APP_NAME", "cross-site-tracker"),
-		Port:                 getEnv("APP_PORT", "8080"),
-		SQLitePath:           getEnv("SQLITE_PATH", "./data/app.sqlite"),
-		MigrationsPath:       getEnv("MIGRATIONS_PATH", "./migrations"),
-		SeedDefaultData:      getEnvAsBool("SEED_DEFAULT_DATA", true),
-		PollingEnabled:       getEnvAsBool("POLLING_ENABLED", true),
-		PollingMinutes:       getEnvAsInt("POLLING_MINUTES", 30),
-		FlareSolverrURL:      getEnv("FLARESOLVERR_URL", ""),
-		MangafireCFClearance: getEnv("MANGAFIRE_CF_CLEARANCE", ""),
+		Environment:     getEnv("APP_ENV", "development"),
+		AppName:         getEnv("APP_NAME", "cross-site-tracker"),
+		Port:            getEnv("APP_PORT", "8080"),
+		SQLitePath:      getEnv("SQLITE_PATH", "./data/app.sqlite"),
+		MigrationsPath:  getEnv("MIGRATIONS_PATH", "./migrations"),
+		SeedDefaultData: getEnvAsBool("SEED_DEFAULT_DATA", true),
+		PollingEnabled:  getEnvAsBool("POLLING_ENABLED", true),
+		PollingMinutes:  getEnvAsInt("POLLING_MINUTES", 30),
+		CFBrowserURL:    getEnv("CF_BROWSER_URL", ""),
 	}
 
 	if cfg.PollingMinutes <= 0 {
