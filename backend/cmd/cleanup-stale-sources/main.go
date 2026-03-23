@@ -83,7 +83,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	activeSourceKeys := buildActiveSourceKeySet()
+	activeSourceKeys := buildActiveSourceKeySet(cfg)
 	slog.Info("loaded active source keys from registry", "count", len(activeSourceKeys), "keys", sortedMapKeys(activeSourceKeys))
 
 	staleSources, staleSourceKeyByID, err := listStaleSources(db, activeSourceKeys)
@@ -170,8 +170,8 @@ func main() {
 	)
 }
 
-func buildActiveSourceKeySet() map[string]struct{} {
-	registry := connectordefaults.NewRegistry()
+func buildActiveSourceKeySet(cfg config.Config) map[string]struct{} {
+	registry := connectordefaults.NewRegistry(cfg)
 	descriptors := registry.List()
 
 	keys := make(map[string]struct{}, len(descriptors))

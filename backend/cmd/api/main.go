@@ -46,7 +46,7 @@ func main() {
 		}
 	}
 
-	connectorRegistry := connectordefaults.NewRegistry()
+	connectorRegistry := connectordefaults.NewRegistry(cfg)
 
 	app := apihttp.NewServerWithRegistry(cfg, db, connectorRegistry)
 

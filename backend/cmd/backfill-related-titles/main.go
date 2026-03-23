@@ -67,7 +67,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	registry := connectordefaults.NewRegistry()
+	registry := connectordefaults.NewRegistry(cfg)
 
 	items, err := listTrackersForBackfill(db, *profileID, *limit)
 	if err != nil {

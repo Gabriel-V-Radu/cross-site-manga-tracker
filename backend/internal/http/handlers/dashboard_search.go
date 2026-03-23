@@ -41,7 +41,7 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 
 	searchTimeout := 5 * time.Second
 	if source.Key == "mangafire" {
-		searchTimeout = 12 * time.Second
+		searchTimeout = 75 * time.Second
 	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), searchTimeout)

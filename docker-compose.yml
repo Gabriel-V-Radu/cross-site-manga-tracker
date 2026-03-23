@@ -1,4 +1,17 @@
 services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: cross-site-tracker-flaresolverr
+    environment:
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8191/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   api:
     build:
       context: .
@@ -9,8 +22,13 @@ services:
     environment:
       - SQLITE_PATH=/app/data/app.sqlite
       - MIGRATIONS_PATH=/app/migrations
+      - FLARESOLVERR_URL=http://flaresolverr:8191
+      - MANGAFIRE_CF_CLEARANCE=8PTZrxwHshS.KJ2EKjdMA4kDXsNEvBar7paQhd5x4kE-1774220803-1.2.1.1-jYCQpNok6rOWh9A5uPO.0P_TRNISK_2jiuqkg1VRmonOd8x4TyrKrXWG.zLW05LDclPe_jDcBJYxtmM2BnaMp8P5WLY59MKhmbpmOUuHMjybSNet9IRjbp6YfN7E_xBsQ2nG4I3aLqEGkK7ZFXnbzHRjTaBFHDW6LisRTsxYrGHfRvckr0AIJrL8AW_v2bSZXRdftvbq_v8i70LrVSVBibu4zIDkgNWA9MkT8ZxwO7on_eF_d1GoXUr_GR2hRLrY
     ports:
       - "8080:8080"
     volumes:
       - ./backend/data:/app/data
     restart: unless-stopped
+    depends_on:
+      flaresolverr:
+        condition: service_healthy

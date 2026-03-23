@@ -25,7 +25,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)
 	if connectorRegistry == nil {
-		connectorRegistry = connectordefaults.NewRegistry()
+		connectorRegistry = connectordefaults.NewRegistry(cfg)
 	}
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)

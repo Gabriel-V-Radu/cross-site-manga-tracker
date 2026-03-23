@@ -306,7 +306,7 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 
 	resolveTimeout := 8 * time.Second
 	if strings.EqualFold(strings.TrimSpace(sourceKey), "mangafire") {
-		resolveTimeout = 15 * time.Second
+		resolveTimeout = 75 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
 	defer cancel()

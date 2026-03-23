@@ -1,6 +1,7 @@
 package defaults
 
 import (
+	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/asuracomic"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/flamecomics"
@@ -10,10 +11,19 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/webtoons"
 )
 
-func NewRegistry() *connectors.Registry {
+func NewRegistry(cfg config.Config) *connectors.Registry {
 	registry := connectors.NewRegistry()
+
+	mf := mangafire.NewConnector()
+	if cfg.FlareSolverrURL != "" {
+		mf.WithFlareSolverrURL(cfg.FlareSolverrURL)
+	}
+	if cfg.MangafireCFClearance != "" {
+		mf.WithCFClearanceCookie(cfg.MangafireCFClearance)
+	}
+
 	_ = registry.Register(mangadex.NewConnector())
-	_ = registry.Register(mangafire.NewConnector())
+	_ = registry.Register(mf)
 	_ = registry.Register(asuracomic.NewConnector())
 	_ = registry.Register(flamecomics.NewConnector())
 	_ = registry.Register(mgeko.NewConnector())

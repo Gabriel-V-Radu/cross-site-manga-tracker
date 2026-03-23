@@ -91,12 +91,16 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			continue
 		}
 
-		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		resolveTimeout := 15 * time.Second
+		if tracker.SourceKey == "mangafire" {
+			resolveTimeout = 75 * time.Second
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
 		result, resolveErr := connector.ResolveByURL(requestCtx, tracker.SourceURL)
 		cancel()
 
 		if resolveErr != nil {
-			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "url", tracker.SourceURL, "error", resolveErr)
 			continue
 		}
 
