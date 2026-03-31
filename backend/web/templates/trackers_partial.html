@@ -140,14 +140,25 @@
 
         window.__coverRefreshAttempts[refreshKey] = attempts + 1;
         var delayMs = Math.min(3000, 600 + (attempts * 200));
-        window.__pendingTrackersRefreshTimer = window.setTimeout(function () {
+        var doSilentRefresh = function () {
             window.__pendingTrackersRefreshTimer = null;
             if (window.__freezeTrackersOrder) {
                 return;
             }
+
+            var sel = window.getSelection ? window.getSelection() : null;
+            if (sel && sel.toString()) {
+                var trackersZone = document.getElementById('trackers-zone');
+                if (trackersZone && sel.anchorNode && trackersZone.contains(sel.anchorNode)) {
+                    window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
+                    return;
+                }
+            }
+
             window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
-        }, delayMs);
+        };
+        window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, delayMs);
     })();
 </script>
 {{else}}

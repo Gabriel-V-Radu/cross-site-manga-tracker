@@ -309,8 +309,7 @@ func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, so
 		if found {
 			return cachedURL, false
 		}
-		h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, cacheKey, pageKey)
-		return "", true
+		return "", false
 	}
 
 	if strings.TrimSpace(sourceURL) == "" {
@@ -372,8 +371,7 @@ func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL strin
 		if found {
 			return cachedChapterURL, false
 		}
-		h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey, pageKey)
-		return trimmedSourceURL, true
+		return trimmedSourceURL, false
 	}
 
 	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey, pageKey)
