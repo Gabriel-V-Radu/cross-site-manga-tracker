@@ -7,6 +7,57 @@ window.escapeHtml = function (value) {
         .replace(/'/g, '&#39;');
 };
 
+window.syncTrackerCardHoverState = function (clientX, clientY) {
+    if (!document) {
+        return;
+    }
+
+    var hasCoordinates = typeof clientX === 'number' && typeof clientY === 'number';
+    if (hasCoordinates) {
+        window.__lastPointerClientX = clientX;
+        window.__lastPointerClientY = clientY;
+    }
+
+    var activeX = window.__lastPointerClientX;
+    var activeY = window.__lastPointerClientY;
+    var hasActivePointer = typeof activeX === 'number' && typeof activeY === 'number';
+    var hoveredCard = null;
+
+    if (hasActivePointer && typeof document.elementFromPoint === 'function') {
+        var elementUnderPointer = document.elementFromPoint(activeX, activeY);
+        hoveredCard = elementUnderPointer && elementUnderPointer.closest
+            ? elementUnderPointer.closest('.tracker-card')
+            : null;
+    }
+
+    var cards = document.querySelectorAll('.tracker-card--hovered');
+    Array.prototype.forEach.call(cards, function (card) {
+        if (card !== hoveredCard) {
+            card.classList.remove('tracker-card--hovered');
+        }
+    });
+
+    if (!hoveredCard) {
+        return;
+    }
+
+    hoveredCard.classList.add('tracker-card--hovered');
+};
+
+document.addEventListener('pointermove', function (event) {
+    if (!event || event.pointerType === 'touch') {
+        return;
+    }
+
+    window.syncTrackerCardHoverState(event.clientX, event.clientY);
+});
+
+document.addEventListener('pointerleave', function () {
+    window.__lastPointerClientX = null;
+    window.__lastPointerClientY = null;
+    window.syncTrackerCardHoverState();
+}, true);
+
 window.dispatchTrackersChanged = function (reason) {
     if (!document || !document.body) {
         return;

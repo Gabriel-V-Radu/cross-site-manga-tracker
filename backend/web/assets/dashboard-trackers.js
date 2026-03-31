@@ -711,4 +711,8 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
         }
         window.__scrollTrackersToTop = false;
     }
+
+    if (typeof window.syncTrackerCardHoverState === 'function') {
+        window.syncTrackerCardHoverState();
+    }
 });
