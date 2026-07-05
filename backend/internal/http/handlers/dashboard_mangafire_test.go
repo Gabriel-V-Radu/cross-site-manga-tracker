@@ -58,6 +58,12 @@ func TestExtractMangaFireMangaURL(t *testing.T) {
 			wantOK:  true,
 		},
 		{
+			name:    "accepts new title URL format",
+			query:   "https://mangafire.to/title/dkw-one-piece",
+			wantURL: "https://mangafire.to/title/dkw-one-piece",
+			wantOK:  true,
+		},
+		{
 			name:   "rejects title text",
 			query:  "One Piece",
 			wantOK: false,

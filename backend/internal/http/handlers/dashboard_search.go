@@ -47,18 +47,7 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(c.Context(), searchTimeout)
 	defer cancel()
 
-	if source.Key == "mangafire" {
-		mangaURL, ok := extractMangaFireMangaURL(query)
-		if !ok {
-			return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
-				Query:      query,
-				SourceID:   source.ID,
-				SourceName: source.Name,
-				Intent:     intent,
-				Error:      "MangaFire search requires a full manga URL (https://mangafire.to/manga/{id})",
-			})
-		}
-
+	if mangaURL, ok := extractMangaFireMangaURL(query); source.Key == "mangafire" && ok {
 		resolved, resolveErr := connector.ResolveByURL(ctx, mangaURL)
 		if resolveErr != nil || resolved == nil {
 			message := "Failed to resolve MangaFire URL"
@@ -108,7 +97,8 @@ func extractMangaFireMangaURL(query string) (string, bool) {
 	if !strings.EqualFold(parsed.Hostname(), "mangafire.to") && !strings.EqualFold(parsed.Hostname(), "www.mangafire.to") {
 		return "", false
 	}
-	if !strings.HasPrefix(strings.ToLower(parsed.Path), "/manga/") {
+	lowerPath := strings.ToLower(parsed.Path)
+	if !strings.HasPrefix(lowerPath, "/manga/") && !strings.HasPrefix(lowerPath, "/title/") {
 		return "", false
 	}
 

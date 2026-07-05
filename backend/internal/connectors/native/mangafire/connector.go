@@ -2,16 +2,14 @@ package mangafire
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,50 +19,10 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
-var (
-	hrefAnyPattern          = regexp.MustCompile(`(?is)<a([^>]*)href=["'](/manga/[^"'#?]+)["']([^>]*)>(.*?)</a>`)
-	titleAttrPattern        = regexp.MustCompile(`(?is)\btitle=["']([^"']+)["']`)
-	imgSrcPattern           = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["']`)
-	imgAltPattern           = regexp.MustCompile(`(?is)<img[^>]+alt=["']([^"']+)["']`)
-	htmlTagPattern          = regexp.MustCompile(`(?is)<[^>]+>`)
-	infoAliasPattern        = regexp.MustCompile(`(?is)<h1[^>]*>.*?</h1>\s*<h6[^>]*>(.*?)</h6>`)
-	chapterURLPattern       = regexp.MustCompile(`(?i)/chapter-(\d+(?:\.\d+)?)`)
-	chapterDatePattern      = regexp.MustCompile(`(?i)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}`)
-	chapterAgoPattern       = regexp.MustCompile(`(?i)\b((\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|an?\s+(minute|hour|day|week|month|year)|just\s+now)\s+ago\b`)
-	metaTagPattern          = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
-	imageTagPattern         = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
-	updatedTagPattern       = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property|name)=["'](?:og:updated_time|article:published_time|article:modified_time|datePublished|dateModified)["'][^>]*content=["']([^"']+)["']`)
-	posterImagePattern      = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*poster[^"']*["'][^>]*>.*?<img[^>]+src=["']([^"']+)["']`)
-	sitemapLocPattern       = regexp.MustCompile(`(?is)<loc>([^<]+)</loc>`)
-	searchNormalizeReplacer = strings.NewReplacer(
-		"-", " ",
-		".", " ",
-		"_", " ",
-		",", " ",
-		":", " ",
-		";", " ",
-		"!", " ",
-		"?", " ",
-		"(", " ",
-		")", " ",
-		"[", " ",
-		"]", " ",
-		"{", " ",
-		"}", " ",
-		"'", " ",
-		"\"", " ",
-		"/", " ",
-		"\\", " ",
-	)
-	queryStopWords = map[string]struct{}{
-		"a":   {},
-		"an":  {},
-		"my":  {},
-		"of":  {},
-		"the": {},
-		"to":  {},
-	}
-)
+// MangaFire rebuilt their site as a SPA backed by a JSON API under /api.
+// Manga pages moved from /manga/{slug}.{hid} to /title/{hid}-{slug} and
+// reader pages from /read/{slug}.{hid}/{lang}/chapter-{n} to /title/{hid}-{slug}/{chapterId}.
+var relativeAgoPattern = regexp.MustCompile(`(?i)^(\d+)\s*(min|mins|mo|mos|m|hrs|hr|h|d|w|yrs|yr|y)\s+ago$`)
 
 type Connector struct {
 	baseURL     string
@@ -74,10 +32,6 @@ type Connector struct {
 	requestMu          sync.Mutex
 	nextAllowedRequest time.Time
 	minRequestInterval time.Duration
-
-	indexMu        sync.RWMutex
-	cachedMangaIDs []string
-	cachedIndexAt  time.Time
 }
 
 func NewConnector() *Connector {
@@ -118,79 +72,72 @@ func (c *Connector) Kind() string {
 	return connectors.KindNative
 }
 
+type apiPoster struct {
+	Small  string `json:"small"`
+	Medium string `json:"medium"`
+	Large  string `json:"large"`
+}
+
+type apiTitle struct {
+	HID              string     `json:"hid"`
+	Slug             string     `json:"slug"`
+	Title            string     `json:"title"`
+	Poster           *apiPoster `json:"poster"`
+	LatestChapter    *float64   `json:"latestChapter"`
+	ChapterUpdatedAt string     `json:"chapterUpdatedAt"`
+	AltTitles        []string   `json:"altTitles"`
+}
+
+type apiTitlesResponse struct {
+	Items []apiTitle `json:"items"`
+}
+
+type apiTitleDetailResponse struct {
+	Data apiTitle `json:"data"`
+}
+
+type apiChapter struct {
+	ID        int64   `json:"id"`
+	Number    float64 `json:"number"`
+	Language  string  `json:"language"`
+	CreatedAt int64   `json:"createdAt"`
+}
+
+type apiChaptersResponse struct {
+	Items []apiChapter `json:"items"`
+}
+
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/home")
-	if err != nil {
+	var response apiTitlesResponse
+	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles?limit=1", &response); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	hid, _, err := c.parseTitleURL(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to mangafire")
+		return nil, err
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "manga" {
-		return nil, fmt.Errorf("mangafire url must match /manga/{id}")
-	}
-
-	sourceItemID := strings.TrimSpace(segments[1])
-	if sourceItemID == "" {
-		return nil, fmt.Errorf("invalid mangafire manga id")
-	}
-
-	body, err := c.fetchPage(ctx, c.baseURL+"/manga/"+url.PathEscape(sourceItemID))
+	detail, err := c.fetchTitleDetail(ctx, hid)
 	if err != nil {
-		return nil, fmt.Errorf("fetch manga page: %w", err)
+		return nil, fmt.Errorf("fetch manga detail: %w", err)
 	}
 
-	title := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaTagPattern, body)))
-	title = sanitizeTitle(title)
-	if title == "" {
-		title = prettifyItemID(sourceItemID)
+	result := c.resultFromAPITitle(*detail)
+	if latestReleaseAt := c.fetchLatestReleaseAt(ctx, detail.HID, detail.LatestChapter); latestReleaseAt != nil {
+		result.LastUpdatedAt = latestReleaseAt
 	}
-	relatedTitles := buildMangaFireRelatedTitles(body, title, sourceItemID)
-
-	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(imageTagPattern, body)))
-	if coverImageURL == "" {
-		coverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(posterImagePattern, body)))
-	}
-	coverImageURL = c.absoluteURL(coverImageURL)
-	latestChapter, latestReleaseAt := extractLatestChapterAndReleaseAt(body)
-	if latestReleaseAt == nil {
-		latestReleaseAt = extractLatestReleaseAt(body)
-	}
-
-	return &connectors.MangaResult{
-		SourceKey:     c.Key(),
-		SourceItemID:  sourceItemID,
-		Title:         title,
-		RelatedTitles: relatedTitles,
-		URL:           "https://mangafire.to/manga/" + sourceItemID,
-		CoverImageURL: coverImageURL,
-		LatestChapter: latestChapter,
-		LastUpdatedAt: latestReleaseAt,
-	}, nil
+	return &result, nil
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(strings.ToLower(title))
+	query := strings.TrimSpace(title)
 	if query == "" {
 		return nil, fmt.Errorf("title is required")
 	}
-	queryTokens := strings.Fields(normalizeForSearch(query))
-	significantQueryTokens := filterQueryTokens(queryTokens)
 
 	if limit <= 0 {
 		limit = 10
@@ -199,230 +146,315 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		limit = 50
 	}
 
-	searchURL := c.baseURL + "/filter?keyword=" + url.QueryEscape(query)
-	body, err := c.fetchPage(ctx, searchURL)
-	if err != nil {
-		body, err = c.fetchPage(ctx, c.baseURL+"/home")
-		if err != nil {
-			if isHTTPStatusError(err, http.StatusTooManyRequests) {
-				results, fallbackErr := c.appendSitemapMatches(ctx, nil, query, queryTokens, significantQueryTokens, limit, map[string]struct{}{})
-				if fallbackErr != nil {
-					return []connectors.MangaResult{}, nil
-				}
-				return results, nil
-			}
-			return nil, fmt.Errorf("fetch mangafire pages: %w", err)
-		}
+	searchURL := c.baseURL + "/api/titles?keyword=" + url.QueryEscape(query) + "&limit=" + strconv.Itoa(limit)
+	var response apiTitlesResponse
+	if err := c.fetchJSON(ctx, searchURL, &response); err != nil {
+		return nil, fmt.Errorf("search mangafire titles: %w", err)
 	}
 
-	entries := parseSearchEntries(body)
-	results := make([]connectors.MangaResult, 0, len(entries))
-	resultIDs := map[string]struct{}{}
-	for _, entry := range entries {
-		candidate := connectors.MangaResult{
-			SourceKey:     c.Key(),
-			SourceItemID:  entry.ItemID,
-			Title:         entry.Title,
-			URL:           "https://mangafire.to/manga/" + entry.ItemID,
-			CoverImageURL: c.absoluteURL(entry.CoverImageURL),
-			LatestChapter: nil,
-		}
-		c.enrichSearchResult(ctx, &candidate)
-
-		if !matchesSearchQuery(
-			searchEntry{
-				ItemID:        candidate.SourceItemID,
-				Title:         candidate.Title,
-				RelatedTitles: candidate.RelatedTitles,
-			},
-			query,
-			queryTokens,
-			significantQueryTokens,
-		) {
+	results := make([]connectors.MangaResult, 0, len(response.Items))
+	for _, item := range response.Items {
+		if strings.TrimSpace(item.HID) == "" {
 			continue
 		}
-
-		results = append(results, candidate)
-		resultIDs[candidate.SourceItemID] = struct{}{}
-
+		results = append(results, c.resultFromAPITitle(item))
 		if len(results) >= limit {
 			break
-		}
-	}
-
-	if len(results) < limit {
-		updatedResults, fallbackErr := c.appendSitemapMatches(ctx, results, query, queryTokens, significantQueryTokens, limit, resultIDs)
-		if fallbackErr == nil {
-			results = updatedResults
 		}
 	}
 
 	return results, nil
 }
 
-func (c *Connector) ResolveChapterURL(_ context.Context, rawURL string, chapter float64) (string, error) {
+func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
 	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
+	hid, slug, err := c.parseTitleURL(rawURL)
+	if err != nil {
+		return "", err
 	}
 
-	parsed, err := url.Parse(trimmed)
+	chapters, err := c.fetchChapters(ctx, hid)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
+		return "", fmt.Errorf("fetch chapters: %w", err)
+	}
+
+	match := pickChapterEntry(chapters, chapter)
+	if match == nil {
+		return "", fmt.Errorf("chapter %s not found", strconv.FormatFloat(chapter, 'f', -1, 64))
+	}
+
+	if slug == "" {
+		detail, detailErr := c.fetchTitleDetail(ctx, hid)
+		if detailErr != nil {
+			return "", fmt.Errorf("fetch manga detail: %w", detailErr)
+		}
+		slug = detail.Slug
+	}
+
+	return "https://mangafire.to/title/" + titleKey(hid, slug) + "/" + strconv.FormatInt(match.ID, 10), nil
+}
+
+// parseTitleURL extracts the title hid (and slug when present) from both the
+// current /title/{hid}-{slug} URLs and the legacy /manga/{slug}.{hid} and
+// /read/{slug}.{hid}/... URLs that existing trackers still have stored.
+func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", "", fmt.Errorf("url is required")
+	}
+
+	parsed, parseErr := url.Parse(trimmed)
+	if parseErr != nil {
+		return "", "", fmt.Errorf("invalid url: %w", parseErr)
 	}
 	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to mangafire")
+		return "", "", fmt.Errorf("url does not belong to mangafire")
 	}
 
 	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
 	if len(segments) < 2 {
-		return "", fmt.Errorf("mangafire url must include manga id")
+		return "", "", fmt.Errorf("mangafire url must include a title id")
 	}
 
-	var sourceItemID string
+	identifier := strings.TrimSpace(segments[1])
+	if identifier == "" {
+		return "", "", fmt.Errorf("invalid mangafire title id")
+	}
+
 	switch segments[0] {
-	case "manga":
-		sourceItemID = strings.TrimSpace(segments[1])
-	case "read":
-		sourceItemID = strings.TrimSpace(segments[1])
+	case "title":
+		if dash := strings.IndexRune(identifier, '-'); dash > 0 {
+			return identifier[:dash], identifier[dash+1:], nil
+		}
+		return identifier, "", nil
+	case "manga", "read":
+		// Legacy slugs differ from the current API slugs, so only the id after
+		// the dot is trusted; callers fetch the canonical slug when needed.
+		if dot := strings.LastIndexByte(identifier, '.'); dot > 0 && dot < len(identifier)-1 {
+			return identifier[dot+1:], "", nil
+		}
+		return "", "", fmt.Errorf("legacy mangafire url must match /%s/{slug}.{id}", segments[0])
 	default:
-		return "", fmt.Errorf("unsupported mangafire path")
+		return "", "", fmt.Errorf("unsupported mangafire path")
 	}
-
-	if sourceItemID == "" {
-		return "", fmt.Errorf("invalid mangafire manga id")
-	}
-
-	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
-	return "https://mangafire.to/read/" + sourceItemID + "/en/chapter-" + chapterSegment, nil
 }
 
-func (c *Connector) appendSitemapMatches(ctx context.Context, baseResults []connectors.MangaResult, query string, queryTokens []string, significantQueryTokens []string, limit int, existing map[string]struct{}) ([]connectors.MangaResult, error) {
-	remaining := limit - len(baseResults)
-	if remaining <= 0 {
-		return baseResults, nil
+func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle, error) {
+	var response apiTitleDetailResponse
+	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles/"+url.PathEscape(hid), &response); err != nil {
+		return nil, err
 	}
+	if strings.TrimSpace(response.Data.HID) == "" {
+		return nil, fmt.Errorf("mangafire title %q not found", hid)
+	}
+	return &response.Data, nil
+}
 
-	candidateLimit := remaining * 6
-	if candidateLimit < 12 {
-		candidateLimit = 12
+func (c *Connector) fetchChapters(ctx context.Context, hid string) ([]apiChapter, error) {
+	var response apiChaptersResponse
+	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles/"+url.PathEscape(hid)+"/chapters", &response); err != nil {
+		return nil, err
 	}
-	if candidateLimit > 120 {
-		candidateLimit = 120
-	}
+	return response.Items, nil
+}
 
-	fallbackEntries, err := c.searchEntriesFromSitemap(ctx, query, candidateLimit, existing)
+// fetchLatestReleaseAt looks up the exact release timestamp of the latest
+// chapter; the title payload only carries a coarse relative time ("2d ago").
+func (c *Connector) fetchLatestReleaseAt(ctx context.Context, hid string, latestChapter *float64) *time.Time {
+	if latestChapter == nil {
+		return nil
+	}
+	chapters, err := c.fetchChapters(ctx, hid)
 	if err != nil {
-		return baseResults, err
+		return nil
 	}
 
-	results := baseResults
-	for _, entry := range fallbackEntries {
-		candidate := connectors.MangaResult{
-			SourceKey:     c.Key(),
-			SourceItemID:  entry.ItemID,
-			Title:         entry.Title,
-			URL:           "https://mangafire.to/manga/" + entry.ItemID,
-			CoverImageURL: c.absoluteURL(entry.CoverImageURL),
-			LatestChapter: nil,
-		}
-		c.enrichSearchResult(ctx, &candidate)
-
-		if !matchesSearchQuery(
-			searchEntry{
-				ItemID:        candidate.SourceItemID,
-				Title:         candidate.Title,
-				RelatedTitles: candidate.RelatedTitles,
-			},
-			query,
-			queryTokens,
-			significantQueryTokens,
-		) {
+	var latest *time.Time
+	for _, entry := range chapters {
+		if !sameChapterNumber(entry.Number, *latestChapter) || entry.CreatedAt <= 0 {
 			continue
 		}
-		if _, seen := existing[candidate.SourceItemID]; seen {
-			continue
-		}
-
-		results = append(results, candidate)
-		existing[candidate.SourceItemID] = struct{}{}
-		if len(results) >= limit {
-			break
+		createdAt := time.Unix(entry.CreatedAt, 0).UTC()
+		if latest == nil || createdAt.After(*latest) {
+			latest = &createdAt
 		}
 	}
-
-	return results, nil
+	return latest
 }
 
-func (c *Connector) enrichSearchResult(ctx context.Context, result *connectors.MangaResult) {
-	body, fetchErr := c.fetchPage(ctx, c.baseURL+"/manga/"+url.PathEscape(result.SourceItemID))
-	if fetchErr != nil {
-		return
+func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
+	key := titleKey(item.HID, item.Slug)
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		title = prettifySlug(item.Slug)
 	}
-	resolvedTitle := sanitizeTitle(strings.TrimSpace(html.UnescapeString(firstSubmatch(metaTagPattern, body))))
-	if resolvedTitle != "" {
-		result.Title = resolvedTitle
-	}
-	result.RelatedTitles = buildMangaFireRelatedTitles(body, result.Title, result.SourceItemID)
-	latestChapter, latestReleaseAtByChapter := extractLatestChapterAndReleaseAt(body)
-	if latestChapter != nil {
-		result.LatestChapter = latestChapter
-	}
-	if latestReleaseAtByChapter != nil {
-		result.LastUpdatedAt = latestReleaseAtByChapter
-	}
-	if result.LastUpdatedAt == nil {
-		latestReleaseAt := extractLatestReleaseAt(body)
-		if latestReleaseAt != nil {
-			result.LastUpdatedAt = latestReleaseAt
+
+	coverImageURL := ""
+	if item.Poster != nil {
+		coverImageURL = strings.TrimSpace(item.Poster.Large)
+		if coverImageURL == "" {
+			coverImageURL = strings.TrimSpace(item.Poster.Medium)
 		}
 	}
-	if result.CoverImageURL == "" {
-		result.CoverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(imageTagPattern, body)))
-		if result.CoverImageURL == "" {
-			result.CoverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(posterImagePattern, body)))
-		}
-		result.CoverImageURL = c.absoluteURL(result.CoverImageURL)
+
+	return connectors.MangaResult{
+		SourceKey:     c.Key(),
+		SourceItemID:  key,
+		Title:         title,
+		RelatedTitles: buildRelatedTitles(title, item.Slug, item.AltTitles),
+		URL:           "https://mangafire.to/title/" + key,
+		CoverImageURL: coverImageURL,
+		LatestChapter: item.LatestChapter,
+		LastUpdatedAt: parseRelativeUpdatedAt(item.ChapterUpdatedAt, time.Now().UTC()),
 	}
 }
 
-func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
+func pickChapterEntry(chapters []apiChapter, chapter float64) *apiChapter {
+	var fallback *apiChapter
+	for index := range chapters {
+		entry := &chapters[index]
+		if !sameChapterNumber(entry.Number, chapter) {
+			continue
+		}
+		if strings.EqualFold(entry.Language, "en") {
+			return entry
+		}
+		if fallback == nil {
+			fallback = entry
+		}
+	}
+	return fallback
+}
+
+func sameChapterNumber(a float64, b float64) bool {
+	return math.Abs(a-b) < 1e-9
+}
+
+func titleKey(hid string, slug string) string {
+	hid = strings.TrimSpace(hid)
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return hid
+	}
+	return hid + "-" + slug
+}
+
+func buildRelatedTitles(title string, slug string, altTitles []string) []string {
+	candidates := make([]string, 0, len(altTitles)+1)
+	candidates = append(candidates, prettifySlug(slug))
+	candidates = append(candidates, searchutil.FilterEnglishAlphabetNames(altTitles)...)
+	candidates = searchutil.UniqueNonEmpty(candidates)
+
+	titleKey := searchutil.Normalize(title)
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidateKey := searchutil.Normalize(candidate)
+		if candidateKey == "" {
+			continue
+		}
+		if titleKey != "" && candidateKey == titleKey {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func prettifySlug(slug string) string {
+	slug = strings.TrimSpace(strings.ReplaceAll(slug, "-", " "))
+	if slug == "" {
+		return ""
+	}
+	parts := strings.Fields(slug)
+	for index := range parts {
+		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
+	}
+	return strings.Join(parts, " ")
+}
+
+// parseRelativeUpdatedAt parses the API's coarse relative timestamps such as
+// "just now", "30m ago", "5h ago", "2d ago", "3w ago", "1mo ago", "1yr ago".
+func parseRelativeUpdatedAt(raw string, now time.Time) *time.Time {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return nil
+	}
+	if trimmed == "just now" {
+		result := now
+		return &result
+	}
+
+	match := relativeAgoPattern.FindStringSubmatch(trimmed)
+	if len(match) < 3 {
+		return nil
+	}
+	quantity, err := strconv.Atoi(match[1])
+	if err != nil || quantity < 0 {
+		return nil
+	}
+
+	result := now
+	switch match[2] {
+	case "m", "min", "mins":
+		result = result.Add(-time.Duration(quantity) * time.Minute)
+	case "h", "hr", "hrs":
+		result = result.Add(-time.Duration(quantity) * time.Hour)
+	case "d":
+		result = result.AddDate(0, 0, -quantity)
+	case "w":
+		result = result.AddDate(0, 0, -7*quantity)
+	case "mo", "mos":
+		result = result.AddDate(0, -quantity, 0)
+	case "y", "yr", "yrs":
+		result = result.AddDate(-quantity, 0, 0)
+	default:
+		return nil
+	}
+	return &result
+}
+
+func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := c.waitForRequestWindow(ctx); err != nil {
-			return "", err
+			return err
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			return "", fmt.Errorf("create request: %w", err)
+			return fmt.Errorf("create request: %w", err)
 		}
 
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		req.Header.Set("Referer", c.baseURL+"/home")
+		req.Header.Set("Referer", c.baseURL+"/")
 
 		res, err := c.httpClient.Do(req)
 		if err != nil {
 			c.deferRequests(c.minRequestInterval)
-			return "", fmt.Errorf("request failed: %w", err)
+			return fmt.Errorf("request failed: %w", err)
 		}
 
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
 			rawBody, readErr := io.ReadAll(res.Body)
 			res.Body.Close()
-			if readErr != nil {
-				c.deferRequests(c.minRequestInterval)
-				return "", fmt.Errorf("read response body: %w", readErr)
-			}
 			c.deferRequests(c.minRequestInterval)
-			return string(rawBody), nil
+			if readErr != nil {
+				return fmt.Errorf("read response body: %w", readErr)
+			}
+			if err := json.Unmarshal(rawBody, target); err != nil {
+				return fmt.Errorf("decode response: %w", err)
+			}
+			return nil
 		}
 
 		statusErr := &httpStatusError{StatusCode: res.StatusCode}
@@ -440,10 +472,10 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 
 		c.deferRequests(c.minRequestInterval)
 
-		return "", statusErr
+		return statusErr
 	}
 
-	return "", &httpStatusError{StatusCode: http.StatusTooManyRequests}
+	return &httpStatusError{StatusCode: http.StatusTooManyRequests}
 }
 
 func (c *Connector) waitForRequestWindow(ctx context.Context) error {
@@ -491,14 +523,6 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("unexpected status: %d", e.StatusCode)
 }
 
-func isHTTPStatusError(err error, statusCode int) bool {
-	var statusErr *httpStatusError
-	if !errors.As(err, &statusErr) {
-		return false
-	}
-	return statusErr.StatusCode == statusCode
-}
-
 func computeRetryDelay(attempt int, retryAfter string) time.Duration {
 	if retryAfter != "" {
 		if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil {
@@ -522,300 +546,6 @@ func computeRetryDelay(attempt int, retryAfter string) time.Duration {
 	}
 }
 
-func extractLatestReleaseAt(body string) *time.Time {
-	raw := strings.TrimSpace(html.UnescapeString(firstSubmatch(updatedTagPattern, body)))
-	if raw == "" {
-		return nil
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05-07:00", "2006-01-02"} {
-		parsed, err := time.Parse(layout, raw)
-		if err == nil {
-			utc := parsed.UTC()
-			return &utc
-		}
-	}
-	return nil
-}
-
-type searchEntry struct {
-	ItemID        string
-	Title         string
-	RelatedTitles []string
-	CoverImageURL string
-}
-
-func parseSearchEntries(body string) []searchEntry {
-	entriesByID := map[string]searchEntry{}
-
-	for _, match := range hrefAnyPattern.FindAllStringSubmatch(body, -1) {
-		itemID := normalizeMangaPath(match[2])
-		if itemID == "" {
-			continue
-		}
-
-		attrs := strings.TrimSpace(match[1] + " " + match[3])
-		inner := strings.TrimSpace(match[4])
-
-		title := extractSearchTitle(attrs, inner)
-		coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(imgSrcPattern, inner)))
-
-		existing, found := entriesByID[itemID]
-		if !found {
-			existing = searchEntry{ItemID: itemID}
-		}
-		if existing.Title == "" && title != "" {
-			existing.Title = title
-		}
-		if existing.CoverImageURL == "" && coverImageURL != "" {
-			existing.CoverImageURL = coverImageURL
-		}
-		entriesByID[itemID] = existing
-	}
-
-	entries := make([]searchEntry, 0, len(entriesByID))
-	for _, item := range entriesByID {
-		if item.Title == "" {
-			item.Title = prettifyItemID(item.ItemID)
-		}
-		entries = append(entries, item)
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Title < entries[j].Title
-	})
-
-	return entries
-}
-
-func extractSearchTitle(attrs string, inner string) string {
-	text := strings.TrimSpace(html.UnescapeString(htmlTagPattern.ReplaceAllString(inner, " ")))
-	text = strings.Join(strings.Fields(text), " ")
-	if text != "" {
-		return text
-	}
-
-	attrTitle := strings.TrimSpace(html.UnescapeString(firstSubmatch(titleAttrPattern, attrs)))
-	if attrTitle != "" {
-		return attrTitle
-	}
-
-	alt := strings.TrimSpace(html.UnescapeString(firstSubmatch(imgAltPattern, inner)))
-	if alt != "" {
-		return alt
-	}
-
-	return ""
-}
-
-func normalizeMangaPath(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.TrimPrefix(trimmed, "/")
-	if strings.HasPrefix(trimmed, "manga/") {
-		return strings.TrimPrefix(trimmed, "manga/")
-	}
-	return ""
-}
-
-func extractLatestChapterAndReleaseAt(body string) (*float64, *time.Time) {
-	matches := chapterURLPattern.FindAllStringSubmatchIndex(body, -1)
-	var latest *float64
-	var latestReleaseAt *time.Time
-	for _, match := range matches {
-		if len(match) < 4 {
-			continue
-		}
-		chapterText := body[match[2]:match[3]]
-		parsed, err := strconv.ParseFloat(chapterText, 64)
-		if err != nil {
-			continue
-		}
-		if latest == nil || parsed > *latest {
-			value := parsed
-			latest = &value
-			latestReleaseAt = extractChapterDateAtIndex(body, match[0], match[1])
-			continue
-		}
-
-		if parsed == *latest {
-			candidate := extractChapterDateAtIndex(body, match[0], match[1])
-			if candidate == nil {
-				continue
-			}
-			if latestReleaseAt == nil || candidate.After(*latestReleaseAt) {
-				latestReleaseAt = candidate
-			}
-		}
-	}
-	return latest, latestReleaseAt
-}
-
-func extractChapterDateAtIndex(body string, start int, end int) *time.Time {
-	if len(body) == 0 {
-		return nil
-	}
-
-	if row := extractChapterRow(body, start, end); row != "" {
-		if parsed := parseChapterDateText(row, time.Now().UTC()); parsed != nil {
-			return parsed
-		}
-	}
-
-	return extractDateNearIndex(body, start, end)
-}
-
-func extractChapterRow(body string, start int, end int) string {
-	if start < 0 {
-		start = 0
-	}
-	if end > len(body) {
-		end = len(body)
-	}
-	if start >= end {
-		return ""
-	}
-
-	rowStart := strings.LastIndex(strings.ToLower(body[:start]), "<li")
-	if rowStart < 0 {
-		return ""
-	}
-	rowEndOffset := strings.Index(strings.ToLower(body[end:]), "</li>")
-	if rowEndOffset < 0 {
-		return ""
-	}
-	rowEnd := end + rowEndOffset + len("</li>")
-	if rowStart >= rowEnd || rowEnd > len(body) {
-		return ""
-	}
-
-	return body[rowStart:rowEnd]
-}
-
-func parseChapterDateText(text string, now time.Time) *time.Time {
-	rawDate := chapterDatePattern.FindString(text)
-	if strings.TrimSpace(rawDate) != "" {
-		parsed, err := time.Parse("Jan 2, 2006", rawDate)
-		if err == nil {
-			utc := parsed.UTC()
-			return &utc
-		}
-	}
-
-	match := chapterAgoPattern.FindStringSubmatch(strings.ToLower(text))
-	if len(match) == 0 {
-		return nil
-	}
-
-	agoText := strings.TrimSpace(match[1])
-	if agoText == "just now" {
-		result := now.UTC()
-		return &result
-	}
-
-	quantity := 1
-	if len(match) >= 3 {
-		if parsedQuantity, err := strconv.Atoi(strings.TrimSpace(match[2])); err == nil && parsedQuantity > 0 {
-			quantity = parsedQuantity
-		}
-	}
-
-	unit := ""
-	if len(match) >= 4 {
-		unit = strings.TrimSpace(match[3])
-	}
-	if unit == "" && len(match) >= 5 {
-		unit = strings.TrimSpace(match[4])
-	}
-
-	result := now.UTC()
-	switch unit {
-	case "minute", "minutes":
-		result = result.Add(-time.Duration(quantity) * time.Minute)
-	case "hour", "hours":
-		result = result.Add(-time.Duration(quantity) * time.Hour)
-	case "day", "days":
-		result = result.AddDate(0, 0, -quantity)
-	case "week", "weeks":
-		result = result.AddDate(0, 0, -7*quantity)
-	case "month", "months":
-		result = result.AddDate(0, -quantity, 0)
-	case "year", "years":
-		result = result.AddDate(-quantity, 0, 0)
-	default:
-		return nil
-	}
-
-	return &result
-}
-
-func extractDateNearIndex(body string, start int, end int) *time.Time {
-	if len(body) == 0 {
-		return nil
-	}
-	dateFromRaw := func(raw string) *time.Time {
-		if strings.TrimSpace(raw) == "" {
-			return nil
-		}
-		parsed, err := time.Parse("Jan 2, 2006", raw)
-		if err != nil {
-			return nil
-		}
-		utc := parsed.UTC()
-		return &utc
-	}
-
-	afterRight := end + 800
-	if afterRight > len(body) {
-		afterRight = len(body)
-	}
-	afterSegment := body[end:afterRight]
-	rawAfter := chapterDatePattern.FindString(afterSegment)
-	if parsed := dateFromRaw(rawAfter); parsed != nil {
-		return parsed
-	}
-
-	beforeLeft := start - 500
-	if beforeLeft < 0 {
-		beforeLeft = 0
-	}
-	beforeSegment := body[beforeLeft:start]
-	beforeMatches := chapterDatePattern.FindAllString(beforeSegment, -1)
-	if len(beforeMatches) == 0 {
-		return nil
-	}
-	return dateFromRaw(beforeMatches[len(beforeMatches)-1])
-}
-
-func firstSubmatch(pattern *regexp.Regexp, text string) string {
-	match := pattern.FindStringSubmatch(text)
-	if len(match) < 2 {
-		return ""
-	}
-	return match[1]
-}
-
-func prettifyItemID(itemID string) string {
-	slug := itemID
-	if dot := strings.IndexRune(itemID, '.'); dot > 0 {
-		slug = itemID[:dot]
-	}
-	slug = strings.ReplaceAll(slug, "-", " ")
-	slug = strings.TrimSpace(slug)
-	if slug == "" {
-		return itemID
-	}
-	parts := strings.Fields(slug)
-	for index := range parts {
-		if parts[index] == "" {
-			continue
-		}
-		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
-	}
-	return strings.Join(parts, " ")
-}
-
 func (c *Connector) isAllowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	for _, allowed := range c.allowedHost {
@@ -825,308 +555,4 @@ func (c *Connector) isAllowedHost(host string) bool {
 		}
 	}
 	return false
-}
-
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return ""
-	}
-	if parsed.IsAbs() {
-		return parsed.String()
-	}
-	base, err := url.Parse(c.baseURL + "/")
-	if err != nil {
-		return trimmed
-	}
-	return base.ResolveReference(parsed).String()
-}
-
-func (c *Connector) searchEntriesFromSitemap(ctx context.Context, query string, remaining int, existing map[string]struct{}) ([]searchEntry, error) {
-	if remaining <= 0 {
-		return nil, nil
-	}
-
-	allIDs, err := c.getMangaIDsFromSitemaps(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	tokens := strings.Fields(normalizeForSearch(query))
-	significantTokens := filterQueryTokens(tokens)
-	if len(significantTokens) > 0 {
-		tokens = significantTokens
-	}
-	if len(tokens) == 0 {
-		return nil, nil
-	}
-
-	entries := make([]searchEntry, 0, remaining)
-	appended := map[string]struct{}{}
-
-	appendEntry := func(itemID string) bool {
-		if _, seen := existing[itemID]; seen {
-			return false
-		}
-		if _, seen := appended[itemID]; seen {
-			return false
-		}
-		entries = append(entries, searchEntry{
-			ItemID: itemID,
-			Title:  prettifyItemID(itemID),
-		})
-		appended[itemID] = struct{}{}
-		return true
-	}
-
-	for _, itemID := range allIDs {
-		if !matchesTokens(itemID, tokens) {
-			continue
-		}
-		_ = appendEntry(itemID)
-		if len(entries) >= remaining {
-			break
-		}
-	}
-
-	if len(entries) < remaining {
-		for _, itemID := range allIDs {
-			if !matchesAnyToken(itemID, tokens) {
-				continue
-			}
-			if !appendEntry(itemID) {
-				continue
-			}
-			if len(entries) >= remaining {
-				break
-			}
-		}
-	}
-
-	return entries, nil
-}
-
-func (c *Connector) getMangaIDsFromSitemaps(ctx context.Context) ([]string, error) {
-	c.indexMu.RLock()
-	if len(c.cachedMangaIDs) > 0 && time.Since(c.cachedIndexAt) < 30*time.Minute {
-		cached := make([]string, len(c.cachedMangaIDs))
-		copy(cached, c.cachedMangaIDs)
-		c.indexMu.RUnlock()
-		return cached, nil
-	}
-	c.indexMu.RUnlock()
-
-	indexBody, err := c.fetchPage(ctx, c.baseURL+"/sitemap.xml")
-	if err != nil {
-		return nil, err
-	}
-
-	sitemapLinks := make([]string, 0)
-	for _, match := range sitemapLocPattern.FindAllStringSubmatch(indexBody, -1) {
-		candidate := strings.TrimSpace(match[1])
-		if strings.Contains(candidate, "/sitemap-list-") {
-			sitemapLinks = append(sitemapLinks, candidate)
-		}
-	}
-
-	if len(sitemapLinks) == 0 {
-		return nil, fmt.Errorf("no sitemap list links found")
-	}
-
-	uniqueIDs := map[string]struct{}{}
-	for _, sitemapLink := range sitemapLinks {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		body, fetchErr := c.fetchPage(ctx, sitemapLink)
-		if fetchErr != nil {
-			continue
-		}
-
-		for _, match := range sitemapLocPattern.FindAllStringSubmatch(body, -1) {
-			link := strings.TrimSpace(match[1])
-			parsed, parseErr := url.Parse(link)
-			if parseErr != nil {
-				continue
-			}
-			itemID := normalizeMangaPath(parsed.Path)
-			if itemID == "" {
-				continue
-			}
-			uniqueIDs[itemID] = struct{}{}
-		}
-	}
-
-	ids := make([]string, 0, len(uniqueIDs))
-	for itemID := range uniqueIDs {
-		ids = append(ids, itemID)
-	}
-	sort.Strings(ids)
-
-	c.indexMu.Lock()
-	c.cachedMangaIDs = make([]string, len(ids))
-	copy(c.cachedMangaIDs, ids)
-	c.cachedIndexAt = time.Now().UTC()
-	c.indexMu.Unlock()
-
-	return ids, nil
-}
-
-func normalizeForSearch(value string) string {
-	clean := strings.ToLower(strings.TrimSpace(value))
-	clean = searchNormalizeReplacer.Replace(clean)
-	return strings.Join(strings.Fields(clean), " ")
-}
-
-func matchesTokens(itemID string, tokens []string) bool {
-	base := itemID
-	if dot := strings.IndexRune(base, '.'); dot > 0 {
-		base = base[:dot]
-	}
-	normalized := normalizeForSearch(base)
-	for _, token := range tokens {
-		if token == "" {
-			continue
-		}
-		if !strings.Contains(normalized, token) {
-			return false
-		}
-	}
-	return true
-}
-
-func matchesAnyToken(itemID string, tokens []string) bool {
-	base := itemID
-	if dot := strings.IndexRune(base, '.'); dot > 0 {
-		base = base[:dot]
-	}
-	normalized := normalizeForSearch(base)
-	for _, token := range tokens {
-		if token == "" {
-			continue
-		}
-		if strings.Contains(normalized, token) {
-			return true
-		}
-	}
-	return false
-}
-
-func filterQueryTokens(tokens []string) []string {
-	filtered := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		if _, stop := queryStopWords[token]; stop {
-			continue
-		}
-		filtered = append(filtered, token)
-	}
-	return filtered
-}
-
-func matchesSearchQuery(entry searchEntry, rawQuery string, queryTokens []string, significantQueryTokens []string) bool {
-	normalizedTitle := normalizeForSearch(entry.Title)
-	normalizedQuery := normalizeForSearch(rawQuery)
-
-	if normalizedQuery != "" && strings.Contains(normalizedTitle, normalizedQuery) {
-		return true
-	}
-	for _, related := range entry.RelatedTitles {
-		normalizedRelated := normalizeForSearch(related)
-		if normalizedRelated == "" {
-			continue
-		}
-		if normalizedQuery != "" && strings.Contains(normalizedRelated, normalizedQuery) {
-			return true
-		}
-	}
-
-	if len(queryTokens) > 0 {
-		if matchesTokens(entry.Title, queryTokens) || matchesTokens(entry.ItemID, queryTokens) {
-			return true
-		}
-		for _, related := range entry.RelatedTitles {
-			if matchesTokens(related, queryTokens) {
-				return true
-			}
-		}
-	}
-
-	if len(significantQueryTokens) > 0 {
-		if matchesTokens(entry.Title, significantQueryTokens) || matchesTokens(entry.ItemID, significantQueryTokens) {
-			return true
-		}
-		for _, related := range entry.RelatedTitles {
-			if matchesTokens(related, significantQueryTokens) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func buildMangaFireRelatedTitles(body string, title string, sourceItemID string) []string {
-	candidates := make([]string, 0, 8)
-	candidates = append(candidates, prettifyItemID(sourceItemID))
-	candidates = append(candidates, extractInfoAliases(body)...)
-	candidates = append(candidates, searchutil.ExtractRelatedTitles(body)...)
-
-	candidates = searchutil.UniqueNonEmpty(candidates)
-	if len(candidates) == 0 {
-		return nil
-	}
-
-	titleKey := searchutil.Normalize(title)
-	filtered := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		candidateKey := searchutil.Normalize(candidate)
-		if candidateKey == "" {
-			continue
-		}
-		if titleKey != "" && candidateKey == titleKey {
-			continue
-		}
-		filtered = append(filtered, candidate)
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	return filtered
-}
-
-func extractInfoAliases(body string) []string {
-	raw := strings.TrimSpace(html.UnescapeString(firstSubmatch(infoAliasPattern, body)))
-	if raw == "" {
-		return nil
-	}
-
-	parts := strings.Split(raw, ";")
-	aliases := make([]string, 0, len(parts))
-	for _, part := range parts {
-		candidate := strings.TrimSpace(part)
-		if candidate == "" {
-			continue
-		}
-		aliases = append(aliases, candidate)
-	}
-
-	return searchutil.FilterEnglishAlphabetNames(aliases)
-}
-
-func sanitizeTitle(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.TrimSuffix(trimmed, " Manga - Read Manga Online Free")
-	trimmed = strings.TrimSuffix(trimmed, " - Read Manga Online Free")
-	return strings.TrimSpace(trimmed)
 }
