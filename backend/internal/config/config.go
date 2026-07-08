@@ -19,24 +19,31 @@ type Config struct {
 	SeedDefaultData bool
 	PollingEnabled  bool
 	PollingMinutes  int
+	// PollingIdleMinutes is the minimum minutes between polls for trackers
+	// that are not in "reading" status.
+	PollingIdleMinutes int
 }
 
 func Load() (Config, error) {
 	_ = godotenv.Load()
 
 	cfg := Config{
-		Environment:     getEnv("APP_ENV", "development"),
-		AppName:         getEnv("APP_NAME", "cross-site-tracker"),
-		Port:            getEnv("APP_PORT", "8080"),
-		SQLitePath:      getEnv("SQLITE_PATH", "./data/app.sqlite"),
-		MigrationsPath:  getEnv("MIGRATIONS_PATH", "./migrations"),
-		SeedDefaultData: getEnvAsBool("SEED_DEFAULT_DATA", true),
-		PollingEnabled:  getEnvAsBool("POLLING_ENABLED", true),
-		PollingMinutes:  getEnvAsInt("POLLING_MINUTES", 30),
+		Environment:        getEnv("APP_ENV", "development"),
+		AppName:            getEnv("APP_NAME", "cross-site-tracker"),
+		Port:               getEnv("APP_PORT", "8080"),
+		SQLitePath:         getEnv("SQLITE_PATH", "./data/app.sqlite"),
+		MigrationsPath:     getEnv("MIGRATIONS_PATH", "./migrations"),
+		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
+		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),
+		PollingMinutes:     getEnvAsInt("POLLING_MINUTES", 30),
+		PollingIdleMinutes: getEnvAsInt("POLLING_IDLE_MINUTES", 720),
 	}
 
 	if cfg.PollingMinutes <= 0 {
 		cfg.PollingMinutes = 30
+	}
+	if cfg.PollingIdleMinutes <= 0 {
+		cfg.PollingIdleMinutes = 720
 	}
 
 	level, err := parseLogLevel(getEnv("LOG_LEVEL", "INFO"))

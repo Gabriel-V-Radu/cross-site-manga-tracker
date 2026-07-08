@@ -17,31 +17,43 @@ type pollRepository interface {
 }
 
 type Poller struct {
-	repo     pollRepository
-	registry *connectors.Registry
-	interval time.Duration
-	logger   *slog.Logger
-	stopCh   chan struct{}
+	repo         pollRepository
+	registry     *connectors.Registry
+	interval     time.Duration
+	idleInterval time.Duration
+	logger       *slog.Logger
+	stopCh       chan struct{}
 }
 
 type PollerConfig struct {
 	Interval time.Duration
+	// IdleInterval is the minimum time between polls for trackers that are
+	// not in "reading" status; they rarely change, so polling them every
+	// cycle just burns the sources' rate limits.
+	IdleInterval time.Duration
 }
 
 func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Minute
 	}
+	if cfg.IdleInterval <= 0 {
+		cfg.IdleInterval = 12 * time.Hour
+	}
+	if cfg.IdleInterval < cfg.Interval {
+		cfg.IdleInterval = cfg.Interval
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &Poller{
-		repo:     repo,
-		registry: registry,
-		interval: cfg.Interval,
-		logger:   logger,
-		stopCh:   make(chan struct{}),
+		repo:         repo,
+		registry:     registry,
+		interval:     cfg.Interval,
+		idleInterval: cfg.IdleInterval,
+		logger:       logger,
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -84,7 +96,13 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("load trackers for polling: %w", err)
 	}
 
+	skippedIdle := 0
 	for _, tracker := range trackers {
+		if p.shouldSkipIdle(tracker) {
+			skippedIdle++
+			continue
+		}
+
 		connector, ok := p.registry.Get(tracker.SourceKey)
 		if !ok {
 			p.logger.Debug("connector missing for tracker", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
@@ -127,7 +145,23 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 	}
 
+	if skippedIdle > 0 {
+		p.logger.Debug("poll skipped idle trackers", "count", skippedIdle)
+	}
+
 	return nil
+}
+
+// shouldSkipIdle reports whether a non-reading tracker was checked recently
+// enough that this cycle can skip it.
+func (p *Poller) shouldSkipIdle(tracker repository.PollingTracker) bool {
+	if strings.EqualFold(strings.TrimSpace(tracker.Status), "reading") {
+		return false
+	}
+	if tracker.LastCheckedAt == nil {
+		return false
+	}
+	return time.Since(*tracker.LastCheckedAt) < p.idleInterval
 }
 
 func isNewChapter(previous *float64, current *float64) bool {

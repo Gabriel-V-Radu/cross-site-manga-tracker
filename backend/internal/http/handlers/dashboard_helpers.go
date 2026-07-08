@@ -290,11 +290,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		return coverURL, nil
 	}
 
-	missTTL := 2 * time.Minute
-	if strings.EqualFold(trimmedSourceKey, "mangafire") {
-		missTTL = 25 * time.Second
-	}
-	h.setCachedCover(cacheKey, "", false, missTTL)
+	h.setCachedCover(cacheKey, "", false, 2*time.Minute)
 	return "", fmt.Errorf("cover not found")
 }
 

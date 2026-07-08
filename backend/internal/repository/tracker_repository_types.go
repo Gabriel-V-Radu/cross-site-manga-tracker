@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"time"
 )
 
 type TrackerListOptions struct {
@@ -29,6 +30,7 @@ type PollingTracker struct {
 	SourceURL          string
 	LatestKnownChapter *float64
 	SourceKey          string
+	LastCheckedAt      *time.Time
 }
 
 func NewTrackerRepository(db *sql.DB) *TrackerRepository {

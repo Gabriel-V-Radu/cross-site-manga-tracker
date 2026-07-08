@@ -24,6 +24,11 @@ import (
 // reader pages from /read/{slug}.{hid}/{lang}/chapter-{n} to /title/{hid}-{slug}/{chapterId}.
 var relativeAgoPattern = regexp.MustCompile(`(?i)^(\d+)\s*(min|mins|mo|mos|m|hrs|hr|h|d|w|yrs|yr|y)\s+ago$`)
 
+type latestReleaseMemo struct {
+	latestChapter float64
+	releaseAt     *time.Time
+}
+
 type Connector struct {
 	baseURL     string
 	allowedHost []string
@@ -32,6 +37,10 @@ type Connector struct {
 	requestMu          sync.Mutex
 	nextAllowedRequest time.Time
 	minRequestInterval time.Duration
+	cooldownUntil      time.Time
+
+	releaseMemoMu sync.Mutex
+	releaseMemo   map[string]latestReleaseMemo
 }
 
 func NewConnector() *Connector {
@@ -41,7 +50,11 @@ func NewConnector() *Connector {
 		httpClient: &http.Client{
 			Timeout: 12 * time.Second,
 		},
-		minRequestInterval: 150 * time.Millisecond,
+		// Cloudflare on mangafire.to blocks IPs that burst requests, so the
+		// live connector paces itself much more conservatively than the
+		// local test servers need.
+		minRequestInterval: 1500 * time.Millisecond,
+		releaseMemo:        map[string]latestReleaseMemo{},
 	}
 }
 
@@ -57,6 +70,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		allowedHost:        allowedHost,
 		httpClient:         client,
 		minRequestInterval: 150 * time.Millisecond,
+		releaseMemo:        map[string]latestReleaseMemo{},
 	}
 }
 
@@ -263,10 +277,20 @@ func (c *Connector) fetchChapters(ctx context.Context, hid string) ([]apiChapter
 
 // fetchLatestReleaseAt looks up the exact release timestamp of the latest
 // chapter; the title payload only carries a coarse relative time ("2d ago").
+// The result is memoized per title until the latest chapter number changes,
+// so repeated polls cost one request instead of two.
 func (c *Connector) fetchLatestReleaseAt(ctx context.Context, hid string, latestChapter *float64) *time.Time {
 	if latestChapter == nil {
 		return nil
 	}
+
+	c.releaseMemoMu.Lock()
+	memo, memoized := c.releaseMemo[hid]
+	c.releaseMemoMu.Unlock()
+	if memoized && sameChapterNumber(memo.latestChapter, *latestChapter) {
+		return memo.releaseAt
+	}
+
 	chapters, err := c.fetchChapters(ctx, hid)
 	if err != nil {
 		return nil
@@ -282,6 +306,14 @@ func (c *Connector) fetchLatestReleaseAt(ctx context.Context, hid string, latest
 			latest = &createdAt
 		}
 	}
+
+	c.releaseMemoMu.Lock()
+	c.releaseMemo[hid] = latestReleaseMemo{
+		latestChapter: *latestChapter,
+		releaseAt:     latest,
+	}
+	c.releaseMemoMu.Unlock()
+
 	return latest
 }
 
@@ -423,6 +455,10 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if remaining := c.cooldownRemaining(); remaining > 0 {
+			return fmt.Errorf("mangafire rate limited, cooling down for %s: %w", remaining.Round(time.Second), &httpStatusError{StatusCode: http.StatusTooManyRequests})
+		}
+
 		if err := c.waitForRequestWindow(ctx); err != nil {
 			return err
 		}
@@ -461,13 +497,25 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 		retryAfter := res.Header.Get("Retry-After")
 		res.Body.Close()
 
-		if res.StatusCode == http.StatusTooManyRequests && attempt < maxAttempts-1 {
-			delay := computeRetryDelay(attempt, retryAfter)
-			if delay < 2*time.Second {
-				delay = 2 * time.Second
+		// Cloudflare answers 403 ("Access denied") when it has rate limited
+		// the IP; retrying immediately only extends the block, so open the
+		// circuit and fail fast until the cooldown expires.
+		if res.StatusCode == http.StatusForbidden {
+			c.startCooldown(5 * time.Minute)
+			return statusErr
+		}
+
+		if res.StatusCode == http.StatusTooManyRequests {
+			if attempt < maxAttempts-1 {
+				delay := computeRetryDelay(attempt, retryAfter)
+				if delay < 2*time.Second {
+					delay = 2 * time.Second
+				}
+				c.deferRequests(delay)
+				continue
 			}
-			c.deferRequests(delay)
-			continue
+			c.startCooldown(2 * time.Minute)
+			return statusErr
 		}
 
 		c.deferRequests(c.minRequestInterval)
@@ -476,6 +524,21 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	}
 
 	return &httpStatusError{StatusCode: http.StatusTooManyRequests}
+}
+
+func (c *Connector) cooldownRemaining() time.Duration {
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	return time.Until(c.cooldownUntil)
+}
+
+func (c *Connector) startCooldown(duration time.Duration) {
+	until := time.Now().UTC().Add(duration)
+	c.requestMu.Lock()
+	if until.After(c.cooldownUntil) {
+		c.cooldownUntil = until
+	}
+	c.requestMu.Unlock()
 }
 
 func (c *Connector) waitForRequestWindow(ctx context.Context) error {

@@ -246,3 +246,65 @@ func TestParseRelativeUpdatedAt(t *testing.T) {
 func timePtr(value time.Time) *time.Time {
 	return &value
 }
+
+func TestMangaFireConnectorMemoizesLatestReleaseLookup(t *testing.T) {
+	chapterRequests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","latestChapter":1187,"chapterUpdatedAt":"2d ago"}}`))
+	})
+	mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		chapterRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[{"id":7511775,"number":1187,"language":"en","createdAt":1783047602}]}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	for i := 0; i < 3; i++ {
+		resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+		if err != nil {
+			t.Fatalf("resolve %d failed: %v", i, err)
+		}
+		if resolved.LastUpdatedAt == nil || !resolved.LastUpdatedAt.Equal(time.Unix(1783047602, 0).UTC()) {
+			t.Fatalf("resolve %d: unexpected release date %v", i, resolved.LastUpdatedAt)
+		}
+	}
+
+	if chapterRequests != 1 {
+		t.Fatalf("expected chapters endpoint to be hit once, got %d", chapterRequests)
+	}
+}
+
+func TestMangaFireConnectorCoolsDownAfterForbidden(t *testing.T) {
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("Access denied"))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	if err := connector.HealthCheck(context.Background()); err == nil {
+		t.Fatalf("expected error on forbidden response")
+	}
+	if requests != 1 {
+		t.Fatalf("expected a single request before cooldown, got %d", requests)
+	}
+
+	if _, err := connector.SearchByTitle(context.Background(), "one piece", 5); err == nil {
+		t.Fatalf("expected fail-fast error while cooling down")
+	}
+	if requests != 1 {
+		t.Fatalf("expected no additional requests while cooling down, got %d", requests)
+	}
+}

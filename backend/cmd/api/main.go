@@ -55,7 +55,8 @@ func main() {
 		repository.NewTrackerRepository(db),
 		connectorRegistry,
 		scheduler.PollerConfig{
-			Interval: time.Duration(cfg.PollingMinutes) * time.Minute,
+			Interval:     time.Duration(cfg.PollingMinutes) * time.Minute,
+			IdleInterval: time.Duration(cfg.PollingIdleMinutes) * time.Minute,
 		},
 		slog.Default(),
 	)

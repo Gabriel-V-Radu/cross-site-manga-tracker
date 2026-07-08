@@ -97,6 +97,33 @@ func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T
 	}
 }
 
+func TestPollerRunOnce_SkipsRecentlyCheckedIdleTrackers(t *testing.T) {
+	latest := 12.0
+	recentCheck := time.Now().UTC().Add(-1 * time.Hour)
+	staleCheck := time.Now().UTC().Add(-24 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{
+		{ID: 1, Title: "Reading recently checked", Status: "reading", SourceURL: "https://example/1", SourceKey: "testsource", LastCheckedAt: &recentCheck},
+		{ID: 2, Title: "Completed recently checked", Status: "completed", SourceURL: "https://example/2", SourceKey: "testsource", LastCheckedAt: &recentCheck},
+		{ID: 3, Title: "Completed stale check", Status: "completed", SourceURL: "https://example/3", SourceKey: "testsource", LastCheckedAt: &staleCheck},
+		{ID: 4, Title: "Dropped never checked", Status: "dropped", SourceURL: "https://example/4", SourceKey: "testsource"},
+	}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &latest}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute, IdleInterval: 12 * time.Hour}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	// The reading tracker always polls; the recently checked completed one is
+	// skipped; the stale and never-checked idle ones still poll.
+	if repo.updatedCount != 3 {
+		t.Fatalf("expected 3 update calls, got %d", repo.updatedCount)
+	}
+}
+
 func TestPollerRunOnce_LeavesReleaseDateUnsetWhenNewChapterHasNoReleaseDate(t *testing.T) {
 	prev := 340.0
 	next := 341.0

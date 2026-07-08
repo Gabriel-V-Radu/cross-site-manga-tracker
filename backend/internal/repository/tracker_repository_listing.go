@@ -225,7 +225,7 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	query := `
 		SELECT
-			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url, t.latest_known_chapter, s.key
+			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url, t.latest_known_chapter, s.key, t.last_checked_at
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
 	`
@@ -241,7 +241,8 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		var item PollingTracker
 		var sourceItemID sql.NullString
 		var latest sql.NullFloat64
-		if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL, &latest, &item.SourceKey); err != nil {
+		var lastCheckedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL, &latest, &item.SourceKey, &lastCheckedAt); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
 		}
 		if sourceItemID.Valid {
@@ -249,6 +250,10 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		}
 		if latest.Valid {
 			item.LatestKnownChapter = &latest.Float64
+		}
+		if lastCheckedAt.Valid {
+			checkedAt := lastCheckedAt.Time.UTC()
+			item.LastCheckedAt = &checkedAt
 		}
 		items = append(items, item)
 	}
