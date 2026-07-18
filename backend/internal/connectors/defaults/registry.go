@@ -4,6 +4,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/asuracomic"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/flamecomics"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/freewebnovel"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangadex"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mgeko"
@@ -18,6 +19,7 @@ func NewRegistry() *connectors.Registry {
 	_ = registry.Register(flamecomics.NewConnector())
 	_ = registry.Register(mgeko.NewConnector())
 	_ = registry.Register(webtoons.NewConnector())
+	_ = registry.Register(freewebnovel.NewConnector())
 
 	return registry
 }

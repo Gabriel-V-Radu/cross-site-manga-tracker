@@ -44,6 +44,20 @@ func TestInferSourceKeyFromURLSupportsMgeko(t *testing.T) {
 	}
 }
 
+func TestSourceHomeURLForKeySupportsFreeWebNovel(t *testing.T) {
+	homeURL := sourceHomeURLForKey("freewebnovel")
+	if homeURL != "https://freewebnovel.com" {
+		t.Fatalf("expected freewebnovel home url, got %q", homeURL)
+	}
+}
+
+func TestInferSourceKeyFromURLSupportsFreeWebNovel(t *testing.T) {
+	inferred := inferSourceKeyFromURL("https://freewebnovel.com/novel/star-odyssey")
+	if inferred != "freewebnovel" {
+		t.Fatalf("expected inferred source key freewebnovel, got %q", inferred)
+	}
+}
+
 func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 	lastCheckedAt := time.Now().UTC()
 	h := &DashboardHandler{}

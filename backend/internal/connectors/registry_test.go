@@ -73,6 +73,9 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	if err := r.Register(&fakeConnector{key: "webtoons", name: "WEBTOON", kind: connectors.KindNative}); err != nil {
 		t.Fatalf("register webtoons: %v", err)
 	}
+	if err := r.Register(&fakeConnector{key: "freewebnovel", name: "FreeWebNovel", kind: connectors.KindNative}); err != nil {
+		t.Fatalf("register freewebnovel: %v", err)
+	}
 
 	tests := []string{
 		"mangafire",
@@ -144,6 +147,21 @@ func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	for _, key := range webtoonsTests {
 		if _, ok := r.Get(key); !ok {
 			t.Fatalf("expected webtoons connector for key %q", key)
+		}
+	}
+
+	freeWebNovelTests := []string{
+		"freewebnovel",
+		"FreeWebNovel",
+		"freewebnovel.com",
+		"https://freewebnovel.com/novel/star-odyssey",
+		"https://freewebnovel.com/novel/my-rich-wife/chapter-2978",
+		"www.freewebnovel.com",
+	}
+
+	for _, key := range freeWebNovelTests {
+		if _, ok := r.Get(key); !ok {
+			t.Fatalf("expected freewebnovel connector for key %q", key)
 		}
 	}
 }

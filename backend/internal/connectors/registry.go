@@ -120,6 +120,8 @@ func normalizeConnectorKey(raw string) string {
 		return "mgeko"
 	case "webtoons.com", "m.webtoons.com":
 		return "webtoons"
+	case "freewebnovel.com":
+		return "freewebnovel"
 	default:
 		return key
 	}
