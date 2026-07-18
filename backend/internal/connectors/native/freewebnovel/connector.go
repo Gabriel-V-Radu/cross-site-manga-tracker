@@ -7,11 +7,13 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -41,6 +43,9 @@ type Connector struct {
 	baseURL     string
 	allowedHost []string
 	httpClient  *http.Client
+
+	warmMu sync.Mutex
+	warmed bool
 }
 
 type searchEntry struct {
@@ -51,18 +56,25 @@ type searchEntry struct {
 }
 
 func NewConnector() *Connector {
+	client := &http.Client{Timeout: 12 * time.Second}
+	if jar, err := cookiejar.New(nil); err == nil {
+		client.Jar = jar
+	}
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: []string{"freewebnovel.com"},
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
+		httpClient:  client,
 	}
 }
 
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
 		client = &http.Client{Timeout: 12 * time.Second}
+	}
+	if client.Jar == nil {
+		if jar, err := cookiejar.New(nil); err == nil {
+			client.Jar = jar
+		}
 	}
 	if len(allowedHost) == 0 {
 		allowedHost = []string{"freewebnovel.com"}
@@ -87,7 +99,12 @@ func (c *Connector) Kind() string {
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/home")
+	_, err := c.fetchPage(ctx, c.baseURL+"/home", "")
+	if err == nil {
+		c.warmMu.Lock()
+		c.warmed = true
+		c.warmMu.Unlock()
+	}
 	return err
 }
 
@@ -131,7 +148,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		limit = 50
 	}
 
-	body, err := c.fetchPage(ctx, c.baseURL+"/search?keyword="+url.QueryEscape(query))
+	body, err := c.fetchPageResilient(ctx, c.baseURL+"/search?keyword="+url.QueryEscape(query), c.baseURL+"/")
 	if err != nil {
 		return nil, fmt.Errorf("fetch freewebnovel search page: %w", err)
 	}
@@ -200,7 +217,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 }
 
 func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
-	body, err := c.fetchPage(ctx, c.baseURL+"/novel/"+slug)
+	body, err := c.fetchPageResilient(ctx, c.baseURL+"/novel/"+slug, c.baseURL+"/")
 	if err != nil {
 		return nil, fmt.Errorf("fetch novel page: %w", err)
 	}
@@ -335,15 +352,66 @@ func extractRelatedTitles(body string, primaryTitle string) []string {
 	return searchutil.UniqueNonEmpty(related)
 }
 
-func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
+// warm performs a best-effort homepage fetch so the shared cookie jar picks up
+// any Cloudflare clearance cookie before hitting the search/novel endpoints,
+// which a bare (cookie-less) request is more likely to have challenged with a
+// 403. It only marks success so a transient failure is retried next time.
+func (c *Connector) warm(ctx context.Context) {
+	c.warmMu.Lock()
+	defer c.warmMu.Unlock()
+	if c.warmed {
+		return
+	}
+
+	warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := c.fetchPage(warmCtx, c.baseURL+"/home", ""); err == nil {
+		c.warmed = true
+	}
+}
+
+// fetchPageResilient warms the session, fetches, and — if the request fails
+// (e.g. Cloudflare challenged a cold request or the clearance cookie expired) —
+// re-warms with a fresh homepage hit and retries once.
+func (c *Connector) fetchPageResilient(ctx context.Context, endpoint string, referer string) (string, error) {
+	c.warm(ctx)
+	body, err := c.fetchPage(ctx, endpoint, referer)
+	if err == nil {
+		return body, nil
+	}
+
+	c.warmMu.Lock()
+	c.warmed = false
+	c.warmMu.Unlock()
+	c.warm(ctx)
+
+	return c.fetchPage(ctx, endpoint, referer)
+}
+
+func (c *Connector) fetchPage(ctx context.Context, endpoint string, referer string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	// Present as a real Chrome navigation. freewebnovel.com sits behind
+	// Cloudflare, which challenges requests that don't look browser-like.
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	} else {
+		req.Header.Set("Sec-Fetch-Site", "none")
+	}
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
