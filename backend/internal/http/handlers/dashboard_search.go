@@ -40,7 +40,10 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	}
 
 	searchTimeout := 5 * time.Second
-	if source.Key == "mangafire" {
+	if source.Key == "mangafire" || source.Key == "freewebnovel" {
+		// Both sit behind Cloudflare and need extra time: mangafire paces its
+		// API, freewebnovel warms a homepage hit for a clearance cookie before
+		// searching (and may retry once), which adds a round-trip.
 		searchTimeout = 12 * time.Second
 	}
 
