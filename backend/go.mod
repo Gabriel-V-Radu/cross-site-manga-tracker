@@ -1,10 +1,11 @@
 module github.com/gabriel/cross-site-tracker/backend
 
-go 1.23.0
+go 1.24
 
 require (
 	github.com/gofiber/fiber/v2 v2.52.6
 	github.com/joho/godotenv v1.5.1
+	github.com/refraction-networking/utls v1.8.2
 	modernc.org/sqlite v1.38.2
 )
 
@@ -22,6 +23,7 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
+	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/sys v0.34.0 // indirect
 	modernc.org/libc v1.66.3 // indirect

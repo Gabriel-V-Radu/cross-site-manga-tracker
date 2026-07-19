@@ -6,6 +6,7 @@ import (
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
@@ -56,20 +59,16 @@ type searchEntry struct {
 }
 
 func NewConnector() *Connector {
-	client := &http.Client{Timeout: 12 * time.Second}
-	if jar, err := cookiejar.New(nil); err == nil {
-		client.Jar = jar
-	}
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: []string{"freewebnovel.com"},
-		httpClient:  client,
+		httpClient:  newChromeHTTPClient(12 * time.Second),
 	}
 }
 
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = newChromeHTTPClient(12 * time.Second)
 	}
 	if client.Jar == nil {
 		if jar, err := cookiejar.New(nil); err == nil {
@@ -84,6 +83,63 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		allowedHost: allowedHost,
 		httpClient:  client,
 	}
+}
+
+// newChromeHTTPClient builds an HTTP client whose TLS handshake mimics Google
+// Chrome (via utls). freewebnovel.com sits behind Cloudflare, which fingerprints
+// the TLS ClientHello (JA3) and blocks Go's default net/http signature from
+// lower-reputation IPs even when the headers look like a browser. Presenting a
+// real Chrome fingerprint clears that check. ALPN is pinned to HTTP/1.1 so the
+// negotiated protocol matches net/http's HTTP/1.1 transport (pinning ALPN does
+// not change the JA3, which keys on extension types, not their values).
+func newChromeHTTPClient(timeout time.Duration) *http.Client {
+	jar, _ := cookiejar.New(nil)
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     false,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialTLSContext:        dialChromeTLS,
+		MaxIdleConns:          20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   12 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{Timeout: timeout, Jar: jar, Transport: transport}
+}
+
+func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) {
+	rawConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+
+	uconn := utls.UClient(rawConn, &utls.Config{ServerName: host}, utls.HelloCustom)
+
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+	if err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("build chrome tls spec: %w", err)
+	}
+	for _, ext := range spec.Extensions {
+		if alpn, ok := ext.(*utls.ALPNExtension); ok {
+			alpn.AlpnProtocols = []string{"http/1.1"}
+		}
+	}
+	if err := uconn.ApplyPreset(&spec); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("apply chrome tls spec: %w", err)
+	}
+	if err := uconn.HandshakeContext(ctx); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("chrome tls handshake: %w", err)
+	}
+
+	return uconn, nil
 }
 
 func (c *Connector) Key() string {
