@@ -33,11 +33,13 @@ type Connector struct {
 	baseURL     string
 	allowedHost []string
 	httpClient  *http.Client
+	signer      *signer
 
 	requestMu          sync.Mutex
 	nextAllowedRequest time.Time
 	minRequestInterval time.Duration
 	cooldownUntil      time.Time
+	cooldownReason     string
 
 	releaseMemoMu sync.Mutex
 	releaseMemo   map[string]latestReleaseMemo
@@ -50,6 +52,7 @@ func NewConnector() *Connector {
 		httpClient: &http.Client{
 			Timeout: 12 * time.Second,
 		},
+		signer: newSigner(),
 		// Cloudflare on mangafire.to blocks IPs that burst requests, so the
 		// live connector paces itself much more conservatively than the
 		// local test servers need.
@@ -69,6 +72,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		baseURL:            strings.TrimRight(baseURL, "/"),
 		allowedHost:        allowedHost,
 		httpClient:         client,
+		signer:             newSigner(),
 		minRequestInterval: 150 * time.Millisecond,
 		releaseMemo:        map[string]latestReleaseMemo{},
 	}
@@ -117,16 +121,54 @@ type apiChapter struct {
 	CreatedAt int64   `json:"createdAt"`
 }
 
+type apiMeta struct {
+	Page     int  `json:"page"`
+	PerPage  int  `json:"perPage"`
+	LastPage int  `json:"lastPage"`
+	Total    int  `json:"total"`
+	HasNext  bool `json:"hasNext"`
+}
+
 type apiChaptersResponse struct {
 	Items []apiChapter `json:"items"`
+	Meta  apiMeta      `json:"meta"`
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
+	params := url.Values{}
+	params.Set("limit", "1")
 	var response apiTitlesResponse
-	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles?limit=1", &response); err != nil {
+	if err := c.fetchAPI(ctx, "/api/titles", params, &response); err != nil {
 		return err
 	}
 	return nil
+}
+
+// fetchAPI signs an API request and fetches it. path is the request path only
+// (e.g. "/api/titles/dkw"); params are the query params sent alongside the
+// mandatory `vrf` token. MangaFire returns 403 {"message":"Missing token."}
+// for any /api/titles* request without a valid vrf, so every such call routes
+// through here. The params signed are exactly the params sent (minus vrf), which
+// is what the server re-validates against.
+func (c *Connector) fetchAPI(ctx context.Context, path string, params url.Values, target any) error {
+	if params == nil {
+		params = url.Values{}
+	}
+
+	token, err := c.signer.Sign(path, params)
+	if err != nil {
+		return fmt.Errorf("sign mangafire request: %w", err)
+	}
+
+	query := url.Values{}
+	for key, values := range params {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	query.Set("vrf", token)
+
+	return c.fetchJSON(ctx, c.baseURL+path+"?"+query.Encode(), target)
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
@@ -160,9 +202,11 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		limit = 50
 	}
 
-	searchURL := c.baseURL + "/api/titles?keyword=" + url.QueryEscape(query) + "&limit=" + strconv.Itoa(limit)
+	params := url.Values{}
+	params.Set("keyword", query)
+	params.Set("limit", strconv.Itoa(limit))
 	var response apiTitlesResponse
-	if err := c.fetchJSON(ctx, searchURL, &response); err != nil {
+	if err := c.fetchAPI(ctx, "/api/titles", params, &response); err != nil {
 		return nil, fmt.Errorf("search mangafire titles: %w", err)
 	}
 
@@ -190,7 +234,21 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	chapters, err := c.fetchChapters(ctx, hid)
+	// Chapters are paged newest-first, and a single chapter number can appear
+	// once per language. All entries sharing a number are contiguous, so we
+	// page until one dips *below* the target: only then is every language
+	// variant of the target guaranteed fetched, letting pickChapterEntry prefer
+	// the English one rather than latching onto a variant that happens to sit at
+	// the tail of a page. Recent chapters still resolve in a single page.
+	passedTarget := false
+	chapters, err := c.fetchChapters(ctx, hid, func(page []apiChapter) bool {
+		for i := range page {
+			if page[i].Number < chapter {
+				passedTarget = true
+			}
+		}
+		return passedTarget
+	})
 	if err != nil {
 		return "", fmt.Errorf("fetch chapters: %w", err)
 	}
@@ -258,7 +316,7 @@ func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err e
 
 func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle, error) {
 	var response apiTitleDetailResponse
-	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles/"+url.PathEscape(hid), &response); err != nil {
+	if err := c.fetchAPI(ctx, "/api/titles/"+hid, nil, &response); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(response.Data.HID) == "" {
@@ -267,12 +325,50 @@ func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle
 	return &response.Data, nil
 }
 
-func (c *Connector) fetchChapters(ctx context.Context, hid string) ([]apiChapter, error) {
-	var response apiChaptersResponse
-	if err := c.fetchJSON(ctx, c.baseURL+"/api/titles/"+url.PathEscape(hid)+"/chapters", &response); err != nil {
-		return nil, err
+// chaptersPageLimit is the API's maximum page size (larger values return 422).
+const chaptersPageLimit = 200
+
+// maxChapterPages bounds how deep fetchChapters will page so a caller without
+// an early-exit predicate still terminates instead of hammering the API. Note
+// this bounds fetched *entries* (60 * 200 = 12k), and a chapter number yields
+// one entry per language, so the reachable chapter depth is lower for
+// multilingual series. In practice the caller's request deadline is the tighter
+// bound: resolving a chapter far below the latest one is best-effort and falls
+// back to the title URL if it can't be reached in time.
+const maxChapterPages = 60
+
+// fetchChapters walks the paginated chapters endpoint newest-first
+// (sort=number, order=desc), accumulating every page. After each page, stop (if
+// non-nil) is consulted with the page just fetched; returning true ends paging
+// early — used to avoid fetching every page of long series when only the latest
+// chapter or a specific recent chapter is needed. Paging also stops when the API
+// reports no further pages.
+func (c *Connector) fetchChapters(ctx context.Context, hid string, stop func(page []apiChapter) bool) ([]apiChapter, error) {
+	path := "/api/titles/" + hid + "/chapters"
+	all := make([]apiChapter, 0, chaptersPageLimit)
+
+	for page := 1; page <= maxChapterPages; page++ {
+		params := url.Values{}
+		params.Set("sort", "number")
+		params.Set("order", "desc")
+		params.Set("limit", strconv.Itoa(chaptersPageLimit))
+		params.Set("page", strconv.Itoa(page))
+
+		var response apiChaptersResponse
+		if err := c.fetchAPI(ctx, path, params, &response); err != nil {
+			return nil, err
+		}
+		all = append(all, response.Items...)
+
+		if stop != nil && stop(response.Items) {
+			break
+		}
+		if !response.Meta.HasNext || len(response.Items) == 0 {
+			break
+		}
 	}
-	return response.Items, nil
+
+	return all, nil
 }
 
 // fetchLatestReleaseAt looks up the exact release timestamp of the latest
@@ -291,7 +387,9 @@ func (c *Connector) fetchLatestReleaseAt(ctx context.Context, hid string, latest
 		return memo.releaseAt
 	}
 
-	chapters, err := c.fetchChapters(ctx, hid)
+	// The latest chapter sits on the first page of the newest-first listing, so
+	// a single page is enough to read its release timestamp.
+	chapters, err := c.fetchChapters(ctx, hid, func([]apiChapter) bool { return true })
 	if err != nil {
 		return nil
 	}
@@ -455,8 +553,8 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if remaining := c.cooldownRemaining(); remaining > 0 {
-			return fmt.Errorf("mangafire rate limited, cooling down for %s: %w", remaining.Round(time.Second), &httpStatusError{StatusCode: http.StatusTooManyRequests})
+		if remaining, reason := c.cooldownRemaining(); remaining > 0 {
+			return fmt.Errorf("mangafire %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &httpStatusError{StatusCode: http.StatusTooManyRequests})
 		}
 
 		if err := c.waitForRequestWindow(ctx); err != nil {
@@ -495,13 +593,24 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 
 		statusErr := &httpStatusError{StatusCode: res.StatusCode}
 		retryAfter := res.Header.Get("Retry-After")
+		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		res.Body.Close()
 
-		// Cloudflare answers 403 ("Access denied") when it has rate limited
-		// the IP; retrying immediately only extends the block, so open the
-		// circuit and fail fast until the cooldown expires.
 		if res.StatusCode == http.StatusForbidden {
-			c.startCooldown(5 * time.Minute)
+			// The API answers 403 {"message":"Missing token."/"Invalid token."}
+			// when the vrf token is absent or minted by a stale signer bundle —
+			// a signing problem, not an IP block. Surface it distinctly (and
+			// point at the refresh runbook) so it is not mistaken for a
+			// Cloudflare rate-limit; still back off to avoid hammering a
+			// rejection that will not clear until the bundle is refreshed.
+			if isTokenRejection(errBody) {
+				c.startCooldown(2*time.Minute, "signer token rejected (stale signer_bundle.js? see signer_bundle.README.md)")
+				return fmt.Errorf("mangafire rejected request token (stale signer_bundle.js? see signer_bundle.README.md): %w", statusErr)
+			}
+			// Otherwise Cloudflare has rate limited the IP ("Access denied");
+			// retrying immediately only extends the block, so open the circuit
+			// and fail fast until the cooldown expires.
+			c.startCooldown(5*time.Minute, "rate limited")
 			return statusErr
 		}
 
@@ -514,7 +623,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 				c.deferRequests(delay)
 				continue
 			}
-			c.startCooldown(2 * time.Minute)
+			c.startCooldown(2*time.Minute, "rate limited")
 			return statusErr
 		}
 
@@ -526,19 +635,28 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	return &httpStatusError{StatusCode: http.StatusTooManyRequests}
 }
 
-func (c *Connector) cooldownRemaining() time.Duration {
+func (c *Connector) cooldownRemaining() (time.Duration, string) {
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
-	return time.Until(c.cooldownUntil)
+	return time.Until(c.cooldownUntil), c.cooldownReason
 }
 
-func (c *Connector) startCooldown(duration time.Duration) {
+func (c *Connector) startCooldown(duration time.Duration, reason string) {
 	until := time.Now().UTC().Add(duration)
 	c.requestMu.Lock()
 	if until.After(c.cooldownUntil) {
 		c.cooldownUntil = until
+		c.cooldownReason = reason
 	}
 	c.requestMu.Unlock()
+}
+
+// isTokenRejection reports whether a 403 body is the API's vrf-token error
+// ({"message":"Missing token."} / {"message":"Invalid token."}) rather than a
+// Cloudflare IP block, so the two can be surfaced and handled differently.
+func isTokenRejection(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "missing token") || strings.Contains(lower, "invalid token")
 }
 
 func (c *Connector) waitForRequestWindow(ctx context.Context) error {
