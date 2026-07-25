@@ -78,9 +78,11 @@ func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T) {
 	prev := 10.0
 	next := 10.0
-	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
+	storedReleaseAt := time.Now().UTC().Add(-6 * time.Hour)
+	sourceReleaseAt := time.Now().UTC()
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev, LatestReleaseAt: &storedReleaseAt}}}
 	registry := connectors.NewRegistry()
-	if err := registry.Register(fakeConnector{latest: &next}); err != nil {
+	if err := registry.Register(fakeConnector{latest: &next, releaseDate: &sourceReleaseAt}); err != nil {
 		t.Fatalf("register connector: %v", err)
 	}
 
@@ -93,7 +95,48 @@ func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T
 		t.Fatalf("expected 1 update call, got %d", repo.updatedCount)
 	}
 	if repo.updatedAt != nil {
-		t.Fatalf("expected release date to remain unset when chapter does not advance")
+		t.Fatalf("expected stored release date to be kept when chapter does not advance, got %v", repo.updatedAt)
+	}
+}
+
+func TestPollerRunOnce_FillsMissingReleaseDateWhenChapterNotAdvanced(t *testing.T) {
+	prev := 10.0
+	next := 10.0
+	sourceReleaseAt := time.Now().UTC().Add(-3 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &next, releaseDate: &sourceReleaseAt}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedAt == nil || !repo.updatedAt.Equal(sourceReleaseAt) {
+		t.Fatalf("expected source release date to fill missing stored date, got %v", repo.updatedAt)
+	}
+}
+
+func TestPollerRunOnce_UpdatesReleaseDateWhenChapterAdvances(t *testing.T) {
+	prev := 10.0
+	next := 11.0
+	storedReleaseAt := time.Now().UTC().Add(-72 * time.Hour)
+	sourceReleaseAt := time.Now().UTC().Add(-1 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev, LatestReleaseAt: &storedReleaseAt}}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &next, releaseDate: &sourceReleaseAt}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedAt == nil || !repo.updatedAt.Equal(sourceReleaseAt) {
+		t.Fatalf("expected release date to update when chapter advances, got %v", repo.updatedAt)
 	}
 }
 

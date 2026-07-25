@@ -124,8 +124,16 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			latest = result.LatestChapter
 		}
 
+		newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
 		latestReleaseAt := result.LastUpdatedAt
-		clearLatestReleaseAt := latestReleaseAt == nil && isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
+		if !newChapter && tracker.LatestReleaseAt != nil {
+			// The chapter didn't advance, so keep the stored release date
+			// rather than rewriting it with the source's current value —
+			// some sources bump their update timestamp without releasing
+			// anything, which made dates drift toward "just now".
+			latestReleaseAt = nil
+		}
+		clearLatestReleaseAt := latestReleaseAt == nil && newChapter
 
 		var canonicalSourceItemID *string
 		resolvedSourceItemID := strings.TrimSpace(result.SourceItemID)

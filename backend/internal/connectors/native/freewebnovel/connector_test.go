@@ -149,7 +149,9 @@ func TestFreeWebNovelResolveByURL(t *testing.T) {
 	if resolved.LastUpdatedAt == nil {
 		t.Fatalf("expected latest release date")
 	}
-	if got := resolved.LastUpdatedAt.Format("2006-01-02 15:04:05"); got != "2026-07-19 03:20:10" {
+	// The fixture meta says "2026-07-19 03:20:10", which the site renders in
+	// UTC+8; the connector must convert it to UTC.
+	if got := resolved.LastUpdatedAt.Format("2006-01-02 15:04:05"); got != "2026-07-18 19:20:10" {
 		t.Fatalf("unexpected latest release date: %s", got)
 	}
 	if !contains(resolved.RelatedTitles, "Step On The Star") || !contains(resolved.RelatedTitles, "Treading the Stars") {

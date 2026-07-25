@@ -29,6 +29,7 @@ type PollingTracker struct {
 	SourceItemID       *string
 	SourceURL          string
 	LatestKnownChapter *float64
+	LatestReleaseAt    *time.Time
 	SourceKey          string
 	LastCheckedAt      *time.Time
 }

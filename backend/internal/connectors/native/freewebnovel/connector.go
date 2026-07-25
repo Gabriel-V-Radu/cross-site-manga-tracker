@@ -507,6 +507,13 @@ func formatChapterNumber(chapter float64) string {
 	return strconv.FormatFloat(chapter, 'f', -1, 64)
 }
 
+// siteTimeZone is the zone og:novel:update_time is rendered in. The site emits
+// wall-clock times in UTC+8: cross-checking live pages, the meta value is
+// consistently 8 hours ahead of the "[ Updated N hours ago ]" text shown on the
+// same page. Parsing it as UTC pushed release dates up to 8h into the future,
+// which the dashboard clamps to "just now".
+var siteTimeZone = time.FixedZone("UTC+8", 8*60*60)
+
 func parseUpdateTime(raw string) *time.Time {
 	normalized := strings.TrimSpace(html.UnescapeString(raw))
 	if normalized == "" {
@@ -520,7 +527,7 @@ func parseUpdateTime(raw string) *time.Time {
 		"2006-01-02",
 	}
 	for _, layout := range layouts {
-		parsed, err := time.Parse(layout, normalized)
+		parsed, err := time.ParseInLocation(layout, normalized, siteTimeZone)
 		if err != nil {
 			continue
 		}
