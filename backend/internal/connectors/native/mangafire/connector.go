@@ -607,6 +607,15 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 				c.startCooldown(2*time.Minute, "signer token rejected (stale signer_bundle.js? see signer_bundle.README.md)")
 				return fmt.Errorf("mangafire rejected request token (stale signer_bundle.js? see signer_bundle.README.md): %w", statusErr)
 			}
+			// A managed Cloudflare challenge is a site-wide configuration
+			// change, not an IP block that lapses: waiting does not earn access,
+			// only MangaFire turning it off does. Back off far longer than the
+			// rate-limit cooldown so polling stays quiet, and name it precisely
+			// so it is not misread as a throttle that a retry would clear.
+			if isCloudflareChallenge(res.Header, errBody) {
+				c.startCooldown(30*time.Minute, "Cloudflare browser challenge — the site now requires interactive verification")
+				return fmt.Errorf("mangafire is behind a Cloudflare browser challenge and cannot be fetched programmatically: %w", statusErr)
+			}
 			// Otherwise Cloudflare has rate limited the IP ("Access denied");
 			// retrying immediately only extends the block, so open the circuit
 			// and fail fast until the cooldown expires.
@@ -657,6 +666,20 @@ func (c *Connector) startCooldown(duration time.Duration, reason string) {
 func isTokenRejection(body []byte) bool {
 	lower := strings.ToLower(string(body))
 	return strings.Contains(lower, "missing token") || strings.Contains(lower, "invalid token")
+}
+
+// isCloudflareChallenge reports whether a 403 is Cloudflare's managed-challenge
+// interstitial rather than a token rejection or a plain IP block. Cloudflare
+// marks these with `Cf-Mitigated: challenge`; the body sniff is a fallback for
+// when that header is stripped by an intermediary.
+func isCloudflareChallenge(header http.Header, body []byte) bool {
+	if strings.EqualFold(strings.TrimSpace(header.Get("Cf-Mitigated")), "challenge") {
+		return true
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "just a moment") ||
+		strings.Contains(lower, "challenges.cloudflare.com") ||
+		strings.Contains(lower, "cf-challenge")
 }
 
 func (c *Connector) waitForRequestWindow(ctx context.Context) error {

@@ -209,6 +209,46 @@ func TestMangaFireTokenRejectionIsDistinct(t *testing.T) {
 	}
 }
 
+// TestMangaFireCloudflareChallengeIsDistinct verifies a managed-challenge 403 is
+// reported as browser verification rather than as a rate-limit a retry would clear.
+func TestMangaFireCloudflareChallengeIsDistinct(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	err := connector.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatalf("expected error on Cloudflare challenge")
+	}
+	if !strings.Contains(err.Error(), "Cloudflare browser challenge") {
+		t.Fatalf("expected a distinct challenge error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "rejected request token") {
+		t.Fatalf("challenge must not be reported as a token rejection: %v", err)
+	}
+
+	// The cooldown must name the challenge, so an operator is not left waiting
+	// out a throttle that was never the problem.
+	_, err = connector.SearchByTitle(context.Background(), "one piece", 5)
+	if err == nil {
+		t.Fatalf("expected fail-fast during cooldown")
+	}
+	if !strings.Contains(err.Error(), "Cloudflare browser challenge") {
+		t.Fatalf("expected cooldown to cite the challenge, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("challenge cooldown must not be labelled a rate limit: %v", err)
+	}
+}
+
 func TestMangaFireRequestsCarryToken(t *testing.T) {
 	const hid = "big"
 	server, _ := newPagedChaptersServer(t, hid, 30)
