@@ -274,16 +274,50 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 			}
 		}
 
-		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
+		coverURL, servingSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
 		card.CoverURL = coverURL
 		if waitingCover {
 			pendingCovers = true
+		}
+
+		// When a fallback source served this card, present that source rather than
+		// the primary: a badge naming a site that supplied nothing, next to links
+		// pointing somewhere else, is worse than no badge at all.
+		if serving, ok := findServingSource(servingSourceKey, sourceKey, alternates); ok {
+			card.SourceURL = serving.SourceURL
+			card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[serving.SourceID])
+			if servingSource, found := sourceByID[serving.SourceID]; found {
+				card.SourceLogoLabel = servingSource.Name
+			}
 		}
 
 		cards = append(cards, card)
 	}
 
 	return cards, pendingCovers
+}
+
+// findServingSource resolves the source key that supplied a card's data to the
+// matching alternate. It reports false when the primary source served the card,
+// when nothing has resolved yet, or when the key names no linked alternate —
+// all cases where the card should keep presenting its primary source.
+func findServingSource(servingSourceKey, primarySourceKey string, alternates []repository.TrackerSourceRef) (repository.TrackerSourceRef, bool) {
+	serving := strings.TrimSpace(servingSourceKey)
+	if serving == "" || strings.EqualFold(serving, strings.TrimSpace(primarySourceKey)) {
+		return repository.TrackerSourceRef{}, false
+	}
+
+	for _, alternate := range alternates {
+		if !strings.EqualFold(strings.TrimSpace(alternate.SourceKey), serving) {
+			continue
+		}
+		if strings.TrimSpace(alternate.SourceURL) == "" || alternate.SourceID <= 0 {
+			continue
+		}
+		return alternate, true
+	}
+
+	return repository.TrackerSourceRef{}, false
 }
 
 func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string) []trackerSiteLinkView {
@@ -307,27 +341,31 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 	return links
 }
 
-func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (string, bool) {
+// getCachedOrQueueCover returns the cover URL, the source key that supplied it,
+// and whether a background fetch is still pending. The serving source is empty
+// until a fetch completes, so a first render shows the tracker's primary source
+// and a later one corrects it if a fallback answered instead.
+func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (string, string, bool) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
-		return "", false
+		return "", "", false
 	}
 
 	cacheKey := buildCoverCacheKey(trimmedSourceKey, sourceURL, sourceItemID)
-	if cachedURL, found, ok := h.getCachedCover(cacheKey); ok {
+	if cachedURL, servingKey, found, ok := h.getCachedCoverWithSource(cacheKey); ok {
 		if found {
-			return cachedURL, false
+			return cachedURL, servingKey, false
 		}
-		return "", false
+		return "", "", false
 	}
 
 	if strings.TrimSpace(sourceURL) == "" {
 		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
-		return "", false
+		return "", "", false
 	}
 
 	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, alternates, cacheKey, pageKey)
-	return "", true
+	return "", "", true
 }
 
 func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {

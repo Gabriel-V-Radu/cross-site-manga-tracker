@@ -307,7 +307,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 			continue
 		}
 
-		h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
+		h.setCachedCoverFromSource(cacheKey, coverURL, trimmedSourceKey, true, 12*time.Hour)
 		return coverURL, nil
 	}
 
@@ -326,7 +326,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 			continue
 		}
 
-		h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
+		h.setCachedCoverFromSource(cacheKey, coverURL, alternateKey, true, 12*time.Hour)
 		return coverURL, nil
 	}
 
@@ -405,28 +405,39 @@ func buildCoverCacheKey(sourceKey, sourceURL string, sourceItemID *string) strin
 }
 
 func (h *DashboardHandler) getCachedCover(titleID string) (coverURL string, found bool, ok bool) {
+	coverURL, _, found, ok = h.getCachedCoverWithSource(titleID)
+	return coverURL, found, ok
+}
+
+// getCachedCoverWithSource also reports which source supplied the cached cover.
+func (h *DashboardHandler) getCachedCoverWithSource(titleID string) (coverURL string, sourceKey string, found bool, ok bool) {
 	h.cacheMu.RLock()
 	entry, exists := h.coverCache[titleID]
 	h.cacheMu.RUnlock()
 	if !exists {
-		return "", false, false
+		return "", "", false, false
 	}
 
 	if time.Now().UTC().After(entry.ExpiresAt) {
 		h.cacheMu.Lock()
 		delete(h.coverCache, titleID)
 		h.cacheMu.Unlock()
-		return "", false, false
+		return "", "", false, false
 	}
 
-	return entry.CoverURL, entry.Found, true
+	return entry.CoverURL, entry.SourceKey, entry.Found, true
 }
 
 func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, ttl time.Duration) {
+	h.setCachedCoverFromSource(titleID, coverURL, "", found, ttl)
+}
+
+func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey string, found bool, ttl time.Duration) {
 	h.cacheMu.Lock()
 	h.coverCache[titleID] = coverCacheEntry{
 		CoverURL:  coverURL,
 		Found:     found,
+		SourceKey: strings.TrimSpace(sourceKey),
 		ExpiresAt: time.Now().UTC().Add(ttl),
 	}
 	h.cacheMu.Unlock()

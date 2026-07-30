@@ -100,6 +100,109 @@ func TestFetchCoverURLFallsBackToAlternate(t *testing.T) {
 	}
 }
 
+// TestFindServingSource pins which source a card presents. A card must never
+// badge a site that supplied nothing while its links point somewhere else.
+func TestFindServingSource(t *testing.T) {
+	alternates := []repository.TrackerSourceRef{
+		{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
+		{SourceID: 4, SourceKey: "nourlsource", SourceURL: "   "},
+		{SourceID: 0, SourceKey: "noidsource", SourceURL: "https://noid.example/x"},
+	}
+
+	cases := []struct {
+		name        string
+		servingKey  string
+		primaryKey  string
+		wantFound   bool
+		wantURL     string
+		wantSourceI int64
+	}{
+		{
+			name:        "fallback served the card",
+			servingKey:  "mirrorsource",
+			primaryKey:  "blockedsource",
+			wantFound:   true,
+			wantURL:     "https://mirror.example/series/a.ZD1",
+			wantSourceI: 9,
+		},
+		{name: "primary served the card", servingKey: "blockedsource", primaryKey: "blockedsource"},
+		{name: "primary match ignores case", servingKey: "BlockedSource", primaryKey: "blockedsource"},
+		{name: "nothing resolved yet", servingKey: "", primaryKey: "blockedsource"},
+		{name: "serving key is not a linked alternate", servingKey: "elsewhere", primaryKey: "blockedsource"},
+		{name: "alternate without a url is unusable", servingKey: "nourlsource", primaryKey: "blockedsource"},
+		{name: "alternate without a source id is unusable", servingKey: "noidsource", primaryKey: "blockedsource"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, ok := findServingSource(testCase.servingKey, testCase.primaryKey, alternates)
+			if ok != testCase.wantFound {
+				t.Fatalf("expected found=%v, got %v", testCase.wantFound, ok)
+			}
+			if !testCase.wantFound {
+				return
+			}
+			if got.SourceURL != testCase.wantURL {
+				t.Fatalf("expected url %q, got %q", testCase.wantURL, got.SourceURL)
+			}
+			if got.SourceID != testCase.wantSourceI {
+				t.Fatalf("expected source id %d, got %d", testCase.wantSourceI, got.SourceID)
+			}
+		})
+	}
+}
+
+// TestFetchCoverURLRecordsServingSource checks the cache remembers which site
+// answered, since the card badge is driven from it.
+func TestFetchCoverURLRecordsServingSource(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedConnector{key: "blockedsource"}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "mirrorsource", cover: "https://cdn.example/cover.webp"}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	alternates := []repository.TrackerSourceRef{
+		{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
+	}
+
+	if _, err := h.fetchCoverURL(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, alternates); err != nil {
+		t.Fatalf("expected the alternate to supply a cover: %v", err)
+	}
+
+	cacheKey := buildCoverCacheKey("blockedsource", "https://blocked.example/title/a", nil)
+	_, servingKey, found, ok := h.getCachedCoverWithSource(cacheKey)
+	if !ok || !found {
+		t.Fatalf("expected a cached cover")
+	}
+	if servingKey != "mirrorsource" {
+		t.Fatalf("expected the mirror to be recorded as the serving source, got %q", servingKey)
+	}
+}
+
+// TestFetchCoverURLRecordsPrimaryWhenItServes is the counterpart: a healthy
+// primary must still be reported as the serving source.
+func TestFetchCoverURLRecordsPrimaryWhenItServes(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(mirrorConnector{key: "primarysource", cover: "https://cdn.example/primary.webp"}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+
+	if _, err := h.fetchCoverURL(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil); err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+
+	cacheKey := buildCoverCacheKey("primarysource", "https://primary.example/title/a", nil)
+	_, servingKey, _, _ := h.getCachedCoverWithSource(cacheKey)
+	if servingKey != "primarysource" {
+		t.Fatalf("expected the primary source to be recorded, got %q", servingKey)
+	}
+}
+
 func TestFetchCoverURLWithoutAlternatesStillFails(t *testing.T) {
 	registry := connectors.NewRegistry()
 	if err := registry.Register(blockedConnector{key: "blockedsource"}); err != nil {

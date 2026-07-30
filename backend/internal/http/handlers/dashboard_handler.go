@@ -36,8 +36,12 @@ type DashboardHandler struct {
 }
 
 type coverCacheEntry struct {
-	CoverURL  string
-	Found     bool
+	CoverURL string
+	Found    bool
+	// SourceKey names the source that actually supplied the cover, which is not
+	// always the tracker's primary one. The card badge and its "open" link follow
+	// it so the UI never claims a site that served nothing.
+	SourceKey string
 	ExpiresAt time.Time
 }
 
