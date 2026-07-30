@@ -114,7 +114,7 @@ func TestGetCachedOrQueueChapterURL_MangaFireQueuesResolver(t *testing.T) {
 	sourceURL := "https://mangafire.to/manga/one-piecee.dkw"
 	chapter := 1173.0
 
-	resolvedURL, waiting := h.getCachedOrQueueChapterURL("mangafire", sourceURL, chapter, "")
+	resolvedURL, waiting := h.getCachedOrQueueChapterURL("mangafire", sourceURL, chapter, nil, "")
 	if resolvedURL != sourceURL {
 		t.Fatalf("expected initial URL %q, got %q", sourceURL, resolvedURL)
 	}

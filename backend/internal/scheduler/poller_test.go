@@ -209,7 +209,7 @@ func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
 		SourceURL:          "https://blocked/series",
 		SourceKey:          "blockedsource",
 		LatestKnownChapter: &prev,
-		AlternateSources: []repository.PollingTrackerSource{
+		AlternateSources: []repository.TrackerSourceRef{
 			{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
 		},
 	}}}
@@ -264,7 +264,7 @@ func TestPollerRunOnce_FallbackNeverClearsStoredReleaseDate(t *testing.T) {
 		SourceKey:          "blockedsource",
 		LatestKnownChapter: &prev,
 		LatestReleaseAt:    &storedReleaseAt,
-		AlternateSources: []repository.PollingTrackerSource{
+		AlternateSources: []repository.TrackerSourceRef{
 			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
 		},
 	}}}
@@ -308,7 +308,7 @@ func TestPollerRunOnce_FallbackNeverLowersLatestChapter(t *testing.T) {
 		SourceURL:          "https://blocked/series",
 		SourceKey:          "blockedsource",
 		LatestKnownChapter: &prev,
-		AlternateSources: []repository.PollingTrackerSource{
+		AlternateSources: []repository.TrackerSourceRef{
 			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
 		},
 	}}}

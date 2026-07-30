@@ -89,7 +89,14 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		sourceByID[source.ID] = source
 	}
 
-	cards, pendingCovers := h.buildTrackerCards(items, sourceByID, sourceLogoBySourceID, refreshKey)
+	// Covers and chapter links resolve against a tracker's primary source; these
+	// let them fall back when that source is unreadable.
+	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTracker(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sources")
+	}
+
+	cards, pendingCovers := h.buildTrackerCards(items, sourceByID, sourceLogoBySourceID, alternatesByTracker, refreshKey)
 	siteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
@@ -174,7 +181,7 @@ func buildPageNumbers(totalPages int, currentPage int) []int {
 	return pages
 }
 
-func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID map[int64]models.Source, sourceLogoBySourceID map[int64]string, pageKey string) ([]trackerCardView, bool) {
+func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID map[int64]models.Source, sourceLogoBySourceID map[int64]string, alternatesByTracker map[int64][]repository.TrackerSourceRef, pageKey string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
 	pendingCovers := false
 	for _, item := range items {
@@ -249,8 +256,10 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[item.SourceID])
 		card.SourceLogoLabel = sourceName
 
+		alternates := alternatesByTracker[item.ID]
+
 		if item.LatestKnownChapter != nil {
-			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, pageKey)
+			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, alternates, pageKey)
 			card.LatestKnownChapterURL = latestChapterURL
 			if waitingLatestChapterURL {
 				pendingCovers = true
@@ -258,14 +267,14 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		}
 
 		if item.LastReadChapter != nil {
-			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, pageKey)
+			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, alternates, pageKey)
 			card.LastReadChapterURL = lastReadChapterURL
 			if waitingLastReadChapterURL {
 				pendingCovers = true
 			}
 		}
 
-		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, pageKey)
+		coverURL, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
 		card.CoverURL = coverURL
 		if waitingCover {
 			pendingCovers = true
@@ -298,7 +307,7 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 	return links
 }
 
-func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, pageKey string) (string, bool) {
+func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (string, bool) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
 		return "", false
@@ -317,11 +326,11 @@ func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, so
 		return "", false
 	}
 
-	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, cacheKey, pageKey)
+	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, alternates, cacheKey, pageKey)
 	return "", true
 }
 
-func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, cacheKey string, pageKey string) {
+func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {
 	h.coverFetchMu.Lock()
 	if h.coverInFlight[cacheKey] {
 		h.coverFetchMu.Unlock()
@@ -352,10 +361,10 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 			return
 		}
 
-		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID)
+		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID, alternates)
 	}()
 }
-func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, pageKey string) (string, bool) {
+func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (string, bool) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", false
@@ -374,11 +383,11 @@ func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL strin
 		return trimmedSourceURL, false
 	}
 
-	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, cacheKey, pageKey)
+	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, alternates, cacheKey, pageKey)
 	return trimmedSourceURL, true
 }
 
-func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, cacheKey string, pageKey string) {
+func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {
 	h.chapterURLFetchMu.Lock()
 	if h.chapterURLInFlight[cacheKey] {
 		h.chapterURLFetchMu.Unlock()
@@ -400,7 +409,7 @@ func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, c
 			return
 		}
 
-		_, _ = h.fetchChapterURL(sourceKey, sourceURL, chapter)
+		_, _ = h.fetchChapterURL(sourceKey, sourceURL, chapter, alternates)
 	}()
 }
 
@@ -417,7 +426,10 @@ func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
 	return strings.TrimSpace(pageKey) != "" && strings.TrimSpace(pageKey) == strings.TrimSpace(activePage)
 }
 
-func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64) (string, error) {
+// fetchChapterURL resolves a chapter's reader URL from a tracker's primary source,
+// falling back to its alternate linked sources when the primary cannot answer, so
+// a blocked site does not leave every chapter link pointing nowhere useful.
+func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", fmt.Errorf("missing source url")
@@ -436,35 +448,70 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 		return trimmedSourceURL, fmt.Errorf("chapter url not found")
 	}
 
-	connector, ok := h.registry.Get(trimmedSourceKey)
-	if !ok {
-		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
-		return trimmedSourceURL, fmt.Errorf("connector not found")
+	// Primary source first, then the tracker's other linked sources.
+	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
+	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: trimmedSourceKey, SourceURL: trimmedSourceURL})
+	candidates = append(candidates, alternates...)
+
+	// A source that was actually queried and failed may succeed shortly; one with
+	// no usable connector will not, so the two are cached for different spans.
+	attempted := false
+	var lastErr error
+
+	for _, candidate := range candidates {
+		candidateKey := strings.TrimSpace(candidate.SourceKey)
+		candidateURL := strings.TrimSpace(candidate.SourceURL)
+		if candidateKey == "" || candidateURL == "" {
+			continue
+		}
+
+		connector, ok := h.registry.Get(candidateKey)
+		if !ok {
+			lastErr = fmt.Errorf("connector not found")
+			continue
+		}
+
+		resolver, ok := connector.(connectors.ChapterURLResolver)
+		if !ok {
+			lastErr = fmt.Errorf("chapter resolver not supported")
+			continue
+		}
+
+		attempted = true
+		chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if chapterURL == "" {
+			lastErr = fmt.Errorf("chapter url empty")
+			continue
+		}
+
+		h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
+		return chapterURL, nil
 	}
 
-	resolver, ok := connector.(connectors.ChapterURLResolver)
-	if !ok {
-		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
-		return trimmedSourceURL, fmt.Errorf("chapter resolver not supported")
+	negativeTTL := 30 * time.Minute
+	if attempted {
+		negativeTTL = 2 * time.Minute
 	}
+	h.setCachedChapterURL(cacheKey, "", false, negativeTTL)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no usable source")
+	}
+	return trimmedSourceURL, fmt.Errorf("resolve chapter url: %w", lastErr)
+}
 
+func (h *DashboardHandler) resolveChapterURLFromConnector(resolver connectors.ChapterURLResolver, sourceURL string, chapter float64) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	chapterURL, err := resolver.ResolveChapterURL(ctx, trimmedSourceURL, chapter)
+	chapterURL, err := resolver.ResolveChapterURL(ctx, sourceURL, chapter)
 	if err != nil {
-		h.setCachedChapterURL(cacheKey, "", false, 2*time.Minute)
-		return trimmedSourceURL, fmt.Errorf("resolve chapter url: %w", err)
+		return "", err
 	}
-
-	chapterURL = strings.TrimSpace(chapterURL)
-	if chapterURL == "" {
-		h.setCachedChapterURL(cacheKey, "", false, 30*time.Minute)
-		return trimmedSourceURL, fmt.Errorf("chapter url empty")
-	}
-
-	h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
-	return chapterURL, nil
+	return strings.TrimSpace(chapterURL), nil
 }
 
 func buildChapterURLCacheKey(sourceKey, sourceURL string, chapter float64) string {

@@ -208,7 +208,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 // and returns the first that resolves, along with the source it came from. It
 // returns (nil, zero) when the tracker has no alternates or none of them answer,
 // leaving the caller to report the primary source's error.
-func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.PollingTracker) (*connectors.MangaResult, repository.PollingTrackerSource) {
+func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.PollingTracker) (*connectors.MangaResult, repository.TrackerSourceRef) {
 	for _, source := range tracker.AlternateSources {
 		if strings.TrimSpace(source.SourceURL) == "" {
 			continue
@@ -233,7 +233,7 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 		}
 	}
 
-	return nil, repository.PollingTrackerSource{}
+	return nil, repository.TrackerSourceRef{}
 }
 
 // shouldSkipIdle reports whether a non-reading tracker was checked recently

@@ -194,7 +194,7 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceByID, sourceLogoBySourceID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
 	if len(cards) == 0 {
 		return c.Status(fiber.StatusNotFound).SendString("Tracker card not found")
 	}
@@ -409,7 +409,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceByID, sourceLogoBySourceID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -489,7 +489,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -562,7 +562,7 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, "")
+	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
 	if len(cards) == 0 {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)

@@ -278,33 +278,53 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	return items, nil
 }
 
-// listPollingAlternateSources loads every tracker's non-primary linked sources,
-// keyed by tracker id. UpdatePollingState mirrors the primary source into
-// tracker_sources, so that mirror row is filtered out to leave only genuine
-// alternatives. Loaded in one query rather than per tracker to keep polling a
-// two-query operation regardless of library size.
-func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]PollingTrackerSource, error) {
-	rows, err := r.db.Query(`
-		SELECT ts.tracker_id, ts.source_id, s.key, ts.source_item_id, ts.source_url
-		FROM tracker_sources ts
-		INNER JOIN trackers t ON t.id = ts.tracker_id
-		INNER JOIN sources s ON s.id = ts.source_id
-		WHERE ts.source_id <> t.source_id
-		   OR LOWER(TRIM(ts.source_url)) <> LOWER(TRIM(t.source_url))
-		ORDER BY ts.tracker_id ASC, s.name ASC, ts.id ASC
-	`)
+// alternateSourcesQuery selects every tracker's non-primary linked sources.
+// UpdatePollingState mirrors the primary source into tracker_sources, so that
+// mirror row is filtered out to leave only genuine alternatives.
+const alternateSourcesQuery = `
+	SELECT ts.tracker_id, ts.source_id, s.key, ts.source_item_id, ts.source_url
+	FROM tracker_sources ts
+	INNER JOIN trackers t ON t.id = ts.tracker_id
+	INNER JOIN sources s ON s.id = ts.source_id
+	WHERE (ts.source_id <> t.source_id
+	   OR LOWER(TRIM(ts.source_url)) <> LOWER(TRIM(t.source_url)))
+`
+
+const alternateSourcesOrder = ` ORDER BY ts.tracker_id ASC, s.name ASC, ts.id ASC`
+
+// listPollingAlternateSources loads alternates for every tracker in the database,
+// keyed by tracker id. Loaded in one query rather than per tracker to keep polling
+// a two-query operation regardless of library size.
+func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]TrackerSourceRef, error) {
+	rows, err := r.db.Query(alternateSourcesQuery + alternateSourcesOrder)
 	if err != nil {
 		return nil, fmt.Errorf("list polling alternate sources: %w", err)
 	}
+	return scanAlternateSources(rows)
+}
+
+// ListAlternateSourcesByTracker loads one profile's alternates, keyed by tracker
+// id. The dashboard resolves covers and chapter links against a tracker's primary
+// source; when that source is unreadable it falls back to these, so a blocked site
+// does not leave the whole library without cover art or working chapter links.
+func (r *TrackerRepository) ListAlternateSourcesByTracker(profileID int64) (map[int64][]TrackerSourceRef, error) {
+	rows, err := r.db.Query(alternateSourcesQuery+` AND t.profile_id = ?`+alternateSourcesOrder, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list alternate sources by tracker: %w", err)
+	}
+	return scanAlternateSources(rows)
+}
+
+func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) {
 	defer rows.Close()
 
-	alternates := map[int64][]PollingTrackerSource{}
+	alternates := map[int64][]TrackerSourceRef{}
 	for rows.Next() {
 		var trackerID int64
-		var source PollingTrackerSource
+		var source TrackerSourceRef
 		var sourceItemID sql.NullString
 		if err := rows.Scan(&trackerID, &source.SourceID, &source.SourceKey, &sourceItemID, &source.SourceURL); err != nil {
-			return nil, fmt.Errorf("scan polling alternate source: %w", err)
+			return nil, fmt.Errorf("scan alternate source: %w", err)
 		}
 		if sourceItemID.Valid {
 			source.SourceItemID = &sourceItemID.String
@@ -313,7 +333,7 @@ func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]PollingTr
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate polling alternate sources: %w", err)
+		return nil, fmt.Errorf("iterate alternate sources: %w", err)
 	}
 
 	return alternates, nil

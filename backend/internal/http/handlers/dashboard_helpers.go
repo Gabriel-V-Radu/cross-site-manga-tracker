@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -254,7 +255,23 @@ func relativeTime(value time.Time) string {
 	return fmt.Sprintf("%d years ago", years)
 }
 
-func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sourceURL string, sourceItemID *string) (string, error) {
+// trackerAlternatesForProfile loads a profile's alternate linked sources so a
+// re-rendered card resolves its cover and chapter links the same way the list
+// does. A load failure degrades to no fallback rather than failing the render:
+// the card is still useful without cover art.
+func (h *DashboardHandler) trackerAlternatesForProfile(profileID int64) map[int64][]repository.TrackerSourceRef {
+	alternates, err := h.trackerRepo.ListAlternateSourcesByTracker(profileID)
+	if err != nil {
+		return nil
+	}
+	return alternates
+}
+
+// fetchCoverURL resolves a cover for a tracker, trying its primary source first
+// and then each alternate linked source. The result is cached under the primary
+// key either way, so a cover found on a mirror still serves the tracker whose
+// primary site is unreachable.
+func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
 		return "", fmt.Errorf("missing source key")
@@ -287,6 +304,25 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 			continue
 		}
 		if coverURL == "" {
+			continue
+		}
+
+		h.setCachedCover(cacheKey, coverURL, true, 12*time.Hour)
+		return coverURL, nil
+	}
+
+	// The primary source could not supply a cover. Fall back to the tracker's
+	// other linked sources, which is what keeps a library readable when a site
+	// goes behind a bot challenge.
+	for _, alternate := range alternates {
+		alternateURL := strings.TrimSpace(alternate.SourceURL)
+		alternateKey := strings.TrimSpace(alternate.SourceKey)
+		if alternateURL == "" || alternateKey == "" {
+			continue
+		}
+
+		coverURL, err := h.resolveCoverFromConnector(parent, alternateKey, alternateURL)
+		if err != nil || coverURL == "" {
 			continue
 		}
 

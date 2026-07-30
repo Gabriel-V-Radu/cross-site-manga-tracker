@@ -35,12 +35,14 @@ type PollingTracker struct {
 	// AlternateSources are the tracker's other linked sources, excluding the
 	// primary one above. The poller falls back to them when the primary source
 	// cannot be read, so a single site going dark does not freeze the tracker.
-	AlternateSources []PollingTrackerSource
+	AlternateSources []TrackerSourceRef
 }
 
-// PollingTrackerSource is one of a tracker's linked sources as the poller needs
-// it: enough to pick a connector and resolve a URL.
-type PollingTrackerSource struct {
+// TrackerSourceRef is one of a tracker's linked sources reduced to what a caller
+// needs to read it: enough to pick a connector and resolve a URL. Used by the
+// poller and by the dashboard, which both fall back to alternates when a
+// tracker's primary source cannot be read.
+type TrackerSourceRef struct {
 	SourceID     int64
 	SourceKey    string
 	SourceItemID *string

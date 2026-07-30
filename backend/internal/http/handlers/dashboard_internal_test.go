@@ -71,7 +71,7 @@ func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 	}}
 	sourceByID := map[int64]models.Source{1: {ID: 1, Name: "Example"}}
 
-	cards, pending := h.buildTrackerCards(items, sourceByID, map[int64]string{}, "")
+	cards, pending := h.buildTrackerCards(items, sourceByID, map[int64]string{}, nil, "")
 	if pending {
 		t.Fatalf("expected no asynchronous lookups for source without connector key")
 	}
