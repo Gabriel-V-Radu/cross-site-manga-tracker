@@ -19,6 +19,7 @@ type fakeRepo struct {
 	updatedAt         *time.Time
 	updatedSourceID   int64
 	updatedCurrentURL string
+	clearedReleaseAt  bool
 }
 
 func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
@@ -245,6 +246,53 @@ func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
 	}
 	if repo.updatedSourceID != 0 || repo.updatedCurrentURL != "" {
 		t.Fatalf("fallback must not touch tracker_sources, got sourceID=%d url=%q", repo.updatedSourceID, repo.updatedCurrentURL)
+	}
+}
+
+// TestPollerRunOnce_FallbackNeverClearsStoredReleaseDate guards the case that
+// broke in production: a fallback source with no release date of its own must not
+// wipe the date the primary source recorded, even when the chapter advances.
+func TestPollerRunOnce_FallbackNeverClearsStoredReleaseDate(t *testing.T) {
+	prev := 100.0
+	advanced := 112.0
+	storedReleaseAt := time.Now().UTC().Add(-48 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		LatestReleaseAt:    &storedReleaseAt,
+		AlternateSources: []repository.PollingTrackerSource{
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	// The mirror advances the chapter but publishes no release date at all.
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &advanced, LastUpdatedAt: nil,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != advanced {
+		t.Fatalf("expected the chapter to advance to %.1f, got %#v", advanced, repo.updatedLatest)
+	}
+	if repo.clearedReleaseAt {
+		t.Fatalf("fallback must not clear the stored release date")
+	}
+	if repo.updatedAt != nil {
+		t.Fatalf("fallback has no date of its own to write, got %v", repo.updatedAt)
 	}
 }
 

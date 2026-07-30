@@ -152,6 +152,8 @@ func sourceHomeURLForKey(sourceKey string) string {
 		return "https://mangadex.org"
 	case "mangafire":
 		return "https://mangafire.to"
+	case "mangabuddy":
+		return "https://mangabuddy1.co.uk"
 	case "mgeko":
 		return "https://www.mgeko.cc"
 	case "webtoons":

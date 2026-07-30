@@ -157,6 +157,13 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			latestReleaseAt = nil
 		}
 		clearLatestReleaseAt := latestReleaseAt == nil && newChapter
+		if usedFallback {
+			// A fallback source may know nothing about release dates (MangaBuddy
+			// reports none usable), and dropping to one must never destroy what the
+			// primary already recorded. Keeping a stale date beside a newer chapter
+			// is imperfect; erasing 355 series' dates is not a trade worth making.
+			clearLatestReleaseAt = false
+		}
 
 		var canonicalSourceItemID *string
 		resolvedSourceItemID := strings.TrimSpace(result.SourceItemID)
