@@ -1,5 +1,25 @@
 # Vendored MangaFire request signer (`signer_bundle.js`)
 
+> **Status (2026-07-30): the signer is not the current problem — do not start here.**
+> MangaFire enabled a Cloudflare **managed challenge across the whole domain**.
+> Every path (`/`, `/title/…`, `/api/titles*`, even `/robots.txt`) answers `403`
+> with `Cf-Mitigated: challenge` and the "Just a moment…" interstitial, so no
+> request reaches the point where the `vrf` token is checked. Verified from two
+> unrelated networks, so it is not IP reputation, and a Chrome-JA3 `utls` client
+> (the fix that works for the freewebnovel connector) is challenged identically.
+> Getting past an interactive challenge is not something this project automates.
+> The connector detects this case and reports "Cloudflare browser challenge" with
+> a 30-minute cooldown, so it recovers on its own if MangaFire turns it off.
+> Recheck with:
+>
+> ```
+> go test -tags live -run TestLive -count=1 ./internal/connectors/native/mangafire
+> ```
+>
+> `-count=1` matters — otherwise Go replays a cached PASS from before the block.
+> Only follow the refresh runbook below once requests get far enough to return a
+> JSON `{"message":"Invalid token."}` again.
+
 MangaFire's JSON API (`/api/titles*`) rejects any request without a valid `vrf`
 query-token, answering `403 {"message":"Missing token."}`. The token is produced
 client-side by `globalThis.getProtectionToken(path, paramsObject)`, a deterministic

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,25 +11,51 @@ import (
 )
 
 type fakeRepo struct {
-	items         []repository.PollingTracker
-	updatedCount  int
-	updatedItemID *string
-	updatedURL    string
-	updatedLatest *float64
-	updatedAt     *time.Time
+	items             []repository.PollingTracker
+	updatedCount      int
+	updatedItemID     *string
+	updatedURL        string
+	updatedLatest     *float64
+	updatedAt         *time.Time
+	updatedSourceID   int64
+	updatedCurrentURL string
 }
 
 func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(_ int64, _ int64, _ string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, _ bool, _ time.Time) error {
+func (f *fakeRepo) UpdatePollingState(_ int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, _ bool, _ time.Time) error {
 	f.updatedCount++
 	f.updatedItemID = sourceItemID
 	f.updatedURL = sourceURL
 	f.updatedLatest = latestKnownChapter
 	f.updatedAt = latestReleaseAt
+	f.updatedSourceID = sourceID
+	f.updatedCurrentURL = currentSourceURL
 	return nil
+}
+
+// scriptedConnector is a connector with a chosen key that either fails or
+// returns a fixed result, for exercising primary/fallback source selection.
+type scriptedConnector struct {
+	key    string
+	result *connectors.MangaResult
+	err    error
+}
+
+func (s scriptedConnector) Key() string                       { return s.key }
+func (s scriptedConnector) Name() string                      { return s.key }
+func (s scriptedConnector) Kind() string                      { return connectors.KindNative }
+func (s scriptedConnector) HealthCheck(context.Context) error { return s.err }
+func (s scriptedConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (s scriptedConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.result, nil
 }
 
 type fakeConnector struct {
@@ -164,6 +191,126 @@ func TestPollerRunOnce_SkipsRecentlyCheckedIdleTrackers(t *testing.T) {
 	// skipped; the stale and never-checked idle ones still poll.
 	if repo.updatedCount != 3 {
 		t.Fatalf("expected 3 update calls, got %d", repo.updatedCount)
+	}
+}
+
+// TestPollerRunOnce_FallsBackToAlternateSource covers the case this feature
+// exists for: the primary site is unreadable (blocked, moved) but the tracker has
+// another linked source that still answers.
+func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
+	prev := 10.0
+	next := 12.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceID:           7,
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.PollingTrackerSource{
+			{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("behind a browser challenge")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", SourceItemID: "mirror-id", URL: "https://mirror/series", LatestChapter: &next,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedCount != 1 {
+		t.Fatalf("expected the fallback source to produce 1 update, got %d", repo.updatedCount)
+	}
+	if repo.updatedLatest == nil || *repo.updatedLatest != next {
+		t.Fatalf("expected latest chapter %.2f from the fallback, got %#v", next, repo.updatedLatest)
+	}
+
+	// The primary pointer must survive untouched: writing the mirror's id/URL
+	// into it would leave source_id naming one site and source_url another.
+	if repo.updatedItemID != nil {
+		t.Fatalf("fallback must not rewrite source_item_id, got %#v", repo.updatedItemID)
+	}
+	if repo.updatedURL != "" {
+		t.Fatalf("fallback must not rewrite source_url, got %q", repo.updatedURL)
+	}
+	if repo.updatedSourceID != 0 || repo.updatedCurrentURL != "" {
+		t.Fatalf("fallback must not touch tracker_sources, got sourceID=%d url=%q", repo.updatedSourceID, repo.updatedCurrentURL)
+	}
+}
+
+// TestPollerRunOnce_FallbackNeverLowersLatestChapter guards against a lagging
+// mirror resurrecting chapters the user already read.
+func TestPollerRunOnce_FallbackNeverLowersLatestChapter(t *testing.T) {
+	prev := 100.0
+	behind := 84.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.PollingTrackerSource{
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &behind,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != prev {
+		t.Fatalf("expected latest chapter to stay at %.2f, got %#v", prev, repo.updatedLatest)
+	}
+}
+
+// TestPollerRunOnce_NoUpdateWhenPrimaryFailsWithoutAlternates preserves the
+// pre-existing behaviour: a failing source with nothing to fall back to is
+// skipped, never written with partial data.
+func TestPollerRunOnce_NoUpdateWhenPrimaryFailsWithoutAlternates(t *testing.T) {
+	prev := 10.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedCount != 0 {
+		t.Fatalf("expected no update when the only source fails, got %d", repo.updatedCount)
 	}
 }
 

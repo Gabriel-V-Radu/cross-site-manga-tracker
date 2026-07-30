@@ -267,7 +267,56 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		return nil, fmt.Errorf("iterate polling trackers: %w", err)
 	}
 
+	alternates, err := r.listPollingAlternateSources()
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].AlternateSources = alternates[items[index].ID]
+	}
+
 	return items, nil
+}
+
+// listPollingAlternateSources loads every tracker's non-primary linked sources,
+// keyed by tracker id. UpdatePollingState mirrors the primary source into
+// tracker_sources, so that mirror row is filtered out to leave only genuine
+// alternatives. Loaded in one query rather than per tracker to keep polling a
+// two-query operation regardless of library size.
+func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]PollingTrackerSource, error) {
+	rows, err := r.db.Query(`
+		SELECT ts.tracker_id, ts.source_id, s.key, ts.source_item_id, ts.source_url
+		FROM tracker_sources ts
+		INNER JOIN trackers t ON t.id = ts.tracker_id
+		INNER JOIN sources s ON s.id = ts.source_id
+		WHERE ts.source_id <> t.source_id
+		   OR LOWER(TRIM(ts.source_url)) <> LOWER(TRIM(t.source_url))
+		ORDER BY ts.tracker_id ASC, s.name ASC, ts.id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list polling alternate sources: %w", err)
+	}
+	defer rows.Close()
+
+	alternates := map[int64][]PollingTrackerSource{}
+	for rows.Next() {
+		var trackerID int64
+		var source PollingTrackerSource
+		var sourceItemID sql.NullString
+		if err := rows.Scan(&trackerID, &source.SourceID, &source.SourceKey, &sourceItemID, &source.SourceURL); err != nil {
+			return nil, fmt.Errorf("scan polling alternate source: %w", err)
+		}
+		if sourceItemID.Valid {
+			source.SourceItemID = &sourceItemID.String
+		}
+		alternates[trackerID] = append(alternates[trackerID], source)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate polling alternate sources: %w", err)
+	}
+
+	return alternates, nil
 }
 
 func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, clearLatestReleaseAt bool, checkedAt time.Time) error {

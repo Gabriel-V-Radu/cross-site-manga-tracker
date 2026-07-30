@@ -32,6 +32,19 @@ type PollingTracker struct {
 	LatestReleaseAt    *time.Time
 	SourceKey          string
 	LastCheckedAt      *time.Time
+	// AlternateSources are the tracker's other linked sources, excluding the
+	// primary one above. The poller falls back to them when the primary source
+	// cannot be read, so a single site going dark does not freeze the tracker.
+	AlternateSources []PollingTrackerSource
+}
+
+// PollingTrackerSource is one of a tracker's linked sources as the poller needs
+// it: enough to pick a connector and resolve a URL.
+type PollingTrackerSource struct {
+	SourceID     int64
+	SourceKey    string
+	SourceItemID *string
+	SourceURL    string
 }
 
 func NewTrackerRepository(db *sql.DB) *TrackerRepository {

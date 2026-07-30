@@ -113,6 +113,23 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		result, resolveErr := connector.ResolveByURL(requestCtx, tracker.SourceURL)
 		cancel()
 
+		// A source can go dark for reasons no retry fixes — a site put behind an
+		// interactive bot challenge, a domain that moved. When that happens, poll
+		// the tracker's other linked sources so the chapter count keeps advancing
+		// from whichever mirror is still readable.
+		usedFallback := false
+		if resolveErr != nil {
+			if fallbackResult, fallbackSource := p.resolveFromAlternates(ctx, tracker); fallbackResult != nil {
+				p.logger.Info("poll fell back to alternate source",
+					"trackerId", tracker.ID,
+					"primarySourceKey", tracker.SourceKey,
+					"fallbackSourceKey", fallbackSource.SourceKey,
+					"primaryError", resolveErr)
+				result, resolveErr = fallbackResult, nil
+				usedFallback = true
+			}
+		}
+
 		if resolveErr != nil {
 			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
 			continue
@@ -122,6 +139,12 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		latest := tracker.LatestKnownChapter
 		if result.LatestChapter != nil {
 			latest = result.LatestChapter
+		}
+		if usedFallback && !isNewChapter(tracker.LatestKnownChapter, result.LatestChapter) {
+			// Mirrors routinely lag the primary source. Letting a fallback lower
+			// latest_known_chapter would resurrect chapters the user already read,
+			// so a fallback may advance the count but never walk it back.
+			latest = tracker.LatestKnownChapter
 		}
 
 		newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
@@ -146,8 +169,22 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		if canonicalSourceURL == "" {
 			canonicalSourceURL = tracker.SourceURL
 		}
+		sourceID := tracker.SourceID
+		currentSourceURL := tracker.SourceURL
 
-		if err := p.repo.UpdatePollingState(tracker.ID, tracker.SourceID, tracker.SourceURL, canonicalSourceItemID, canonicalSourceURL, latest, latestReleaseAt, clearLatestReleaseAt, now); err != nil {
+		if usedFallback {
+			// The chapter number carries across sources; the identifiers do not.
+			// Writing the fallback's id/URL here would silently repoint the
+			// tracker's primary source at the mirror while source_id still names
+			// the original, so a fallback poll updates progress only and leaves
+			// the primary pointer for the user to change deliberately.
+			canonicalSourceItemID = nil
+			canonicalSourceURL = ""
+			sourceID = 0
+			currentSourceURL = ""
+		}
+
+		if err := p.repo.UpdatePollingState(tracker.ID, sourceID, currentSourceURL, canonicalSourceItemID, canonicalSourceURL, latest, latestReleaseAt, clearLatestReleaseAt, now); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
 		}
@@ -158,6 +195,38 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveFromAlternates tries the tracker's non-primary linked sources in order
+// and returns the first that resolves, along with the source it came from. It
+// returns (nil, zero) when the tracker has no alternates or none of them answer,
+// leaving the caller to report the primary source's error.
+func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.PollingTracker) (*connectors.MangaResult, repository.PollingTrackerSource) {
+	for _, source := range tracker.AlternateSources {
+		if strings.TrimSpace(source.SourceURL) == "" {
+			continue
+		}
+
+		connector, ok := p.registry.Get(source.SourceKey)
+		if !ok {
+			continue
+		}
+
+		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		result, err := connector.ResolveByURL(requestCtx, source.SourceURL)
+		cancel()
+
+		if err != nil {
+			p.logger.Debug("poll fallback source failed",
+				"trackerId", tracker.ID, "sourceKey", source.SourceKey, "error", err)
+			continue
+		}
+		if result != nil {
+			return result, source
+		}
+	}
+
+	return nil, repository.PollingTrackerSource{}
 }
 
 // shouldSkipIdle reports whether a non-reading tracker was checked recently
