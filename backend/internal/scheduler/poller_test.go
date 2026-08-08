@@ -168,6 +168,34 @@ func TestPollerRunOnce_UpdatesReleaseDateWhenChapterAdvances(t *testing.T) {
 	}
 }
 
+// A source that had been reporting too high a number — MangaFire counting
+// Japanese chapters the reader does not follow — corrects itself downward. The
+// stored date belongs to the chapter that number is being taken away from, so it
+// has to be replaced along with it, not preserved as if nothing happened.
+func TestPollerRunOnce_UpdatesReleaseDateWhenChapterIsCorrectedDownward(t *testing.T) {
+	prev := 57.5
+	corrected := 54.0
+	storedReleaseAt := time.Now().UTC().Add(-180 * 24 * time.Hour)
+	sourceReleaseAt := time.Now().UTC().Add(-2 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev, LatestReleaseAt: &storedReleaseAt}}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &corrected, releaseDate: &sourceReleaseAt}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != corrected {
+		t.Fatalf("expected the corrected chapter %.1f to be stored, got %#v", corrected, repo.updatedLatest)
+	}
+	if repo.updatedAt == nil || !repo.updatedAt.Equal(sourceReleaseAt) {
+		t.Fatalf("expected the corrected chapter's release date to replace the stale one, got %v", repo.updatedAt)
+	}
+}
+
 func TestPollerRunOnce_SkipsRecentlyCheckedIdleTrackers(t *testing.T) {
 	latest := 12.0
 	recentCheck := time.Now().UTC().Add(-1 * time.Hour)

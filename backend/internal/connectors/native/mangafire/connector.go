@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,12 +21,19 @@ import (
 // MangaFire rebuilt their site as a SPA backed by a JSON API under /api.
 // Manga pages moved from /manga/{slug}.{hid} to /title/{hid}-{slug} and
 // reader pages from /read/{slug}.{hid}/{lang}/chapter-{n} to /title/{hid}-{slug}/{chapterId}.
-var relativeAgoPattern = regexp.MustCompile(`(?i)^(\d+)\s*(min|mins|mo|mos|m|hrs|hr|h|d|w|yrs|yr|y)\s+ago$`)
 
-type latestReleaseMemo struct {
-	latestChapter float64
-	releaseAt     *time.Time
-}
+// chapterLanguage is the only language this connector reads. MangaFire hosts a
+// title in several languages at once and its title payload describes all of them
+// together: `latestChapter` is the highest number in *any* language, and
+// `chapterUpdatedAt` is when that chapter was uploaded. For a series whose
+// Japanese raws run ahead of the English scanlation both fields describe a
+// release the English reader cannot read — Reiwa no Dara-san reported chapter
+// 57.5 from a Japanese batch six months old while English stood at 54 and had
+// updated that day — and neither field moves when a new English chapter lands,
+// so such a title looks permanently stalled. The chapter listing is the only
+// endpoint that can be scoped to a language, so every chapter number and release
+// date this connector reports is derived from it.
+const chapterLanguage = "en"
 
 type Connector struct {
 	baseURL     string
@@ -40,9 +46,6 @@ type Connector struct {
 	minRequestInterval time.Duration
 	cooldownUntil      time.Time
 	cooldownReason     string
-
-	releaseMemoMu sync.Mutex
-	releaseMemo   map[string]latestReleaseMemo
 }
 
 func NewConnector() *Connector {
@@ -57,7 +60,6 @@ func NewConnector() *Connector {
 		// live connector paces itself much more conservatively than the
 		// local test servers need.
 		minRequestInterval: 1500 * time.Millisecond,
-		releaseMemo:        map[string]latestReleaseMemo{},
 	}
 }
 
@@ -74,7 +76,6 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		httpClient:         client,
 		signer:             newSigner(),
 		minRequestInterval: 150 * time.Millisecond,
-		releaseMemo:        map[string]latestReleaseMemo{},
 	}
 }
 
@@ -97,13 +98,18 @@ type apiPoster struct {
 }
 
 type apiTitle struct {
-	HID              string     `json:"hid"`
-	Slug             string     `json:"slug"`
-	Title            string     `json:"title"`
-	Poster           *apiPoster `json:"poster"`
-	LatestChapter    *float64   `json:"latestChapter"`
-	ChapterUpdatedAt string     `json:"chapterUpdatedAt"`
-	AltTitles        []string   `json:"altTitles"`
+	HID       string     `json:"hid"`
+	Slug      string     `json:"slug"`
+	Title     string     `json:"title"`
+	Poster    *apiPoster `json:"poster"`
+	AltTitles []string   `json:"altTitles"`
+
+	// Mapped but deliberately never read: both describe every language at once
+	// (see chapterLanguage), so reporting them would hand the reader a chapter
+	// number and a date from a translation they do not follow. The English
+	// chapter listing is the source for both.
+	LatestChapter    *float64 `json:"latestChapter"`
+	ChapterUpdatedAt string   `json:"chapterUpdatedAt"`
 }
 
 type apiTitlesResponse struct {
@@ -183,9 +189,19 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 
 	result := c.resultFromAPITitle(*detail)
-	if latestReleaseAt := c.fetchLatestReleaseAt(ctx, detail.HID, detail.LatestChapter); latestReleaseAt != nil {
-		result.LastUpdatedAt = latestReleaseAt
+
+	// The title payload's own chapter number and date span every language, so
+	// they are replaced wholesale by the English listing rather than used as a
+	// fallback: a title MangaFire carries only in other languages reports no
+	// chapter at all, which leaves a tracker's stored progress untouched instead
+	// of advancing it to a chapter that was never translated.
+	latestChapter, latestReleaseAt, err := c.latestEnglishChapter(ctx, detail.HID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch latest %s chapter: %w", chapterLanguage, err)
 	}
+	result.LatestChapter = latestChapter
+	result.LastUpdatedAt = latestReleaseAt
+
 	return &result, nil
 }
 
@@ -234,12 +250,11 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	// Chapters are paged newest-first, and a single chapter number can appear
-	// once per language. All entries sharing a number are contiguous, so we
-	// page until one dips *below* the target: only then is every language
-	// variant of the target guaranteed fetched, letting pickChapterEntry prefer
-	// the English one rather than latching onto a variant that happens to sit at
-	// the tail of a page. Recent chapters still resolve in a single page.
+	// Chapters are paged newest-first, and a number can be uploaded more than
+	// once even within one language (a re-release, a second group). All entries
+	// sharing a number are contiguous, so we page until one dips *below* the
+	// target rather than stopping on the first match that happens to sit at the
+	// tail of a page. Recent chapters still resolve in a single page.
 	passedTarget := false
 	chapters, err := c.fetchChapters(ctx, hid, func(page []apiChapter) bool {
 		for i := range page {
@@ -329,20 +344,24 @@ func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle
 const chaptersPageLimit = 200
 
 // maxChapterPages bounds how deep fetchChapters will page so a caller without
-// an early-exit predicate still terminates instead of hammering the API. Note
-// this bounds fetched *entries* (60 * 200 = 12k), and a chapter number yields
-// one entry per language, so the reachable chapter depth is lower for
-// multilingual series. In practice the caller's request deadline is the tighter
-// bound: resolving a chapter far below the latest one is best-effort and falls
-// back to the title URL if it can't be reached in time.
+// an early-exit predicate still terminates instead of hammering the API. In
+// practice the caller's request deadline is the tighter bound: resolving a
+// chapter far below the latest one is best-effort and falls back to the title
+// URL if it can't be reached in time.
 const maxChapterPages = 60
 
 // fetchChapters walks the paginated chapters endpoint newest-first
 // (sort=number, order=desc), accumulating every page. After each page, stop (if
-// non-nil) is consulted with the page just fetched; returning true ends paging
-// early — used to avoid fetching every page of long series when only the latest
-// chapter or a specific recent chapter is needed. Paging also stops when the API
-// reports no further pages.
+// non-nil) is consulted with the entries that page contributed; returning true
+// ends paging early — used to avoid fetching every page of long series when only
+// the latest chapter or a specific recent chapter is needed. Paging also stops
+// when the API reports no further pages.
+//
+// Only chapterLanguage entries are returned. The API is asked to filter and the
+// answer is checked again here on purpose: it ignores query params it does not
+// recognise rather than rejecting them (`lang=en` silently returns every
+// language), so were `language` ever renamed the server-side filter alone would
+// quietly go back to mixing languages together.
 func (c *Connector) fetchChapters(ctx context.Context, hid string, stop func(page []apiChapter) bool) ([]apiChapter, error) {
 	path := "/api/titles/" + hid + "/chapters"
 	all := make([]apiChapter, 0, chaptersPageLimit)
@@ -353,14 +372,22 @@ func (c *Connector) fetchChapters(ctx context.Context, hid string, stop func(pag
 		params.Set("order", "desc")
 		params.Set("limit", strconv.Itoa(chaptersPageLimit))
 		params.Set("page", strconv.Itoa(page))
+		params.Set("language", chapterLanguage)
 
 		var response apiChaptersResponse
 		if err := c.fetchAPI(ctx, path, params, &response); err != nil {
 			return nil, err
 		}
-		all = append(all, response.Items...)
 
-		if stop != nil && stop(response.Items) {
+		kept := make([]apiChapter, 0, len(response.Items))
+		for _, item := range response.Items {
+			if strings.EqualFold(strings.TrimSpace(item.Language), chapterLanguage) {
+				kept = append(kept, item)
+			}
+		}
+		all = append(all, kept...)
+
+		if stop != nil && stop(kept) {
 			break
 		}
 		if !response.Meta.HasNext || len(response.Items) == 0 {
@@ -371,48 +398,42 @@ func (c *Connector) fetchChapters(ctx context.Context, hid string, stop func(pag
 	return all, nil
 }
 
-// fetchLatestReleaseAt looks up the exact release timestamp of the latest
-// chapter; the title payload only carries a coarse relative time ("2d ago").
-// The result is memoized per title until the latest chapter number changes,
-// so repeated polls cost one request instead of two.
-func (c *Connector) fetchLatestReleaseAt(ctx context.Context, hid string, latestChapter *float64) *time.Time {
-	if latestChapter == nil {
-		return nil
-	}
-
-	c.releaseMemoMu.Lock()
-	memo, memoized := c.releaseMemo[hid]
-	c.releaseMemoMu.Unlock()
-	if memoized && sameChapterNumber(memo.latestChapter, *latestChapter) {
-		return memo.releaseAt
-	}
-
-	// The latest chapter sits on the first page of the newest-first listing, so
-	// a single page is enough to read its release timestamp.
+// latestEnglishChapter reports the highest English chapter number for a title
+// and when it was released. Both come from the chapter listing because the title
+// payload can supply neither for a multilingual series (see chapterLanguage).
+// A title with no English chapters yields (nil, nil, nil) — absent, not an
+// error, and distinct from a fetch that failed.
+func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*float64, *time.Time, error) {
+	// The listing is newest-first, so the highest number is on the first page.
 	chapters, err := c.fetchChapters(ctx, hid, func([]apiChapter) bool { return true })
 	if err != nil {
-		return nil
+		return nil, nil, err
+	}
+	if len(chapters) == 0 {
+		return nil, nil, nil
 	}
 
-	var latest *time.Time
+	latest := chapters[0].Number
 	for _, entry := range chapters {
-		if !sameChapterNumber(entry.Number, *latestChapter) || entry.CreatedAt <= 0 {
+		if entry.Number > latest {
+			latest = entry.Number
+		}
+	}
+
+	// A number can be uploaded more than once; the newest upload of it is the
+	// one that dates the release.
+	var releaseAt *time.Time
+	for _, entry := range chapters {
+		if !sameChapterNumber(entry.Number, latest) || entry.CreatedAt <= 0 {
 			continue
 		}
 		createdAt := time.Unix(entry.CreatedAt, 0).UTC()
-		if latest == nil || createdAt.After(*latest) {
-			latest = &createdAt
+		if releaseAt == nil || createdAt.After(*releaseAt) {
+			releaseAt = &createdAt
 		}
 	}
 
-	c.releaseMemoMu.Lock()
-	c.releaseMemo[hid] = latestReleaseMemo{
-		latestChapter: *latestChapter,
-		releaseAt:     latest,
-	}
-	c.releaseMemoMu.Unlock()
-
-	return latest
+	return &latest, releaseAt, nil
 }
 
 func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
@@ -430,6 +451,10 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		}
 	}
 
+	// LatestChapter and LastUpdatedAt are deliberately left unset: the payload
+	// only offers cross-language values (see chapterLanguage). ResolveByURL
+	// fills them from the English listing; search results carry no chapter
+	// number rather than a number from a language the reader does not follow.
 	return connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  key,
@@ -437,26 +462,18 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		RelatedTitles: buildRelatedTitles(title, item.Slug, item.AltTitles),
 		URL:           "https://mangafire.to/title/" + key,
 		CoverImageURL: coverImageURL,
-		LatestChapter: item.LatestChapter,
-		LastUpdatedAt: parseRelativeUpdatedAt(item.ChapterUpdatedAt, time.Now().UTC()),
 	}
 }
 
+// pickChapterEntry finds a chapter by number. fetchChapters has already narrowed
+// its input to chapterLanguage, so any match is one the reader can open.
 func pickChapterEntry(chapters []apiChapter, chapter float64) *apiChapter {
-	var fallback *apiChapter
 	for index := range chapters {
-		entry := &chapters[index]
-		if !sameChapterNumber(entry.Number, chapter) {
-			continue
-		}
-		if strings.EqualFold(entry.Language, "en") {
-			return entry
-		}
-		if fallback == nil {
-			fallback = entry
+		if sameChapterNumber(chapters[index].Number, chapter) {
+			return &chapters[index]
 		}
 	}
-	return fallback
+	return nil
 }
 
 func sameChapterNumber(a float64, b float64) bool {
@@ -506,47 +523,6 @@ func prettifySlug(slug string) string {
 		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
 	}
 	return strings.Join(parts, " ")
-}
-
-// parseRelativeUpdatedAt parses the API's coarse relative timestamps such as
-// "just now", "30m ago", "5h ago", "2d ago", "3w ago", "1mo ago", "1yr ago".
-func parseRelativeUpdatedAt(raw string, now time.Time) *time.Time {
-	trimmed := strings.ToLower(strings.TrimSpace(raw))
-	if trimmed == "" {
-		return nil
-	}
-	if trimmed == "just now" {
-		result := now
-		return &result
-	}
-
-	match := relativeAgoPattern.FindStringSubmatch(trimmed)
-	if len(match) < 3 {
-		return nil
-	}
-	quantity, err := strconv.Atoi(match[1])
-	if err != nil || quantity < 0 {
-		return nil
-	}
-
-	result := now
-	switch match[2] {
-	case "m", "min", "mins":
-		result = result.Add(-time.Duration(quantity) * time.Minute)
-	case "h", "hr", "hrs":
-		result = result.Add(-time.Duration(quantity) * time.Hour)
-	case "d":
-		result = result.AddDate(0, 0, -quantity)
-	case "w":
-		result = result.AddDate(0, 0, -7*quantity)
-	case "mo", "mos":
-		result = result.AddDate(0, -quantity, 0)
-	case "y", "yr", "yrs":
-		result = result.AddDate(-quantity, 0, 0)
-	default:
-		return nil
-	}
-	return &result
 }
 
 func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {

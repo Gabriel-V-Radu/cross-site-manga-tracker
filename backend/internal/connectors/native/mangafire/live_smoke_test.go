@@ -22,6 +22,11 @@ func TestLiveMangaFire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve legacy url failed: %v", err)
 	}
+	// LatestChapter is nil for a title MangaFire carries in no English edition,
+	// so it is reported rather than dereferenced.
+	if resolved.LatestChapter == nil {
+		t.Fatalf("expected a latest English chapter for One Piece, got none")
+	}
 	t.Logf("resolved legacy: id=%s title=%q url=%s latest=%v cover=%s updated=%v related=%d",
 		resolved.SourceItemID, resolved.Title, resolved.URL, *resolved.LatestChapter, resolved.CoverImageURL, resolved.LastUpdatedAt, len(resolved.RelatedTitles))
 

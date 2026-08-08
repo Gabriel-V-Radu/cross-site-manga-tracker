@@ -2,6 +2,7 @@ package mangafire
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,9 +30,13 @@ func newFakeAPIServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece","altTitles":["ワンピース","One Piece. Большой куш","Pirate Legacy"]}}`))
 	})
+	// Serves every language regardless of the `language` param, mirroring the
+	// API's habit of ignoring params it does not recognise: the connector's own
+	// filter has to be what keeps other languages out.
 	mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"items":[
+			{"id":8000188,"number":1188,"name":"raw","language":"ja","type":"official","createdAt":1783300000},
 			{"id":7511775,"number":1187,"name":"The Cause","language":"en","type":"unofficial","createdAt":1783047602},
 			{"id":7452440,"number":1186,"name":"Encore une fois","language":"fr","type":"unofficial","createdAt":1782659714},
 			{"id":7462702,"number":1186,"name":"One More Time","language":"en","type":"official","createdAt":1782777604}
@@ -39,6 +44,92 @@ func newFakeAPIServer(t *testing.T) *httptest.Server {
 	})
 
 	return httptest.NewServer(mux)
+}
+
+// The Japanese raws lead the English release, which is the shape that made
+// MangaFire report an unreadable chapter number (Reiwa no Dara-san: 57.5 in
+// Japanese against 54 in English). The title payload advertises the Japanese
+// number and the English listing the real one; the connector must report the
+// latter, and date it from the English upload rather than the raw's.
+func TestMangaFireReportsEnglishChapterNotSiteWideLatest(t *testing.T) {
+	server := newFakeAPIServer(t)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if resolved.LatestChapter == nil {
+		t.Fatalf("expected a latest chapter")
+	}
+	if *resolved.LatestChapter == 1188 {
+		t.Fatalf("reported the Japanese chapter 1188 instead of the English one")
+	}
+	if *resolved.LatestChapter != 1187 {
+		t.Fatalf("expected latest English chapter 1187, got %v", *resolved.LatestChapter)
+	}
+	if resolved.LastUpdatedAt == nil || !resolved.LastUpdatedAt.Equal(time.Unix(1783047602, 0).UTC()) {
+		t.Fatalf("expected the English upload date, got %v", resolved.LastUpdatedAt)
+	}
+}
+
+// A title MangaFire carries only in other languages has no chapter this reader
+// can open, so the connector reports none rather than the foreign number — the
+// poller then leaves the tracker's stored progress alone.
+func TestMangaFireReportsNoChapterWhenNoEnglishRelease(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/titles/jpn", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":9,"hid":"jpn","slug":"raws-only","title":"Raws Only","latestChapter":57.5,"chapterUpdatedAt":"6mos ago"}}`))
+	})
+	mux.HandleFunc("/api/titles/jpn/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[{"id":1,"number":57.5,"language":"ja","createdAt":1768103689}],"meta":{"hasNext":false}}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/jpn-raws-only")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if resolved.LatestChapter != nil {
+		t.Fatalf("expected no chapter for a title without an English release, got %v", *resolved.LatestChapter)
+	}
+	if resolved.LastUpdatedAt != nil {
+		t.Fatalf("expected no release date without an English release, got %v", resolved.LastUpdatedAt)
+	}
+	if resolved.Title != "Raws Only" {
+		t.Fatalf("expected the title to still resolve, got %q", resolved.Title)
+	}
+}
+
+// The chapter listing is now what the reported number rests on, so a failure to
+// read it has to surface as a failed poll rather than as "no chapters" — which
+// the poller would take at face value.
+func TestMangaFireChapterFetchFailureIsAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","latestChapter":1187,"chapterUpdatedAt":"2d ago"}}`))
+	})
+	mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	if _, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece"); err == nil {
+		t.Fatalf("expected an unreadable chapter listing to fail the resolve")
+	}
 }
 
 func TestMangaFireConnector(t *testing.T) {
@@ -128,21 +219,23 @@ func TestMangaFireConnectorSearchByTitle(t *testing.T) {
 	}
 
 	for _, item := range results {
+		// The search payload's chapter number and date span every language and
+		// the endpoint cannot be narrowed to one, so search results carry
+		// neither; the form the user submits is filled from ResolveByURL, which
+		// reads the English listing.
+		if item.LatestChapter != nil {
+			t.Fatalf("expected no cross-language chapter number in search results for %s, got %v", item.SourceItemID, *item.LatestChapter)
+		}
+		if item.LastUpdatedAt != nil {
+			t.Fatalf("expected no cross-language release date in search results for %s, got %v", item.SourceItemID, item.LastUpdatedAt)
+		}
+
 		switch item.SourceItemID {
 		case "dkw-one-piece":
-			if item.LatestChapter == nil || *item.LatestChapter != 1187 {
-				t.Fatalf("expected One Piece latest chapter 1187, got %v", item.LatestChapter)
-			}
-			if item.LastUpdatedAt == nil {
-				t.Fatalf("expected One Piece release date from relative time")
-			}
 			if item.CoverImageURL != "https://cdn.example/op.jpg" {
 				t.Fatalf("unexpected One Piece cover: %s", item.CoverImageURL)
 			}
 		case "oo4-one-punch-man":
-			if item.LatestChapter == nil || *item.LatestChapter != 264 {
-				t.Fatalf("expected One-Punch Man latest chapter 264, got %v", item.LatestChapter)
-			}
 			if item.CoverImageURL != "https://cdn.example/opm@280.jpg" {
 				t.Fatalf("expected medium poster fallback, got %s", item.CoverImageURL)
 			}
@@ -211,53 +304,27 @@ func TestParseTitleURL(t *testing.T) {
 	}
 }
 
-func TestParseRelativeUpdatedAt(t *testing.T) {
-	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-
-	cases := []struct {
-		raw  string
-		want *time.Time
-	}{
-		{raw: "just now", want: timePtr(now)},
-		{raw: "30m ago", want: timePtr(now.Add(-30 * time.Minute))},
-		{raw: "5h ago", want: timePtr(now.Add(-5 * time.Hour))},
-		{raw: "2d ago", want: timePtr(now.AddDate(0, 0, -2))},
-		{raw: "3w ago", want: timePtr(now.AddDate(0, 0, -21))},
-		{raw: "1mo ago", want: timePtr(now.AddDate(0, -1, 0))},
-		{raw: "1yr ago", want: timePtr(now.AddDate(-1, 0, 0))},
-		{raw: "", want: nil},
-		{raw: "unknown", want: nil},
-	}
-
-	for _, testCase := range cases {
-		got := parseRelativeUpdatedAt(testCase.raw, now)
-		if testCase.want == nil {
-			if got != nil {
-				t.Fatalf("parse %q: expected nil, got %s", testCase.raw, got.Format(time.RFC3339))
-			}
-			continue
-		}
-		if got == nil || !got.Equal(*testCase.want) {
-			t.Fatalf("parse %q: expected %s, got %v", testCase.raw, testCase.want.Format(time.RFC3339), got)
-		}
-	}
-}
-
-func timePtr(value time.Time) *time.Time {
-	return &value
-}
-
-func TestMangaFireConnectorMemoizesLatestReleaseLookup(t *testing.T) {
+// The chapter listing used to be fetched only when the title payload's
+// latestChapter changed. That signal cannot see an English release on a title
+// whose Japanese raws are further ahead — the site-wide number stays put, and so
+// did the cached English one, which is how tracked titles went quiet. Every
+// resolve must go back to the listing.
+func TestMangaFireRereadsChapterListingOnEveryResolve(t *testing.T) {
 	chapterRequests := 0
+	latestEnglish := 1187
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","latestChapter":1187,"chapterUpdatedAt":"2d ago"}}`))
+		// Frozen: the Japanese raws lead, so neither field moves when English
+		// gains a chapter.
+		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","latestChapter":1200,"chapterUpdatedAt":"6mos ago"}}`))
 	})
 	mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
 		chapterRequests++
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[{"id":7511775,"number":1187,"language":"en","createdAt":1783047602}]}`))
+		_, _ = fmt.Fprintf(w, `{"items":[{"id":75117,"number":%d,"language":"en","createdAt":%d}],"meta":{"hasNext":false}}`,
+			latestEnglish, 1783047602+latestEnglish)
 	})
 
 	server := httptest.NewServer(mux)
@@ -265,18 +332,28 @@ func TestMangaFireConnectorMemoizesLatestReleaseLookup(t *testing.T) {
 
 	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
 
-	for i := 0; i < 3; i++ {
-		resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
-		if err != nil {
-			t.Fatalf("resolve %d failed: %v", i, err)
-		}
-		if resolved.LastUpdatedAt == nil || !resolved.LastUpdatedAt.Equal(time.Unix(1783047602, 0).UTC()) {
-			t.Fatalf("resolve %d: unexpected release date %v", i, resolved.LastUpdatedAt)
-		}
+	first, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+	if err != nil {
+		t.Fatalf("first resolve failed: %v", err)
+	}
+	if first.LatestChapter == nil || *first.LatestChapter != 1187 {
+		t.Fatalf("expected latest English chapter 1187, got %v", first.LatestChapter)
 	}
 
-	if chapterRequests != 1 {
-		t.Fatalf("expected chapters endpoint to be hit once, got %d", chapterRequests)
+	latestEnglish = 1188
+
+	second, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+	if err != nil {
+		t.Fatalf("second resolve failed: %v", err)
+	}
+	if second.LatestChapter == nil || *second.LatestChapter != 1188 {
+		t.Fatalf("new English chapter went unnoticed: got %v, want 1188", second.LatestChapter)
+	}
+	if second.LastUpdatedAt == nil || !second.LastUpdatedAt.Equal(time.Unix(1783047602+1188, 0).UTC()) {
+		t.Fatalf("expected the new chapter's release date, got %v", second.LastUpdatedAt)
+	}
+	if chapterRequests != 2 {
+		t.Fatalf("expected the listing to be re-read on each resolve, got %d requests", chapterRequests)
 	}
 }
 

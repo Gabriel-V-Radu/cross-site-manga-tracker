@@ -148,9 +148,15 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 
 		newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
+		// A correction counts here as much as an advance: when the recorded
+		// chapter changes at all the stored date belongs to the chapter that was
+		// replaced, so it has to be rewritten. Comparing against `latest` rather
+		// than the raw result keeps the fallback rule above intact — a mirror
+		// that merely lags leaves `latest` alone and so reads as no change.
+		chapterMoved := chapterNumberChanged(tracker.LatestKnownChapter, latest)
 		latestReleaseAt := result.LastUpdatedAt
-		if !newChapter && tracker.LatestReleaseAt != nil {
-			// The chapter didn't advance, so keep the stored release date
+		if !chapterMoved && tracker.LatestReleaseAt != nil {
+			// The chapter didn't move, so keep the stored release date
 			// rather than rewriting it with the source's current value —
 			// some sources bump their update timestamp without releasing
 			// anything, which made dates drift toward "just now".
@@ -256,4 +262,17 @@ func isNewChapter(previous *float64, current *float64) bool {
 		return true
 	}
 	return *current > *previous
+}
+
+// chapterNumberChanged reports whether the recorded latest chapter differs from
+// what it was, in either direction. A drop is not noise to be ignored: it is how
+// a source that was reporting the wrong number reports the right one.
+func chapterNumberChanged(previous *float64, current *float64) bool {
+	if previous == nil && current == nil {
+		return false
+	}
+	if previous == nil || current == nil {
+		return true
+	}
+	return *previous != *current
 }
