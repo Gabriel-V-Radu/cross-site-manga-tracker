@@ -29,6 +29,17 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	}
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)
+	// The static handler sends only Last-Modified, which lets a browser invent
+	// its own freshness lifetime from the file's age — long enough that a script
+	// unchanged for months keeps being served from cache after a deploy, running
+	// old code against a new server. Templates stamp asset URLs with the file's
+	// mtime so the URL itself changes; this makes even an unversioned request
+	// revalidate, so the two together leave no way to run a stale script. The
+	// cost is a conditional request answered with 304.
+	app.Use("/assets", func(c *fiber.Ctx) error {
+		c.Set(fiber.HeaderCacheControl, "no-cache")
+		return c.Next()
+	})
 	app.Static("/assets", "./web/assets")
 	app.Static("/uploads", "./data/uploads")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {

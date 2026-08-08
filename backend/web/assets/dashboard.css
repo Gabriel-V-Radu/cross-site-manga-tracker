@@ -1354,6 +1354,20 @@ input.is-loading::placeholder {
     opacity: 0.85;
 }
 
+/* Why a field stayed empty — a failed lookup reads differently from a title that
+   genuinely has no number. */
+.field-note {
+    display: block;
+    margin-top: 4px;
+    color: var(--accent);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.field-note[hidden] {
+    display: none;
+}
+
 .search-results-list {
     display: grid;
     max-height: 180px;

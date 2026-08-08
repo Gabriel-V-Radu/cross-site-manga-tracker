@@ -236,7 +236,7 @@ window.addTrackerLinkedSource = function (button) {
         promoteIfAhead(button.dataset.latestChapter, button.dataset.latestReleaseAt);
     } else {
         window.requestSourceChapter(sourceId, sourceUrl).then(function (payload) {
-            if (payload) {
+            if (payload && !payload.error) {
                 promoteIfAhead(payload.latestChapter, payload.latestReleaseAt);
             }
         });
@@ -256,14 +256,23 @@ window.requestSourceChapter = function (sourceId, sourceUrl) {
         encodeURIComponent(String(sourceId)) + '&url=' + encodeURIComponent(sourceUrl);
 
     return fetch(endpoint, { headers: { Accept: 'application/json' } })
-        .then(function (response) { return response.json(); })
+        .then(function (response) {
+            // A server that predates this endpoint answers 404 with an HTML
+            // body, which would otherwise surface as an unexplained blank field.
+            if (!response.ok && response.status !== 200) {
+                return { error: 'This source lookup is not available on the server (HTTP ' + response.status + ')' };
+            }
+            return response.json();
+        })
         .then(function (payload) {
-            if (!payload || payload.error || !payload.latestChapter) {
-                return null;
+            if (!payload) {
+                return { error: 'Empty response from the source lookup' };
             }
             return payload;
         })
-        .catch(function () { return null; });
+        .catch(function () {
+            return { error: 'Could not reach the source lookup' };
+        });
 };
 
 window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
@@ -293,9 +302,19 @@ window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
             (!urlField || String(urlField.value || '').trim() === sourceUrl);
     };
 
+    var note = form.querySelector('[data-chapter-lookup-note]');
+    var say = function (message) {
+        if (!note) {
+            return;
+        }
+        note.textContent = message || '';
+        note.hidden = !message;
+    };
+
     chapterField.classList.add('is-loading');
     var previousPlaceholder = chapterField.placeholder;
     chapterField.placeholder = 'Checking…';
+    say('');
 
     window.requestSourceChapter(sourceId, sourceUrl).then(function (payload) {
         if (!isCurrentRequest()) {
@@ -308,9 +327,20 @@ window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
         chapterField.classList.remove('is-loading');
         chapterField.placeholder = previousPlaceholder;
 
-        // No number is a real answer here (a title with no English release has
-        // none), so the field is simply left for the user.
-        if (!payload || !stillWanted()) {
+        if (!stillWanted()) {
+            return;
+        }
+
+        // A lookup that failed and a title with no chapters both leave the field
+        // empty, but they are not the same thing and must not look the same:
+        // silence here is what made a stale script indistinguishable from a
+        // title with nothing to report.
+        if (payload.error) {
+            say(payload.error);
+            return;
+        }
+        if (!payload.latestChapter) {
+            say('No chapter number available for this title');
             return;
         }
 

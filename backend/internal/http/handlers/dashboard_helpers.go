@@ -7,8 +7,11 @@ import (
 	"html/template"
 	"math"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
@@ -443,6 +446,35 @@ func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey
 	h.cacheMu.Unlock()
 }
 
+// assetURL stamps a static asset's URL with its last-modified time. The static
+// handler sends no Cache-Control and no ETag, only Last-Modified, which leaves
+// browsers free to guess a freshness lifetime from the file's age — so a script
+// that had sat unchanged for months could keep being served from cache for days
+// after a deploy, running old code against a new server. A URL that changes when
+// the file changes is what makes a deploy actually take effect.
+func assetURL(name string) string {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+
+	assetVersionMu.Lock()
+	defer assetVersionMu.Unlock()
+
+	if version, cached := assetVersions[name]; cached {
+		return "/assets/" + name + version
+	}
+
+	version := ""
+	if info, err := os.Stat(filepath.Join("web", "assets", filepath.FromSlash(name))); err == nil {
+		version = "?v=" + strconv.FormatInt(info.ModTime().Unix(), 10)
+	}
+	assetVersions[name] = version
+	return "/assets/" + name + version
+}
+
+var (
+	assetVersionMu sync.Mutex
+	assetVersions  = map[string]string{}
+)
+
 func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) error {
 	h.templateOnce.Do(func() {
 		h.templates, h.templateErr = template.New("").Funcs(template.FuncMap{
@@ -455,6 +487,7 @@ func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) e
 			"toJSON":            toJSON,
 			"statusLabel":       statusLabel,
 			"sortLabel":         sortLabel,
+			"assetURL":          assetURL,
 		}).ParseGlob("web/templates/*.html")
 	})
 
