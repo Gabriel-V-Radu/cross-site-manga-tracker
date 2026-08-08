@@ -1343,6 +1343,17 @@ input:focus, select:focus {
     color: var(--accent);
 }
 
+/* The chapter number for some sources is only known after a lookup that outlives
+   the click, so the field says it is working rather than sitting emptily. */
+input.is-loading {
+    border-color: var(--accent-soft);
+}
+
+input.is-loading::placeholder {
+    color: var(--accent);
+    opacity: 0.85;
+}
+
 .search-results-list {
     display: grid;
     max-height: 180px;

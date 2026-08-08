@@ -83,6 +83,67 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Items: results, Query: query, SourceID: source.ID, SourceName: source.Name, Intent: intent})
 }
 
+// sourceChapterResponse carries the two fields the tracker form cannot fill
+// from a search result, already formatted the way the inputs expect them.
+type sourceChapterResponse struct {
+	LatestChapter   string `json:"latestChapter"`
+	LatestReleaseAt string `json:"latestReleaseAt"`
+	Error           string `json:"error,omitempty"`
+}
+
+// ResolveSourceChapter reports the latest chapter a source has for one title.
+// Some search listings cannot carry a chapter number — MangaFire's spans every
+// language it hosts and MangaBuddy's has no chapters in it at all — so the form
+// asks for it once the user has picked a result, which is also the only title
+// out of the results worth spending a request on.
+func (h *DashboardHandler) ResolveSourceChapter(c *fiber.Ctx) error {
+	sourceURL := strings.TrimSpace(c.Query("url"))
+	if sourceURL == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(sourceChapterResponse{Error: "url is required"})
+	}
+
+	sourceID, err := strconv.ParseInt(strings.TrimSpace(c.Query("source_id")), 10, 64)
+	if err != nil || sourceID <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(sourceChapterResponse{Error: "source_id is required"})
+	}
+
+	source, err := h.sourceRepo.GetByID(sourceID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(sourceChapterResponse{Error: "Failed to resolve source"})
+	}
+	if source == nil || !source.Enabled {
+		return c.Status(fiber.StatusNotFound).JSON(sourceChapterResponse{Error: "Source not found or disabled"})
+	}
+
+	connector, ok := h.registry.Get(source.Key)
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(sourceChapterResponse{Error: "No connector registered for selected source"})
+	}
+
+	// Same allowance as a search on this source: resolving reads the title and
+	// then its chapter listing, and the paced sources need room for both.
+	timeout := 5 * time.Second
+	if source.Key == "mangafire" || source.Key == "freewebnovel" {
+		timeout = 12 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(c.Context(), timeout)
+	defer cancel()
+
+	resolved, err := connector.ResolveByURL(ctx, sourceURL)
+	if err != nil || resolved == nil {
+		// The form stays usable with the field left blank — the user can type a
+		// number, and the first poll fills it in either way — so a failure here
+		// is reported rather than made to look like "no chapters".
+		return c.Status(fiber.StatusOK).JSON(sourceChapterResponse{Error: "Could not read the latest chapter from " + source.Name})
+	}
+
+	return c.JSON(sourceChapterResponse{
+		LatestChapter:   chapterInputValue(resolved.LatestChapter),
+		LatestReleaseAt: timeInputValue(resolved.LastUpdatedAt),
+	})
+}
+
 func extractMangaFireMangaURL(query string) (string, bool) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {

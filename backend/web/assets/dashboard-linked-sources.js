@@ -189,22 +189,24 @@ window.addTrackerLinkedSource = function (button) {
     });
     hidden.value = JSON.stringify(items);
 
-    var latestKnownField = form.querySelector('input[name="latest_known_chapter"]');
-    var incomingLatestRaw = button.dataset.latestChapter;
-    var incomingLatest = parseFloat(String(incomingLatestRaw || '').trim());
-    var currentLatest = NaN;
-    if (latestKnownField) {
-        currentLatest = parseFloat(String(latestKnownField.value || '').trim());
-    }
-
-    var shouldPromoteAsPrimary = false;
-    if (!Number.isNaN(incomingLatest)) {
-        if (Number.isNaN(currentLatest) || incomingLatest > currentLatest) {
-            shouldPromoteAsPrimary = true;
+    // Whether this source should take over as primary rests entirely on its
+    // chapter number, so a listing that carries none has to be asked before the
+    // question can be answered at all.
+    var promoteIfAhead = function (latestRaw, latestReleaseAt) {
+        var latestKnownField = form.querySelector('input[name="latest_known_chapter"]');
+        var incomingLatest = parseFloat(String(latestRaw || '').trim());
+        if (Number.isNaN(incomingLatest)) {
+            return;
         }
-    }
 
-    if (shouldPromoteAsPrimary) {
+        var currentLatest = NaN;
+        if (latestKnownField) {
+            currentLatest = parseFloat(String(latestKnownField.value || '').trim());
+        }
+        if (!Number.isNaN(currentLatest) && incomingLatest <= currentLatest) {
+            return;
+        }
+
         var setField = function (selector, value) {
             if (value === undefined || value === null) {
                 return;
@@ -225,13 +227,102 @@ window.addTrackerLinkedSource = function (button) {
         setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
 
         var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
-        if (latestReleaseField && typeof button.dataset.latestReleaseAt !== 'undefined') {
-            latestReleaseField.value = button.dataset.latestReleaseAt || '';
+        if (latestReleaseField && typeof latestReleaseAt !== 'undefined') {
+            latestReleaseField.value = latestReleaseAt || '';
         }
+    };
+
+    if (String(button.dataset.latestChapter || '').trim()) {
+        promoteIfAhead(button.dataset.latestChapter, button.dataset.latestReleaseAt);
+    } else {
+        window.requestSourceChapter(sourceId, sourceUrl).then(function (payload) {
+            if (payload) {
+                promoteIfAhead(payload.latestChapter, payload.latestReleaseAt);
+            }
+        });
     }
 
     window.renderLinkedSources(form);
     window.syncLinkedSourceSelect(form);
+};
+
+// Some sources cannot put a chapter number in their search listing — MangaFire's
+// spans every language it hosts and MangaBuddy's carries no chapters at all — so
+// the number is fetched for the one result the user picked, rather than left for
+// the first poll after saving to discover. Resolves to null when the source has
+// no number to give or could not be read; both leave the field to the user.
+window.requestSourceChapter = function (sourceId, sourceUrl) {
+    var endpoint = '/dashboard/trackers/source-chapter?source_id=' +
+        encodeURIComponent(String(sourceId)) + '&url=' + encodeURIComponent(sourceUrl);
+
+    return fetch(endpoint, { headers: { Accept: 'application/json' } })
+        .then(function (response) { return response.json(); })
+        .then(function (payload) {
+            if (!payload || payload.error || !payload.latestChapter) {
+                return null;
+            }
+            return payload;
+        })
+        .catch(function () { return null; });
+};
+
+window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
+    if (!form || !sourceId || !sourceUrl) {
+        return;
+    }
+
+    var chapterField = form.querySelector('input[name="latest_known_chapter"]');
+    if (!chapterField) {
+        return;
+    }
+
+    // The request outlives the click, so a second pick supersedes this one. The
+    // token is what tells them apart: only the newest lookup owns the field's
+    // "checking" state, so an older answer arriving late neither clears the
+    // newer one's indicator nor writes over its result.
+    var requestToken = (form.dataset.chapterLookupToken = String(Date.now()) + ':' + sourceUrl);
+    var isCurrentRequest = function () {
+        return form.dataset.chapterLookupToken === requestToken;
+    };
+
+    // Whatever the user does in the meantime also wins: a number typed by hand
+    // or a changed URL leaves a late answer with nothing to fill.
+    var stillWanted = function () {
+        var urlField = form.querySelector('input[name="source_url"]');
+        return String(chapterField.value || '').trim() === '' &&
+            (!urlField || String(urlField.value || '').trim() === sourceUrl);
+    };
+
+    chapterField.classList.add('is-loading');
+    var previousPlaceholder = chapterField.placeholder;
+    chapterField.placeholder = 'Checking…';
+
+    window.requestSourceChapter(sourceId, sourceUrl).then(function (payload) {
+        if (!isCurrentRequest()) {
+            return;
+        }
+
+        // Clearing the indicator is not conditional on the answer being usable —
+        // otherwise a number typed while the lookup was in flight would leave
+        // the field reading "Checking…" for good.
+        chapterField.classList.remove('is-loading');
+        chapterField.placeholder = previousPlaceholder;
+
+        // No number is a real answer here (a title with no English release has
+        // none), so the field is simply left for the user.
+        if (!payload || !stillWanted()) {
+            return;
+        }
+
+        chapterField.value = payload.latestChapter;
+        chapterField.dispatchEvent(new Event('input', { bubbles: true }));
+        chapterField.dispatchEvent(new Event('change', { bubbles: true }));
+
+        var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
+        if (latestReleaseField && payload.latestReleaseAt) {
+            latestReleaseField.value = payload.latestReleaseAt;
+        }
+    });
 };
 
 window.applyTrackerSearchResult = function (button) {
@@ -266,5 +357,9 @@ window.applyTrackerSearchResult = function (button) {
     var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
     if (latestReleaseField) {
         latestReleaseField.value = button.dataset.latestReleaseAt || '';
+    }
+
+    if (!String(button.dataset.latestChapter || '').trim()) {
+        window.fetchTrackerSourceChapter(form, button.dataset.sourceId, button.dataset.url || '');
     }
 };

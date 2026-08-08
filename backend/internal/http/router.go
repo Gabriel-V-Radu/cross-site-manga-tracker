@@ -47,6 +47,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Post("/dashboard/profile/tags/delete", dashboard.DeleteTagFromMenu)
 	app.Get("/dashboard/trackers", dashboard.TrackersPartial)
 	app.Get("/dashboard/trackers/search", dashboard.SearchSourceTitles)
+	app.Get("/dashboard/trackers/source-chapter", dashboard.ResolveSourceChapter)
 	app.Get("/dashboard/trackers/empty-modal", dashboard.EmptyModal)
 	app.Get("/dashboard/trackers/new", dashboard.NewTrackerModal)
 	app.Get("/dashboard/trackers/:id/edit", dashboard.EditTrackerModal)
