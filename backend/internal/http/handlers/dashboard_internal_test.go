@@ -58,6 +58,18 @@ func TestInferSourceKeyFromURLSupportsFreeWebNovel(t *testing.T) {
 	}
 }
 
+// TestInferSourceKeyFromURLSupportsMangaBuddy pins the gap that shipped with the
+// MangaBuddy connector: sourceHomeURLForKey knew the source but this did not, so
+// a cover fallback could not recognise a MangaBuddy URL as one it could serve.
+// The live host carries a numeral, which is exactly the shape a substring match
+// has to survive.
+func TestInferSourceKeyFromURLSupportsMangaBuddy(t *testing.T) {
+	inferred := inferSourceKeyFromURL("https://mangabuddy1.co.uk/manga/sample-series")
+	if inferred != "mangabuddy" {
+		t.Fatalf("expected inferred source key mangabuddy, got %q", inferred)
+	}
+}
+
 func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 	lastCheckedAt := time.Now().UTC()
 	h := &DashboardHandler{}

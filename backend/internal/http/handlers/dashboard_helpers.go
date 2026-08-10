@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -270,6 +271,27 @@ func (h *DashboardHandler) trackerAlternatesForProfile(profileID int64) map[int6
 	return alternates
 }
 
+// How long a failed lookup is remembered. These exist to stop a page of failing
+// trackers from re-querying their sources every couple of minutes for as long as
+// the page stays open: the sources this app reads are exactly the ones that
+// respond to being hammered by putting up a bot challenge, so a failure is held
+// long enough to be worth something. The short span still recovers from an
+// outage within one sitting.
+const (
+	lookupRetryTTL       = 10 * time.Minute
+	lookupUnreachableTTL = 30 * time.Minute
+)
+
+// jitteredTTL spreads expiry by up to a quarter of the span. A page's worth of
+// covers fails at the same moment and would otherwise expire at the same moment,
+// turning every retry into a synchronized burst against one site.
+func jitteredTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return ttl
+	}
+	return ttl + time.Duration(rand.Int64N(int64(ttl/4)+1))
+}
+
 // fetchCoverURL resolves a cover for a tracker, trying its primary source first
 // and then each alternate linked source. The result is cached under the primary
 // key either way, so a cover found on a mirror still serves the tracker whose
@@ -290,7 +312,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 
 	resolvedURL := strings.TrimSpace(sourceURL)
 	if resolvedURL == "" {
-		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+		h.setCachedCover(cacheKey, "", false, jitteredTTL(lookupUnreachableTTL))
 		return "", fmt.Errorf("missing source url")
 	}
 
@@ -301,8 +323,14 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		tryKeys = append(tryKeys, fallbackKey)
 	}
 
+	// A source that was actually queried and failed may succeed shortly; one with
+	// no usable connector will not, so the two are cached for different spans —
+	// the same split fetchChapterURL makes.
+	attempted := false
+
 	for _, key := range tryKeys {
-		coverURL, err := h.resolveCoverFromConnector(parent, key, resolvedURL)
+		coverURL, tried, err := h.resolveCoverFromConnector(parent, key, resolvedURL)
+		attempted = attempted || tried
 		if err != nil {
 			continue
 		}
@@ -324,7 +352,8 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 			continue
 		}
 
-		coverURL, err := h.resolveCoverFromConnector(parent, alternateKey, alternateURL)
+		coverURL, tried, err := h.resolveCoverFromConnector(parent, alternateKey, alternateURL)
+		attempted = attempted || tried
 		if err != nil || coverURL == "" {
 			continue
 		}
@@ -333,14 +362,21 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		return coverURL, nil
 	}
 
-	h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+	negativeTTL := lookupUnreachableTTL
+	if attempted {
+		negativeTTL = lookupRetryTTL
+	}
+	h.setCachedCover(cacheKey, "", false, jitteredTTL(negativeTTL))
 	return "", fmt.Errorf("cover not found")
 }
 
-func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sourceKey, sourceURL string) (string, error) {
+// resolveCoverFromConnector also reports whether a connector was actually
+// queried. "No connector registered for this key" and "the site refused us" are
+// both failures here, but only the second is worth retrying soon.
+func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sourceKey, sourceURL string) (string, bool, error) {
 	connector, ok := h.registry.Get(strings.TrimSpace(sourceKey))
 	if !ok {
-		return "", fmt.Errorf("connector not found")
+		return "", false, fmt.Errorf("connector not found")
 	}
 
 	resolveTimeout := 8 * time.Second
@@ -352,13 +388,13 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 
 	result, err := connector.ResolveByURL(ctx, sourceURL)
 	if err != nil {
-		return "", err
+		return "", true, err
 	}
 	if result == nil {
-		return "", fmt.Errorf("empty result")
+		return "", true, fmt.Errorf("empty result")
 	}
 
-	return strings.TrimSpace(result.CoverImageURL), nil
+	return strings.TrimSpace(result.CoverImageURL), true, nil
 }
 
 func inferSourceKeyFromURL(rawURL string) string {
@@ -373,6 +409,8 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "mangadex"
 	case strings.Contains(host, "mangafire"):
 		return "mangafire"
+	case strings.Contains(host, "mangabuddy"):
+		return "mangabuddy"
 	case strings.Contains(host, "mgeko"):
 		return "mgeko"
 	case strings.Contains(host, "asura"):

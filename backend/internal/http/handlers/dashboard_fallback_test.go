@@ -287,9 +287,15 @@ func TestFetchChapterURLNegativeCacheIsShortAfterAnAttempt(t *testing.T) {
 	if !exists {
 		t.Fatalf("expected a negative cache entry")
 	}
-	if remaining := time.Until(entry.ExpiresAt); remaining > 5*time.Minute {
-		t.Fatalf("expected a short negative TTL after a real attempt, got %s", remaining)
+	if remaining := time.Until(entry.ExpiresAt); remaining > maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected the retry negative TTL after a real attempt, got %s", remaining)
 	}
+}
+
+// maxJitteredTTL is the ceiling jitteredTTL can return for a span, which is what
+// a caller can assert against without depending on the random component.
+func maxJitteredTTL(ttl time.Duration) time.Duration {
+	return ttl + ttl/4
 }
 
 // TestFetchChapterURLUnknownConnectorCachesLonger pins the other half of that
@@ -308,7 +314,69 @@ func TestFetchChapterURLUnknownConnectorCachesLonger(t *testing.T) {
 	if !exists {
 		t.Fatalf("expected a negative cache entry")
 	}
-	if remaining := time.Until(entry.ExpiresAt); remaining < 5*time.Minute {
-		t.Fatalf("expected a long negative TTL when nothing was queried, got %s", remaining)
+	// Strictly longer than anything the retry span can produce, jitter included:
+	// that gap is the whole point of the distinction.
+	if remaining := time.Until(entry.ExpiresAt); remaining <= maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected a longer negative TTL when nothing was queried, got %s", remaining)
+	}
+}
+
+func negativeCoverEntry(t *testing.T, h *DashboardHandler, cacheKey string) coverCacheEntry {
+	t.Helper()
+	h.cacheMu.RLock()
+	entry, exists := h.coverCache[cacheKey]
+	h.cacheMu.RUnlock()
+	if !exists {
+		t.Fatalf("expected a negative cache entry")
+	}
+	if entry.Found {
+		t.Fatalf("expected the entry to record a failure")
+	}
+	return entry
+}
+
+// TestFetchCoverURLNegativeCacheSplitsAttemptFromUnusable gives covers the same
+// distinction chapter links already had. Before this, every failure was held for
+// two minutes, so a page of trackers whose sources were down re-queried all of
+// them every two minutes for as long as the page stayed open — against sites
+// that answer sustained traffic with a bot challenge.
+func TestFetchCoverURLNegativeCacheSplitsAttemptFromUnusable(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedConnector{key: "blockedsource"}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+
+	if _, err := h.fetchCoverURL(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, nil); err == nil {
+		t.Fatalf("expected an error when the only source is blocked")
+	}
+	attempted := negativeCoverEntry(t, h, buildCoverCacheKey("blockedsource", "https://blocked.example/title/a", nil))
+	if remaining := time.Until(attempted.ExpiresAt); remaining > maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected the retry negative TTL after a real attempt, got %s", remaining)
+	}
+
+	if _, err := h.fetchCoverURL(context.Background(), "nosuchsource", "https://nowhere.example/title/a", nil, nil); err == nil {
+		t.Fatalf("expected an error for an unregistered connector")
+	}
+	unusable := negativeCoverEntry(t, h, buildCoverCacheKey("nosuchsource", "https://nowhere.example/title/a", nil))
+	if remaining := time.Until(unusable.ExpiresAt); remaining <= maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected a longer negative TTL when nothing was queried, got %s", remaining)
+	}
+}
+
+// TestJitteredTTLStaysWithinItsBand pins both ends: expiry must never land below
+// the span it was asked for, or the retry budget silently shrinks, and never
+// above the quarter that callers assert against.
+func TestJitteredTTLStaysWithinItsBand(t *testing.T) {
+	const span = 10 * time.Minute
+	for i := 0; i < 500; i++ {
+		got := jitteredTTL(span)
+		if got < span || got > maxJitteredTTL(span) {
+			t.Fatalf("jitteredTTL(%s) = %s, outside [%s, %s]", span, got, span, maxJitteredTTL(span))
+		}
+	}
+	if got := jitteredTTL(0); got != 0 {
+		t.Fatalf("expected a zero span to stay zero, got %s", got)
 	}
 }

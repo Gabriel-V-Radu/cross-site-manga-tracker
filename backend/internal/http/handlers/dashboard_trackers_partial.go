@@ -360,7 +360,7 @@ func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, so
 	}
 
 	if strings.TrimSpace(sourceURL) == "" {
-		h.setCachedCover(cacheKey, "", false, 2*time.Minute)
+		h.setCachedCover(cacheKey, "", false, jitteredTTL(lookupUnreachableTTL))
 		return "", "", false
 	}
 
@@ -530,11 +530,11 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 		return chapterURL, nil
 	}
 
-	negativeTTL := 30 * time.Minute
+	negativeTTL := lookupUnreachableTTL
 	if attempted {
-		negativeTTL = 2 * time.Minute
+		negativeTTL = lookupRetryTTL
 	}
-	h.setCachedChapterURL(cacheKey, "", false, negativeTTL)
+	h.setCachedChapterURL(cacheKey, "", false, jitteredTTL(negativeTTL))
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no usable source")
 	}
