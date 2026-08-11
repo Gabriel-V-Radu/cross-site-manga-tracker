@@ -12,13 +12,19 @@ import (
 
 func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, error) {
 	validSortFields := map[string]string{
-		"title":                "title",
-		"created_at":           "created_at",
-		"updated_at":           "updated_at",
-		"last_read_at":         "last_read_at",
-		"last_checked_at":      "last_checked_at",
-		"rating":               "rating",
-		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(latest_release_at, last_checked_at, updated_at, created_at) END",
+		"title":           "title",
+		"created_at":      "created_at",
+		"updated_at":      "updated_at",
+		"last_read_at":    "last_read_at",
+		"last_checked_at": "last_checked_at",
+		"rating":          "rating",
+		// "Newest chapter first" must rank by when the chapter appeared, so the
+		// fallbacks may only be dates that move when a chapter does.
+		// last_checked_at and updated_at were in this chain and both are rewritten
+		// by every poll, which ranked a tracker whose source reports no release
+		// date by when it was last polled: those trackers were pinned to the top of
+		// the library and could never move down, however old the series was.
+		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(latest_release_at, latest_chapter_seen_at, created_at) END",
 	}
 	sortField, ok := validSortFields[options.SortBy]
 	if !ok {
@@ -33,7 +39,8 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 	query := `
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
-			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
+			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
+			latest_chapter_seen_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 	`
@@ -358,10 +365,19 @@ func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, current
 		}
 	}
 
+	// Every expression here is evaluated against the row as it stands before the
+	// update, which is what lets latest_chapter_seen_at compare the incoming
+	// chapter number against the stored one without the caller passing a flag —
+	// the same way last_read_at is stamped in Update.
 	_, err := r.db.Exec(`
 		UPDATE trackers
 		SET source_item_id = COALESCE(?, source_item_id),
 			source_url = COALESCE(?, source_url),
+			latest_chapter_seen_at = CASE
+				WHEN ? IS NULL THEN latest_chapter_seen_at
+				WHEN latest_known_chapter IS NOT ? THEN ?
+				ELSE COALESCE(latest_chapter_seen_at, ?)
+			END,
 			latest_known_chapter = ?,
 			latest_release_at = CASE
 				WHEN ? THEN NULL
@@ -370,7 +386,10 @@ func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, current
 			END,
 			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, sourceItemIDValue, sourceURLValue, latestKnownChapter, clearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt.UTC(), id)
+	`, sourceItemIDValue, sourceURLValue,
+		latestKnownChapter, latestKnownChapter, checkedAt.UTC(), checkedAt.UTC(),
+		latestKnownChapter,
+		clearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt.UTC(), id)
 	if err != nil {
 		return fmt.Errorf("update polling state: %w", err)
 	}

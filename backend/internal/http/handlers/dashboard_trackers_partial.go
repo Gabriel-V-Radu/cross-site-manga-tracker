@@ -222,9 +222,20 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 			card.LastCheckedAgo = "—"
 		}
 
+		// A source that reports a chapter number without a date used to leave the
+		// card showing "—", which said nothing about how old the chapter was and
+		// left the user no way to tell a finished series from one that updated
+		// today. When no date was ever reported, the card falls back to when this
+		// app first saw the chapter and marks the value as approximate.
 		if item.LatestReleaseAt != nil {
 			card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
 			card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
+		} else if item.LatestChapterSeenAt != nil {
+			card.LatestReleaseFormatted = item.LatestChapterSeenAt.Format("2006-01-02 15:04")
+			card.LatestReleaseAgo = "~" + relativeTime(*item.LatestChapterSeenAt)
+			card.LatestReleaseApproximate = true
+			card.LatestReleaseTitle = "The site reports no release date. First seen here on " +
+				card.LatestReleaseFormatted + " UTC."
 		}
 
 		if item.LatestKnownChapter != nil {
@@ -455,6 +466,7 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID, alternates)
 	}()
 }
+
 // getCachedOrQueueChapterURL returns a chapter's reader URL, whether that URL is
 // a resolved chapter link rather than the series page it degrades to, and whether
 // a background resolve is still pending. The caller needs the middle value to tell

@@ -43,7 +43,8 @@ before, so a one-line change to a card meant editing it in five places.
         {{else}}
         <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
         {{end}}
-        <span class="tracker-row__time">Released {{.LatestReleaseAgo}}</span>
+        <span class="tracker-row__time{{if .LatestReleaseApproximate}} stat-value--approx{{end}}"
+              {{if .LatestReleaseTitle}}title="{{.LatestReleaseTitle}}"{{end}}>Released {{.LatestReleaseAgo}}</span>
     </div>
 
     <div class="tracker-row__actions">
@@ -164,7 +165,8 @@ before, so a one-line change to a card meant editing it in five places.
         </div>
         <div class="stat-row">
             <span class="stat-label">Release Date:</span>
-            <span class="stat-value">{{.LatestReleaseAgo}}</span>
+            <span class="stat-value{{if .LatestReleaseApproximate}} stat-value--approx{{end}}"
+                  {{if .LatestReleaseTitle}}title="{{.LatestReleaseTitle}}"{{end}}>{{.LatestReleaseAgo}}</span>
         </div>
         <div class="stat-row">
             <span class="stat-label">Last Read Chapter:</span>

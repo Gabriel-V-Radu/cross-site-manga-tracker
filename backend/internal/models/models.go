@@ -23,23 +23,28 @@ type Profile struct {
 }
 
 type Tracker struct {
-	ID                 int64       `json:"id"`
-	ProfileID          int64       `json:"profileId"`
-	Title              string      `json:"title"`
-	RelatedTitles      []string    `json:"relatedTitles,omitempty"`
-	SourceID           int64       `json:"sourceId"`
-	SourceItemID       *string     `json:"sourceItemId,omitempty"`
-	SourceURL          string      `json:"sourceUrl"`
-	Status             string      `json:"status"`
-	LastReadChapter    *float64    `json:"lastReadChapter,omitempty"`
-	Rating             *float64    `json:"rating,omitempty"`
-	LastReadAt         *time.Time  `json:"lastReadAt,omitempty"`
-	LatestKnownChapter *float64    `json:"latestKnownChapter,omitempty"`
-	LatestReleaseAt    *time.Time  `json:"latestReleaseAt,omitempty"`
-	LastCheckedAt      *time.Time  `json:"lastCheckedAt,omitempty"`
-	Tags               []CustomTag `json:"tags,omitempty"`
-	CreatedAt          time.Time   `json:"createdAt"`
-	UpdatedAt          time.Time   `json:"updatedAt"`
+	ID                 int64      `json:"id"`
+	ProfileID          int64      `json:"profileId"`
+	Title              string     `json:"title"`
+	RelatedTitles      []string   `json:"relatedTitles,omitempty"`
+	SourceID           int64      `json:"sourceId"`
+	SourceItemID       *string    `json:"sourceItemId,omitempty"`
+	SourceURL          string     `json:"sourceUrl"`
+	Status             string     `json:"status"`
+	LastReadChapter    *float64   `json:"lastReadChapter,omitempty"`
+	Rating             *float64   `json:"rating,omitempty"`
+	LastReadAt         *time.Time `json:"lastReadAt,omitempty"`
+	LatestKnownChapter *float64   `json:"latestKnownChapter,omitempty"`
+	LatestReleaseAt    *time.Time `json:"latestReleaseAt,omitempty"`
+	// LatestChapterSeenAt is when this app first recorded the chapter number it
+	// currently holds. It stands in for the release date on the sources that
+	// report a chapter number without one, which is what keeps such a tracker
+	// from being ranked by when it was last polled.
+	LatestChapterSeenAt *time.Time  `json:"latestChapterSeenAt,omitempty"`
+	LastCheckedAt       *time.Time  `json:"lastCheckedAt,omitempty"`
+	Tags                []CustomTag `json:"tags,omitempty"`
+	CreatedAt           time.Time   `json:"createdAt"`
+	UpdatedAt           time.Time   `json:"updatedAt"`
 }
 
 type CustomTag struct {

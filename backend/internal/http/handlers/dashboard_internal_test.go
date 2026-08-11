@@ -94,3 +94,68 @@ func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 		t.Fatalf("expected unknown release date marker, got %q", cards[0].LatestReleaseAgo)
 	}
 }
+
+// TestBuildTrackerCardsShowsChapterSeenAtAsApproximateRelease covers the sources
+// that report a chapter number and no date for it, where the card used to show only
+// "—": it now falls back to when the chapter was first recorded here, marked as
+// approximate so a detection time is never read as the site's release time.
+func TestBuildTrackerCardsShowsChapterSeenAtAsApproximateRelease(t *testing.T) {
+	chapter := 20.0
+	seenAt := time.Now().UTC().Add(-48 * time.Hour)
+	h := &DashboardHandler{}
+	items := []models.Tracker{{
+		ID:                  1,
+		Title:               "Sample",
+		Status:              "completed",
+		SourceID:            1,
+		SourceURL:           "https://example.com/series/sample",
+		LatestKnownChapter:  &chapter,
+		LatestChapterSeenAt: &seenAt,
+	}}
+	sourceByID := map[int64]models.Source{1: {ID: 1, Name: "Example"}}
+
+	cards, _ := h.buildTrackerCards(items, sourceByID, map[int64]string{}, nil, "")
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	if cards[0].LatestReleaseAgo != "~2 days ago" {
+		t.Fatalf("expected approximate release date from first-seen timestamp, got %q", cards[0].LatestReleaseAgo)
+	}
+	if !cards[0].LatestReleaseApproximate {
+		t.Fatalf("expected the release date to be marked approximate")
+	}
+	if cards[0].LatestReleaseTitle == "" {
+		t.Fatalf("expected an explanation of where the approximate date came from")
+	}
+}
+
+// TestBuildTrackerCardsPrefersReportedReleaseDate keeps the fallback above from
+// overriding a date a source actually reported.
+func TestBuildTrackerCardsPrefersReportedReleaseDate(t *testing.T) {
+	chapter := 20.0
+	releasedAt := time.Now().UTC().Add(-2 * time.Hour)
+	seenAt := time.Now().UTC().Add(-48 * time.Hour)
+	h := &DashboardHandler{}
+	items := []models.Tracker{{
+		ID:                  1,
+		Title:               "Sample",
+		Status:              "reading",
+		SourceID:            1,
+		SourceURL:           "https://example.com/series/sample",
+		LatestKnownChapter:  &chapter,
+		LatestReleaseAt:     &releasedAt,
+		LatestChapterSeenAt: &seenAt,
+	}}
+	sourceByID := map[int64]models.Source{1: {ID: 1, Name: "Example"}}
+
+	cards, _ := h.buildTrackerCards(items, sourceByID, map[int64]string{}, nil, "")
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	if cards[0].LatestReleaseAgo != "2 hours ago" {
+		t.Fatalf("expected the reported release date, got %q", cards[0].LatestReleaseAgo)
+	}
+	if cards[0].LatestReleaseApproximate {
+		t.Fatalf("did not expect a reported release date to be marked approximate")
+	}
+}

@@ -22,6 +22,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var lastReadAt sql.NullTime
 	var latestKnownChapter sql.NullFloat64
 	var latestReleaseAt sql.NullTime
+	var latestChapterSeenAt sql.NullTime
 	var lastCheckedAt sql.NullTime
 
 	err := scanner.Scan(
@@ -38,6 +39,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&lastReadAt,
 		&latestKnownChapter,
 		&latestReleaseAt,
+		&latestChapterSeenAt,
 		&lastCheckedAt,
 		&tracker.CreatedAt,
 		&tracker.UpdatedAt,
@@ -67,6 +69,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 	if latestReleaseAt.Valid {
 		tracker.LatestReleaseAt = &latestReleaseAt.Time
+	}
+	if latestChapterSeenAt.Valid {
+		tracker.LatestChapterSeenAt = &latestChapterSeenAt.Time
 	}
 	if lastCheckedAt.Valid {
 		tracker.LastCheckedAt = &lastCheckedAt.Time

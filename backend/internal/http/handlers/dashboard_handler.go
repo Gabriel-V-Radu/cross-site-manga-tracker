@@ -94,16 +94,16 @@ type trackerOOBResponseData struct {
 }
 
 type trackerCardView struct {
-	ID                     int64
-	Title                  string
-	Status                 string
-	StatusLabel            string
-	Tags                   []trackerTagView
-	HiddenTagCount         int
-	TagIcons               []trackerTagIconView
-	SourceURL              string
-	LatestKnownChapterURL  string
-	LastReadChapterURL     string
+	ID                    int64
+	Title                 string
+	Status                string
+	StatusLabel           string
+	Tags                  []trackerTagView
+	HiddenTagCount        int
+	TagIcons              []trackerTagIconView
+	SourceURL             string
+	LatestKnownChapterURL string
+	LastReadChapterURL    string
 	// Which site each chapter link actually opens. A card's links can land on
 	// different sites when one of them is unreadable, so each says where it goes
 	// rather than leaving the user to discover it by clicking.
@@ -114,17 +114,22 @@ type trackerCardView struct {
 	SourceLogoLabel        string
 	LatestKnownChapter     string
 	LatestReleaseAgo       string
-	LastCheckedAgo         string
-	LastReadChapter        string
-	LastReadAgo            string
-	RatingLabel            string
-	LatestReleaseFormatted string
-	UpdatedAtFormatted     string
-	LastCheckedFormatted   string
-	SourceItemID           *string
-	Rating                 *float64
-	LatestKnownChapterRaw  *float64
-	LastReadChapterRaw     *float64
+	// LatestReleaseApproximate marks a release date the source never reported:
+	// the card is showing when this app first saw the chapter instead, so it says
+	// so rather than passing a detection time off as a release time.
+	LatestReleaseApproximate bool
+	LatestReleaseTitle       string
+	LastCheckedAgo           string
+	LastReadChapter          string
+	LastReadAgo              string
+	RatingLabel              string
+	LatestReleaseFormatted   string
+	UpdatedAtFormatted       string
+	LastCheckedFormatted     string
+	SourceItemID             *string
+	Rating                   *float64
+	LatestKnownChapterRaw    *float64
+	LastReadChapterRaw       *float64
 }
 
 type trackerSiteLinkView struct {

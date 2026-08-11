@@ -20,10 +20,10 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
 	result, err := r.db.Exec(`
 		INSERT INTO trackers (
-			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, last_checked_at, last_read_at
+			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, latest_chapter_seen_at, last_checked_at, last_read_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.ProfileID, tracker.Title, relatedTitlesJSON, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LastCheckedAt, tracker.LastReadChapter)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+	`, tracker.ProfileID, tracker.Title, relatedTitlesJSON, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LatestKnownChapter, tracker.LastCheckedAt, tracker.LastReadChapter)
 	if err != nil {
 		return nil, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -48,7 +48,8 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 	row := r.db.QueryRow(`
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
-			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at, last_checked_at,
+			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
+			latest_chapter_seen_at, last_checked_at,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ? AND profile_id = ?
@@ -85,6 +86,11 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 			last_read_chapter = ?,
 			rating = ?,
 			last_read_at = CASE WHEN last_read_chapter IS NOT ? THEN CURRENT_TIMESTAMP ELSE last_read_at END,
+			latest_chapter_seen_at = CASE
+				WHEN ? IS NULL THEN NULL
+				WHEN latest_known_chapter IS NOT ? THEN CURRENT_TIMESTAMP
+				ELSE COALESCE(latest_chapter_seen_at, CURRENT_TIMESTAMP)
+			END,
 			latest_known_chapter = ?,
 			latest_release_at = ?,
 			last_checked_at = ?,
@@ -114,6 +120,8 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 		tracker.LastReadChapter,
 		tracker.Rating,
 		tracker.LastReadChapter,
+		tracker.LatestKnownChapter,
+		tracker.LatestKnownChapter,
 		tracker.LatestKnownChapter,
 		tracker.LatestReleaseAt,
 		tracker.LastCheckedAt,

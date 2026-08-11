@@ -1094,6 +1094,14 @@ input:focus, select:focus {
     font-weight: 600;
 }
 
+/* A date this app inferred rather than read off the site: dimmed and italic so
+   it never reads as the site's own release date. */
+.stat-value--approx {
+    color: #94a3bd;
+    font-style: italic;
+    cursor: help;
+}
+
 .url {
     margin: 12px 0 0;
     color: #90a0bf;

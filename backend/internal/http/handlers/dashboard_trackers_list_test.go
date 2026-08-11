@@ -236,6 +236,58 @@ func TestDashboardSortByRating(t *testing.T) {
 	}
 }
 
+// TestDashboardLatestChapterSortIgnoresPollingTimestamps pins why a tracker whose
+// source reports no release date used to sit near the top of the library and never
+// move: "Latest chapter" fell back to last_checked_at and updated_at, both of which
+// every poll rewrites, so the sort ranked it by when it was last polled rather than
+// by when a chapter appeared. The seeded rows make the two orderings disagree — the
+// dateless tracker is the most recently polled and the least recently updated.
+func TestDashboardLatestChapterSortIgnoresPollingTimestamps(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		INSERT INTO trackers (
+			title, source_id, source_url, status, latest_known_chapter,
+			latest_release_at, latest_chapter_seen_at, last_checked_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"Fresh Release Tracker", 1, "https://mangadex.org/title/fresh-release", "completed", 10.0,
+		"2026-08-10 00:00:00", nil, "2026-08-01 00:00:00", "2026-08-01 00:00:00",
+		"Dateless Tracker", 1, "https://mangadex.org/title/dateless", "completed", 20.0,
+		nil, "2026-02-01 00:00:00", "2026-08-11 12:00:00", "2026-08-11 12:00:00",
+	)
+	if err != nil {
+		t.Fatalf("seed trackers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=all&sort=latest_known_chapter&order=desc", nil)
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("dashboard trackers request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	html := string(body)
+
+	freshIndex := strings.Index(html, "Fresh Release Tracker")
+	datelessIndex := strings.Index(html, "Dateless Tracker")
+	if freshIndex < 0 || datelessIndex < 0 {
+		t.Fatalf("expected both seeded trackers in response")
+	}
+	if freshIndex > datelessIndex {
+		t.Fatalf("expected the tracker with a recent release date above the one whose chapter was seen months ago")
+	}
+}
+
 func TestDashboardSearchMatchesWordsInAnyOrderAndRelatedTitles(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
