@@ -1,5 +1,17 @@
+{{/*
+A card's markup lives in a "_body" template, separate from the <article> that
+wraps it, because the htmx out-of-band responses need the same body under an
+article carrying an hx-swap-oob attribute. Keeping only the wrapper duplicated
+is what stops the two from drifting: every copy of the body was hand-maintained
+before, so a one-line change to a card meant editing it in five places.
+*/}}
 {{define "tracker_card_list"}}
 <article id="tracker-card-{{.ID}}" class="tracker-row tracker-card">
+{{template "tracker_card_list_body" .}}
+</article>
+{{end}}
+
+{{define "tracker_card_list_body"}}
     <div class="tracker-row__title-wrap">
         <h3>{{.Title}}</h3>
     </div>
@@ -58,7 +70,6 @@
                 hx-swap="innerHTML"
                 hx-confirm="Delete this tracker?">Delete</button>
     </div>
-</article>
 {{end}}
 
 {{define "tracker_rating_popover"}}
@@ -96,6 +107,11 @@
 
 {{define "tracker_card_grid"}}
 <article id="tracker-card-{{.ID}}" class="tracker-card">
+{{template "tracker_card_grid_body" .}}
+</article>
+{{end}}
+
+{{define "tracker_card_grid_body"}}
     <header class="tracker-card__header">
         <h3>{{.Title}}</h3>
         <span class="badge badge--status badge--status-{{.Status}}" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
@@ -195,5 +211,4 @@
                 hx-swap="innerHTML"
                 hx-confirm="Delete this tracker?">Delete</button>
     </div>
-</article>
 {{end}}
