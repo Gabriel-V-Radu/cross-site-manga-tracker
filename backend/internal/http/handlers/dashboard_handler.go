@@ -104,6 +104,11 @@ type trackerCardView struct {
 	SourceURL              string
 	LatestKnownChapterURL  string
 	LastReadChapterURL     string
+	// Which site each chapter link actually opens. A card's links can land on
+	// different sites when one of them is unreadable, so each says where it goes
+	// rather than leaving the user to discover it by clicking.
+	LatestKnownChapterSite string
+	LastReadChapterSite    string
 	CoverURL               string
 	SourceLogoURL          string
 	SourceLogoLabel        string

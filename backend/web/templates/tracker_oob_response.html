@@ -28,6 +28,7 @@
         <a class="tracker-row__chapter tracker-row__chapter-link"
                 href="{{.ReplaceCard.LastReadChapterURL}}"
            target="_blank"
+           {{if .ReplaceCard.LastReadChapterSite}}title="Opens on {{.ReplaceCard.LastReadChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.ReplaceCard.LastReadChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter">{{.ReplaceCard.LastReadChapter}}</span>
@@ -40,6 +41,7 @@
         <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
                 href="{{.ReplaceCard.LatestKnownChapterURL}}"
            target="_blank"
+           {{if .ReplaceCard.LatestKnownChapterSite}}title="Opens on {{.ReplaceCard.LatestKnownChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.ReplaceCard.LatestKnownChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter tracker-row__chapter--accent">{{.ReplaceCard.LatestKnownChapter}}</span>
@@ -118,6 +120,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.ReplaceCard.LatestKnownChapterURL}}"
                target="_blank"
+               {{if .ReplaceCard.LatestKnownChapterSite}}title="Opens on {{.ReplaceCard.LatestKnownChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.ReplaceCard.LatestKnownChapter}}</a>
             {{else}}
             <span class="stat-value">{{.ReplaceCard.LatestKnownChapter}}</span>
@@ -133,6 +136,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.ReplaceCard.LastReadChapterURL}}"
                target="_blank"
+               {{if .ReplaceCard.LastReadChapterSite}}title="Opens on {{.ReplaceCard.LastReadChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.ReplaceCard.LastReadChapter}}</a>
             {{else}}
             <span class="stat-value">{{.ReplaceCard.LastReadChapter}}</span>
@@ -201,6 +205,7 @@
         <a class="tracker-row__chapter tracker-row__chapter-link"
                 href="{{.PrependCard.LastReadChapterURL}}"
            target="_blank"
+           {{if .PrependCard.LastReadChapterSite}}title="Opens on {{.PrependCard.LastReadChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.PrependCard.LastReadChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter">{{.PrependCard.LastReadChapter}}</span>
@@ -213,6 +218,7 @@
         <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
                 href="{{.PrependCard.LatestKnownChapterURL}}"
            target="_blank"
+           {{if .PrependCard.LatestKnownChapterSite}}title="Opens on {{.PrependCard.LatestKnownChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.PrependCard.LatestKnownChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter tracker-row__chapter--accent">{{.PrependCard.LatestKnownChapter}}</span>
@@ -291,6 +297,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.PrependCard.LatestKnownChapterURL}}"
                target="_blank"
+               {{if .PrependCard.LatestKnownChapterSite}}title="Opens on {{.PrependCard.LatestKnownChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.PrependCard.LatestKnownChapter}}</a>
             {{else}}
             <span class="stat-value">{{.PrependCard.LatestKnownChapter}}</span>
@@ -306,6 +313,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.PrependCard.LastReadChapterURL}}"
                target="_blank"
+               {{if .PrependCard.LastReadChapterSite}}title="Opens on {{.PrependCard.LastReadChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.PrependCard.LastReadChapter}}</a>
             {{else}}
             <span class="stat-value">{{.PrependCard.LastReadChapter}}</span>

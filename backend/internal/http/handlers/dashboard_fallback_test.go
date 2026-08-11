@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
@@ -149,6 +150,104 @@ func TestFindServingSource(t *testing.T) {
 				t.Fatalf("expected source id %d, got %d", testCase.wantSourceI, got.SourceID)
 			}
 		})
+	}
+}
+
+// mixedSourceCard builds the card for a tracker whose cover came from a mirror,
+// seeding every cache so buildTrackerCards resolves without touching a connector.
+// This is the shape the live dashboard produced while MangaFire was flapping.
+func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool) trackerCardView {
+	t.Helper()
+
+	const (
+		primaryURL = "https://mangafire.to/title/npozj-akanabe"
+		mirrorURL  = "https://mangabuddy1.co.uk/series/akanabe.ZDM"
+	)
+	latest, lastRead := 65.0, 59.0
+
+	h := newFallbackHandler(t, connectors.NewRegistry())
+
+	// The cover came from the mirror: the primary's art endpoint was unreachable.
+	h.setCachedCoverFromSource(buildCoverCacheKey("mangafire", primaryURL, nil),
+		"https://cdn.example/cover.webp", "mangabuddy", true, time.Hour)
+
+	h.setCachedChapterURL(buildChapterURLCacheKey("mangafire", primaryURL, latest),
+		latestChapterURL, latestResolved, time.Hour)
+	// The older chapter sits deep in the primary's paged listing and only the
+	// mirror could answer for it.
+	h.setCachedChapterURL(buildChapterURLCacheKey("mangafire", primaryURL, lastRead),
+		mirrorURL+"/chapter-59", true, time.Hour)
+
+	items := []models.Tracker{{
+		ID: 1, Title: "Akanabe", Status: "reading", SourceID: 1,
+		SourceURL:          primaryURL,
+		LatestKnownChapter: &latest,
+		LastReadChapter:    &lastRead,
+	}}
+	sourceByID := map[int64]models.Source{
+		1: {ID: 1, Key: "mangafire", Name: "MangaFire"},
+		2: {ID: 2, Key: "mangabuddy", Name: "MangaBuddy"},
+	}
+	logos := map[int64]string{1: "/logos/mangafire.png", 2: "/logos/mangabuddy.png"}
+	alternates := map[int64][]repository.TrackerSourceRef{
+		1: {{SourceID: 2, SourceKey: "mangabuddy", SourceURL: mirrorURL}},
+	}
+
+	cards, pending := h.buildTrackerCards(items, sourceByID, logos, alternates, "")
+	if pending {
+		t.Fatalf("expected every lookup to be served from cache")
+	}
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	return cards[0]
+}
+
+// TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource pins the defect
+// behind "some buttons open MangaFire, others MangaBuddy": the badge and its Open
+// link were driven by whoever supplied the cover, which is the weakest signal on
+// the card. Cover art and chapters resolve through different endpoints, so a card
+// could badge the mirror while its newest-chapter link opened the primary.
+func TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource(t *testing.T) {
+	card := mixedSourceCard(t, "https://mangafire.to/title/npozj-akanabe/9353930", true)
+
+	if card.SourceLogoLabel != "MangaFire" {
+		t.Fatalf("expected the card to present the site holding the newest chapter, got %q", card.SourceLogoLabel)
+	}
+	if card.SourceLogoURL != "/logos/mangafire.png" {
+		t.Fatalf("expected the primary's logo, got %q", card.SourceLogoURL)
+	}
+	if card.SourceURL != "https://mangafire.to/title/npozj-akanabe" {
+		t.Fatalf("expected Open to follow the newest chapter's site, got %q", card.SourceURL)
+	}
+
+	// Each link still goes wherever that chapter actually exists — forcing both
+	// onto one site would break whichever one that site cannot serve — so each
+	// says where it lands.
+	if card.LatestKnownChapterSite != "MangaFire" {
+		t.Fatalf("expected the latest chapter to be labelled MangaFire, got %q", card.LatestKnownChapterSite)
+	}
+	if card.LastReadChapterSite != "MangaBuddy" {
+		t.Fatalf("expected the last read chapter to be labelled MangaBuddy, got %q", card.LastReadChapterSite)
+	}
+}
+
+// TestBuildTrackerCardsFallsBackToTheCoverSource is the other half: with no
+// resolved chapter link there is nothing better to go on, so the cover's source
+// still decides. Without this the card would badge a primary that served nothing.
+func TestBuildTrackerCardsFallsBackToTheCoverSource(t *testing.T) {
+	// A negative cache entry: the link degrades to the series page, which names
+	// the primary but proves nothing about who can serve the chapter.
+	card := mixedSourceCard(t, "", false)
+
+	if card.SourceLogoLabel != "MangaBuddy" {
+		t.Fatalf("expected the cover's source to decide when no chapter link resolved, got %q", card.SourceLogoLabel)
+	}
+	if card.SourceURL != "https://mangabuddy1.co.uk/series/akanabe.ZDM" {
+		t.Fatalf("expected Open to follow the mirror, got %q", card.SourceURL)
+	}
+	if card.LatestKnownChapterSite != "" {
+		t.Fatalf("expected no label for an unresolved link, got %q", card.LatestKnownChapterSite)
 	}
 }
 

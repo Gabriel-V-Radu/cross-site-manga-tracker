@@ -183,6 +183,7 @@ func buildPageNumbers(totalPages int, currentPage int) []int {
 
 func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID map[int64]models.Source, sourceLogoBySourceID map[int64]string, alternatesByTracker map[int64][]repository.TrackerSourceRef, pageKey string) ([]trackerCardView, bool) {
 	cards := make([]trackerCardView, 0, len(items))
+	sourceNameByKey := buildSourceNameByKey(sourceByID)
 	pendingCovers := false
 	for _, item := range items {
 		tagViews := toTrackerTagView(item.Tags)
@@ -258,26 +259,48 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 
 		alternates := alternatesByTracker[item.ID]
 
+		// The site holding the newest chapter is where the user goes to read, so
+		// it decides which source the card presents. The cover used to decide it,
+		// which is the weakest signal on the card: art resolves from a different
+		// endpoint than chapters do, so a card could badge one site while its
+		// chapter links opened another.
+		latestChapterSourceKey := ""
+
 		if item.LatestKnownChapter != nil {
-			latestChapterURL, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, alternates, pageKey)
+			latestChapterURL, resolvedLatest, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, alternates, pageKey)
 			card.LatestKnownChapterURL = latestChapterURL
+			if resolvedLatest {
+				latestChapterSourceKey = inferSourceKeyFromURL(latestChapterURL)
+				card.LatestKnownChapterSite = chapterSiteLabel(latestChapterSourceKey, sourceNameByKey)
+			}
 			if waitingLatestChapterURL {
 				pendingCovers = true
 			}
 		}
 
 		if item.LastReadChapter != nil {
-			lastReadChapterURL, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, alternates, pageKey)
+			lastReadChapterURL, resolvedLastRead, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, alternates, pageKey)
 			card.LastReadChapterURL = lastReadChapterURL
+			if resolvedLastRead {
+				card.LastReadChapterSite = chapterSiteLabel(inferSourceKeyFromURL(lastReadChapterURL), sourceNameByKey)
+			}
 			if waitingLastReadChapterURL {
 				pendingCovers = true
 			}
 		}
 
-		coverURL, servingSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
+		coverURL, coverSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
 		card.CoverURL = coverURL
 		if waitingCover {
 			pendingCovers = true
+		}
+
+		// Only fall back to the cover's source when no chapter link resolved:
+		// otherwise a card whose primary site is down would still badge that site
+		// while every working link pointed at the mirror.
+		servingSourceKey := latestChapterSourceKey
+		if servingSourceKey == "" {
+			servingSourceKey = coverSourceKey
 		}
 
 		// When a fallback source served this card, present that source rather than
@@ -295,6 +318,36 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 	}
 
 	return cards, pendingCovers
+}
+
+// buildSourceNameByKey indexes the enabled sources by their key, so a link whose
+// host has been resolved to a source key can be labelled with the site's own
+// display name rather than the key.
+func buildSourceNameByKey(sourceByID map[int64]models.Source) map[string]string {
+	names := make(map[string]string, len(sourceByID))
+	for _, source := range sourceByID {
+		key := strings.ToLower(strings.TrimSpace(source.Key))
+		name := strings.TrimSpace(source.Name)
+		if key == "" || name == "" {
+			continue
+		}
+		names[key] = name
+	}
+	return names
+}
+
+// chapterSiteLabel names the site a chapter link opens. An unknown host yields
+// no label rather than a guess: a link that says nothing is better than one that
+// names the wrong site.
+func chapterSiteLabel(sourceKey string, sourceNameByKey map[string]string) string {
+	key := strings.ToLower(strings.TrimSpace(sourceKey))
+	if key == "" {
+		return ""
+	}
+	if name := sourceNameByKey[key]; name != "" {
+		return name
+	}
+	return humanizeValueLabel(key)
 }
 
 // findServingSource resolves the source key that supplied a card's data to the
@@ -402,27 +455,32 @@ func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceIt
 		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID, alternates)
 	}()
 }
-func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (string, bool) {
+// getCachedOrQueueChapterURL returns a chapter's reader URL, whether that URL is
+// a resolved chapter link rather than the series page it degrades to, and whether
+// a background resolve is still pending. The caller needs the middle value to tell
+// "this link opens chapter 65 on some site" from "we gave up and pointed at the
+// series page", because only the former says which site is serving the card.
+func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
-		return "", false
+		return "", false, false
 	}
 
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
-		return trimmedSourceURL, false
+		return trimmedSourceURL, false, false
 	}
 
 	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
 	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
 		if found {
-			return cachedChapterURL, false
+			return cachedChapterURL, true, false
 		}
-		return trimmedSourceURL, false
+		return trimmedSourceURL, false, false
 	}
 
 	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, alternates, cacheKey, pageKey)
-	return trimmedSourceURL, true
+	return trimmedSourceURL, false, true
 }
 
 func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {

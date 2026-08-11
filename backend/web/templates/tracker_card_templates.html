@@ -13,6 +13,7 @@
         <a class="tracker-row__chapter tracker-row__chapter-link"
                 href="{{.LastReadChapterURL}}"
            target="_blank"
+           {{if .LastReadChapterSite}}title="Opens on {{.LastReadChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.LastReadChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter">{{.LastReadChapter}}</span>
@@ -25,6 +26,7 @@
         <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
                 href="{{.LatestKnownChapterURL}}"
            target="_blank"
+           {{if .LatestKnownChapterSite}}title="Opens on {{.LatestKnownChapterSite}}"{{end}}
            rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
         {{else}}
         <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
@@ -138,6 +140,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.LatestKnownChapterURL}}"
                target="_blank"
+               {{if .LatestKnownChapterSite}}title="Opens on {{.LatestKnownChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
             {{else}}
             <span class="stat-value">{{.LatestKnownChapter}}</span>
@@ -153,6 +156,7 @@
                  <a class="tracker-row__chapter tracker-row__chapter-link tracker-row__chapter-link--compact"
                      href="{{.LastReadChapterURL}}"
                target="_blank"
+               {{if .LastReadChapterSite}}title="Opens on {{.LastReadChapterSite}}"{{end}}
                rel="noopener noreferrer">{{.LastReadChapter}}</a>
             {{else}}
             <span class="stat-value">{{.LastReadChapter}}</span>
