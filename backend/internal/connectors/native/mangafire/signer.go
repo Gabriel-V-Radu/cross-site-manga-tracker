@@ -9,6 +9,8 @@ import (
 
 	"github.com/dop251/goja"
 	esbuild "github.com/evanw/esbuild/pkg/api"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 // signerBundle is MangaFire's own obfuscated signer chunk. It defines
@@ -23,12 +25,14 @@ var signerBundle string
 // The routine is deterministic and does not depend on any real DOM state (proven
 // by matching the browser byte-for-byte), so no-op/constant stubs are sufficient.
 // navigator.appCodeName must be the standard "Mozilla" — the signer throws if it
-// is missing or empty, and it feeds the token's key derivation.
+// is missing or empty, and it feeds the token's key derivation. The user agent is
+// interpolated at init: it feeds the same derivation, so it must be the exact
+// string the connector sends in its User-Agent header.
 const signerHostShim = `
 var globalThis = this;
 var window = this;
 var self = this;
-var navigator = { appCodeName: "Mozilla", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", appName: "Netscape", platform: "Win32", language: "en-US" };
+var navigator = { appCodeName: "Mozilla", userAgent: "__BROWSER_USER_AGENT__", appName: "Netscape", platform: "Win32", language: "en-US" };
 var __ls = {};
 var localStorage = {
   getItem: function(k){ return Object.prototype.hasOwnProperty.call(__ls, k) ? __ls[k] : null; },
@@ -144,7 +148,8 @@ func (s *signer) init() {
 	}
 
 	rt := goja.New()
-	if _, err := rt.RunString(signerHostShim); err != nil {
+	shim := strings.ReplaceAll(signerHostShim, "__BROWSER_USER_AGENT__", connectors.BrowserUserAgent)
+	if _, err := rt.RunString(shim); err != nil {
 		s.initErr = fmt.Errorf("init mangafire signer host shim: %w", err)
 		return
 	}

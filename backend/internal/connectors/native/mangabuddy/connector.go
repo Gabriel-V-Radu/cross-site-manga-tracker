@@ -296,7 +296,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Referer", c.baseURL+"/home")
