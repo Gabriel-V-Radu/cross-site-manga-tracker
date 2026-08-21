@@ -165,7 +165,7 @@ h1 {
 }
 
 .filter-multi-select > summary::after {
-    content: "â–¾";
+    content: "▾";
     float: right;
     color: #b8c4dd;
 }
@@ -948,7 +948,7 @@ input:focus, select:focus {
 
 .tracker-rating__stars::before,
 .tracker-rating__stars::after {
-    content: "â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…";
+    content: "★★★★★★★★★★";
 }
 
 .tracker-rating__stars::before {
@@ -1362,7 +1362,7 @@ input.is-loading::placeholder {
     opacity: 0.85;
 }
 
-/* Why a field stayed empty â€” a failed lookup reads differently from a title that
+/* Why a field stayed empty — a failed lookup reads differently from a title that
    genuinely has no number. */
 .field-note {
     display: block;
@@ -2099,7 +2099,7 @@ input.is-loading::placeholder {
     }
 }
 
-/* â”€â”€ Link review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* ── Link review ─────────────────────────────────────────────────────── */
 
 .links-controls {
     display: flex;
@@ -2309,7 +2309,8 @@ input.is-loading::placeholder {
 }
 
 @media (max-width: 720px) {
-    .links-controls { grid-template-columns: 1fr; align-items: stretch; }
+    .links-controls { flex-direction: column; align-items: stretch; }
+    .links-controls__field select { max-width: none; }
     .link-candidate { flex-wrap: wrap; }
     .links-summary { flex-direction: column; align-items: flex-start; }
 }
