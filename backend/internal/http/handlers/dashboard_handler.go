@@ -170,9 +170,13 @@ type trackerFormData struct {
 	Tracker       *models.Tracker
 	Sources       []models.Source
 	LinkedSources []models.TrackerSource
-	ProfileTags   []models.CustomTag
-	TrackerTags   []models.CustomTag
-	TagIconKeys   []string
+	// ReadingOptions are the linked sources deduplicated by site, for the
+	// "reading site" selector; ReadingSourceID is the current pin (0 = auto).
+	ReadingOptions  []models.TrackerSource
+	ReadingSourceID int64
+	ProfileTags     []models.CustomTag
+	TrackerTags     []models.CustomTag
+	TagIconKeys     []string
 }
 
 type trackerSearchResultsData struct {

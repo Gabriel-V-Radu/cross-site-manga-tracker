@@ -27,10 +27,17 @@ const (
 	// recover from an ordinary outage within one sitting.
 	hostCooldown = 10 * time.Minute
 	// maxQueueWait caps how far behind the pacing queue a request will wait.
-	// A concurrent burst (a page of covers) would otherwise queue waits longer
-	// than any client timeout and sleep them off pointlessly; failing fast
-	// lets the caller's own retry/cache machinery deal with it.
-	maxQueueWait = 30 * time.Second
+	// A page of covers queues a couple dozen requests against one host at
+	// once; the cap must fit that burst draining at the pacing gap, while
+	// still bounding a runaway queue.
+	maxQueueWait = 60 * time.Second
+
+	// minClientTimeout floors every throttled client's overall timeout. The
+	// pacing wait counts toward http.Client.Timeout, so a burst of background
+	// fetches (a page of covers) needs room to drain the queue; actual request
+	// deadlines are the callers' per-request contexts, which every call path
+	// sets.
+	minClientTimeout = 90 * time.Second
 )
 
 // hostGapOverrides widens the pacing gap for hosts whose published limits are
@@ -194,8 +201,13 @@ func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
 
 // NewThrottledClient is the client every connector's default constructor uses.
 // Tests keep injecting plain clients through the WithOptions constructors and
-// stay unpaced.
+// stay unpaced. The requested timeout is floored at minClientTimeout: with
+// pacing in the transport, the client timeout would otherwise cut down
+// requests that are merely waiting for their slot behind a burst.
 func NewThrottledClient(timeout time.Duration) *http.Client {
+	if timeout < minClientTimeout {
+		timeout = minClientTimeout
+	}
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: ThrottleTransport(nil),

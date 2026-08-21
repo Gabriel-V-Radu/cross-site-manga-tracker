@@ -49,7 +49,7 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
 			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
-			latest_chapter_seen_at, last_checked_at,
+			latest_chapter_seen_at, last_checked_at, reading_source_id,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ? AND profile_id = ?
@@ -160,6 +160,39 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 	}
 
 	return r.GetByID(profileID, id)
+}
+
+// SetReadingSource pins (or, with nil, unpins) the source a tracker's reading
+// links prefer. A non-nil id must belong to one of the tracker's linked
+// sources or its primary; anything else clears the preference rather than
+// storing a dangling pointer.
+func (r *TrackerRepository) SetReadingSource(profileID int64, id int64, readingSourceID *int64) error {
+	if readingSourceID != nil {
+		var linked int
+		err := r.db.QueryRow(`
+			SELECT COUNT(1) FROM trackers t
+			WHERE t.id = ? AND t.profile_id = ?
+			  AND (t.source_id = ? OR EXISTS (
+			      SELECT 1 FROM tracker_sources ts
+			      WHERE ts.tracker_id = t.id AND ts.source_id = ?
+			  ))
+		`, id, profileID, *readingSourceID, *readingSourceID).Scan(&linked)
+		if err != nil {
+			return fmt.Errorf("validate reading source: %w", err)
+		}
+		if linked == 0 {
+			readingSourceID = nil
+		}
+	}
+
+	if _, err := r.db.Exec(`
+		UPDATE trackers
+		SET reading_source_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND profile_id = ? AND reading_source_id IS NOT ?
+	`, readingSourceID, id, profileID, readingSourceID); err != nil {
+		return fmt.Errorf("set reading source: %w", err)
+	}
+	return nil
 }
 
 func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, lastReadChapter *float64) (bool, error) {

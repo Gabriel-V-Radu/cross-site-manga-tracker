@@ -287,8 +287,18 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		// chapter links opened another.
 		latestChapterSourceKey := ""
 
+		// A pinned reading source narrows the chapter links to that one site:
+		// its resolved chapter page, its offline-built reader URL, or at worst
+		// its series page — never another site. Auto keeps the full chain.
+		chapterKey, chapterBaseURL, chapterAlternates := sourceKey, item.SourceURL, alternates
+		if pinned := pinnedReadingRef(item, sourceKey, alternates); pinned != nil {
+			chapterKey, chapterBaseURL, chapterAlternates = pinned.SourceKey, pinned.SourceURL, nil
+			card.LatestKnownChapterURL = pinned.SourceURL
+			card.LastReadChapterURL = pinned.SourceURL
+		}
+
 		if item.LatestKnownChapter != nil {
-			latestChapterURL, resolvedLatest, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LatestKnownChapter, alternates, pageKey)
+			latestChapterURL, resolvedLatest, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
 			card.LatestKnownChapterURL = latestChapterURL
 			if resolvedLatest {
 				latestChapterSourceKey = inferSourceKeyFromURL(latestChapterURL)
@@ -300,7 +310,7 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		}
 
 		if item.LastReadChapter != nil {
-			lastReadChapterURL, resolvedLastRead, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(sourceKey, item.SourceURL, *item.LastReadChapter, alternates, pageKey)
+			lastReadChapterURL, resolvedLastRead, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
 			card.LastReadChapterURL = lastReadChapterURL
 			if resolvedLastRead {
 				card.LastReadChapterSite = chapterSiteLabel(inferSourceKeyFromURL(lastReadChapterURL), sourceNameByKey)
@@ -392,6 +402,30 @@ func findServingSource(servingSourceKey, primarySourceKey string, alternates []r
 	}
 
 	return repository.TrackerSourceRef{}, false
+}
+
+// pinnedReadingRef returns the linked source the tracker's reading links are
+// pinned to, or nil for auto. A stale pin — the source was unlinked since —
+// degrades to auto rather than pointing links at a site the tracker no longer
+// carries.
+func pinnedReadingRef(item models.Tracker, primaryKey string, alternates []repository.TrackerSourceRef) *repository.TrackerSourceRef {
+	if item.ReadingSourceID == nil {
+		return nil
+	}
+	if *item.ReadingSourceID == item.SourceID {
+		return &repository.TrackerSourceRef{
+			SourceID:     item.SourceID,
+			SourceKey:    primaryKey,
+			SourceItemID: item.SourceItemID,
+			SourceURL:    item.SourceURL,
+		}
+	}
+	for index := range alternates {
+		if alternates[index].SourceID == *item.ReadingSourceID {
+			return &alternates[index]
+		}
+	}
+	return nil
 }
 
 // maxVisibleSiteLinks is how many connector shortcuts show before the rest
@@ -671,7 +705,9 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 }
 
 func (h *DashboardHandler) resolveChapterURLFromConnector(resolver connectors.ChapterURLResolver, sourceURL string, chapter float64) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	// Background work behind the shared per-host throttle: see the cover
+	// resolve timeout for why this is generous.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	chapterURL, err := resolver.ResolveChapterURL(ctx, sourceURL, chapter)

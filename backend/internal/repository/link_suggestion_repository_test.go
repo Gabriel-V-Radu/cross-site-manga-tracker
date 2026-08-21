@@ -333,3 +333,72 @@ func TestQueueScopedToProfile(t *testing.T) {
 		t.Fatalf("other profile's decision leaked: got=%+v err=%v", got, err)
 	}
 }
+
+// TestSetReadingSourceValidatesLinkage pins that the reading pin only accepts
+// sources the tracker actually carries, and that anything else clears it.
+func TestSetReadingSourceValidatesLinkage(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	trackerRepo := repository.NewTrackerRepository(db)
+	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	mangadex := sourceIDByKey(t, db, "mangadex")
+	trackerID := seedLinkTracker(t, db, "series")
+
+	if err := trackerRepo.UpsertTrackerSource(1, trackerID, models.TrackerSource{
+		SourceID:  weebcentral,
+		SourceURL: "https://weebcentral.com/series/01ABCDEFGHJKMNPQRSTVWXYZ01",
+	}); err != nil {
+		t.Fatalf("link source: %v", err)
+	}
+
+	readPin := func() any {
+		var value any
+		if err := db.QueryRow(`SELECT reading_source_id FROM trackers WHERE id = ?`, trackerID).Scan(&value); err != nil {
+			t.Fatalf("read pin: %v", err)
+		}
+		return value
+	}
+
+	// A linked source pins.
+	if err := trackerRepo.SetReadingSource(1, trackerID, &weebcentral); err != nil {
+		t.Fatalf("set pin: %v", err)
+	}
+	if got := readPin(); got != weebcentral {
+		t.Fatalf("pin = %v, want %d", got, weebcentral)
+	}
+
+	// A source the tracker does not carry clears instead of dangling.
+	if err := trackerRepo.SetReadingSource(1, trackerID, &mangadex); err != nil {
+		t.Fatalf("set invalid pin: %v", err)
+	}
+	if got := readPin(); got != nil {
+		t.Fatalf("invalid pin stored: %v", got)
+	}
+
+	// The primary source also counts as linked.
+	mangafire := sourceIDByKey(t, db, "mangafire")
+	if err := trackerRepo.SetReadingSource(1, trackerID, &mangafire); err != nil {
+		t.Fatalf("set primary pin: %v", err)
+	}
+	if got := readPin(); got != mangafire {
+		t.Fatalf("primary pin = %v, want %d", got, mangafire)
+	}
+
+	// Nil unpins.
+	if err := trackerRepo.SetReadingSource(1, trackerID, nil); err != nil {
+		t.Fatalf("clear pin: %v", err)
+	}
+	if got := readPin(); got != nil {
+		t.Fatalf("pin not cleared: %v", got)
+	}
+
+	// Another profile cannot touch it.
+	if err := trackerRepo.SetReadingSource(1, trackerID, &weebcentral); err != nil {
+		t.Fatalf("re-pin: %v", err)
+	}
+	if err := trackerRepo.SetReadingSource(2, trackerID, nil); err != nil {
+		t.Fatalf("clear as other profile: %v", err)
+	}
+	if got := readPin(); got != weebcentral {
+		t.Fatalf("other profile cleared the pin: %v", got)
+	}
+}

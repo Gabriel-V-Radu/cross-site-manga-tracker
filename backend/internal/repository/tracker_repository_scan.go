@@ -24,6 +24,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var latestReleaseAt sql.NullTime
 	var latestChapterSeenAt sql.NullTime
 	var lastCheckedAt sql.NullTime
+	var readingSourceID sql.NullInt64
 
 	err := scanner.Scan(
 		&tracker.ID,
@@ -41,6 +42,7 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&latestReleaseAt,
 		&latestChapterSeenAt,
 		&lastCheckedAt,
+		&readingSourceID,
 		&tracker.CreatedAt,
 		&tracker.UpdatedAt,
 	)
@@ -75,6 +77,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	}
 	if lastCheckedAt.Valid {
 		tracker.LastCheckedAt = &lastCheckedAt.Time
+	}
+	if readingSourceID.Valid && readingSourceID.Int64 > 0 {
+		tracker.ReadingSourceID = &readingSourceID.Int64
 	}
 
 	return &tracker, nil

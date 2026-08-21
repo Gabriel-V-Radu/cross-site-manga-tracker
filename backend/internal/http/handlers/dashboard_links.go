@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -601,44 +602,9 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Paste a series URL first.")
 	}
 
-	connector, ok := h.registry.Get(rawURL)
-	if !ok {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "That site has no connector; the poller could not read it.")
-	}
-
-	linkedSource, err := h.sourceRepo.GetByKey(connector.Key())
+	linkedSource, err := h.attachSourceByURL(c.Context(), profile.ID, trackerID, rawURL)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-	}
-	if linkedSource == nil {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "That site is not registered as a source.")
-	}
-
-	// Verification is best-effort, not a gate: the sites most worth linking by
-	// hand are exactly the ones this server cannot reach (MangaFire behind its
-	// browser challenge) while the reader's own browser can. The host already
-	// mapped to a registered connector; if the site refuses to confirm the
-	// URL, it is linked as pasted and the connector canonicalizes it whenever
-	// the site answers again.
-	ctx, cancel := context.WithTimeout(c.Context(), 15*time.Second)
-	defer cancel()
-	canonicalURL := rawURL
-	var itemID *string
-	if resolved, err := connector.ResolveByURL(ctx, rawURL); err == nil && resolved != nil {
-		if resolvedURL := strings.TrimSpace(resolved.URL); resolvedURL != "" {
-			canonicalURL = resolvedURL
-		}
-		if resolvedItemID := strings.TrimSpace(resolved.SourceItemID); resolvedItemID != "" {
-			itemID = &resolvedItemID
-		}
-	}
-
-	if err := h.trackerRepo.UpsertTrackerSource(profile.ID, trackerID, models.TrackerSource{
-		SourceID:     linkedSource.ID,
-		SourceItemID: itemID,
-		SourceURL:    canonicalURL,
-	}); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, err.Error())
 	}
 
 	// Linking a different site still settles this tracker's review: mark it
@@ -655,6 +621,53 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	}
 
 	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "")
+}
+
+// attachSourceByURL links a pasted series URL to a tracker. The URL's host
+// must map to a registered connector and source; verification through the
+// connector is best-effort, not a gate — the sites most worth linking by hand
+// are exactly the ones this server cannot reach (MangaFire behind its browser
+// challenge) while the reader's own browser can. An unverified URL is linked
+// as pasted and canonicalized whenever the site answers again.
+func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID int64, trackerID int64, rawURL string) (*models.Source, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil, fmt.Errorf("a series URL is required")
+	}
+
+	connector, ok := h.registry.Get(trimmed)
+	if !ok {
+		return nil, fmt.Errorf("that site has no connector; the poller could not read it")
+	}
+	linkedSource, err := h.sourceRepo.GetByKey(connector.Key())
+	if err != nil {
+		return nil, err
+	}
+	if linkedSource == nil {
+		return nil, fmt.Errorf("that site is not registered as a source")
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	canonicalURL := trimmed
+	var itemID *string
+	if resolved, resolveErr := connector.ResolveByURL(ctx, trimmed); resolveErr == nil && resolved != nil {
+		if resolvedURL := strings.TrimSpace(resolved.URL); resolvedURL != "" {
+			canonicalURL = resolvedURL
+		}
+		if resolvedItemID := strings.TrimSpace(resolved.SourceItemID); resolvedItemID != "" {
+			itemID = &resolvedItemID
+		}
+	}
+
+	if err := h.trackerRepo.UpsertTrackerSource(profileID, trackerID, models.TrackerSource{
+		SourceID:     linkedSource.ID,
+		SourceItemID: itemID,
+		SourceURL:    canonicalURL,
+	}); err != nil {
+		return nil, err
+	}
+	return linkedSource, nil
 }
 
 // AcceptExactLinkMatches bulk-accepts every tracker whose single best pending

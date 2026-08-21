@@ -383,11 +383,12 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 		return "", false, fmt.Errorf("connector not found")
 	}
 
-	resolveTimeout := 8 * time.Second
-	if key := strings.ToLower(strings.TrimSpace(sourceKey)); key == "mangafire" || key == "freewebnovel" {
-		resolveTimeout = 15 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
+	// Generous because these fetches run in background goroutines and the
+	// shared throttle makes a page-load's worth of them queue single-file per
+	// host: the last of two dozen covers legitimately waits tens of seconds
+	// for its slot, and cutting it down just caches "no cover" for ten
+	// minutes.
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	result, err := connector.ResolveByURL(ctx, sourceURL)

@@ -81,7 +81,24 @@
             </label>
             <p id="linked-search-loading" class="search-loading htmx-indicator">Searching…</p>
             <div id="linked-search-results" class="source-search-results"></div>
+
+            <label>
+                Reading Site
+                <select name="reading_source_id">
+                    <option value="0" {{if eq .ReadingSourceID 0}}selected{{end}}>Auto (best available)</option>
+                    {{range .ReadingOptions}}
+                    <option value="{{.SourceID}}" {{if eq $.ReadingSourceID .SourceID}}selected{{end}}>{{.SourceName}}</option>
+                    {{end}}
+                </select>
+                <span class="field-note">Where the chapter links open. Auto picks the best site that answers.</span>
+            </label>
             {{end}}
+
+            <label>
+                Link Another Site by URL
+                <input type="url" name="linked_url"
+                       placeholder="Optional: paste a series URL on another site (linked even if the site is unreachable)">
+            </label>
 
             <label>
                 Source URL

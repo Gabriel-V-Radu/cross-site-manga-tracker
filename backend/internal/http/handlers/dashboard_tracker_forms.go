@@ -97,15 +97,31 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
 	}
 
+	readingOptions := make([]models.TrackerSource, 0, len(linkedSources))
+	seenReadingSources := map[int64]bool{}
+	for _, linked := range linkedSources {
+		if linked.SourceID <= 0 || seenReadingSources[linked.SourceID] {
+			continue
+		}
+		seenReadingSources[linked.SourceID] = true
+		readingOptions = append(readingOptions, linked)
+	}
+	readingSourceID := int64(0)
+	if tracker.ReadingSourceID != nil {
+		readingSourceID = *tracker.ReadingSourceID
+	}
+
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
-		Mode:          "edit",
-		ViewMode:      viewMode,
-		Tracker:       tracker,
-		Sources:       sources,
-		LinkedSources: linkedSources,
-		ProfileTags:   profileTags,
-		TrackerTags:   tracker.Tags,
-		TagIconKeys:   tagIconKeysOrdered,
+		Mode:            "edit",
+		ViewMode:        viewMode,
+		Tracker:         tracker,
+		Sources:         sources,
+		LinkedSources:   linkedSources,
+		ReadingOptions:  readingOptions,
+		ReadingSourceID: readingSourceID,
+		ProfileTags:     profileTags,
+		TrackerTags:     tracker.Tags,
+		TagIconKeys:     tagIconKeysOrdered,
 	})
 }
 
@@ -152,6 +168,12 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	if created == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
+	}
+
+	// Best-effort: the tracker exists either way, and the pasted link is easy
+	// to retry from the edit modal or the review page if the host was a typo.
+	if linkedURL := strings.TrimSpace(c.FormValue("linked_url")); linkedURL != "" {
+		_, _ = h.attachSourceByURL(c.Context(), activeProfile.ID, created.ID, linkedURL)
 	}
 
 	c.Set("HX-Trigger", fmt.Sprintf(`{"trackerCreated":{"id":%d}}`, created.ID))
@@ -389,6 +411,22 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 
 	if err := h.trackerRepo.ReplaceTrackerTags(activeProfile.ID, id, tagIDs); err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tracker tags")
+	}
+
+	// After ReplaceTrackerSources, so the freshly pasted link survives the
+	// replace instead of being wiped by it.
+	if linkedURL := strings.TrimSpace(c.FormValue("linked_url")); linkedURL != "" {
+		if _, err := h.attachSourceByURL(c.Context(), activeProfile.ID, id, linkedURL); err != nil {
+			return c.Status(fiber.StatusBadRequest).SendString("Could not link the pasted URL: " + err.Error())
+		}
+	}
+
+	readingSourceID, err := parseReadingSourceFromForm(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+	}
+	if err := h.trackerRepo.SetReadingSource(activeProfile.ID, id, readingSourceID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save reading site")
 	}
 
 	fullTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
@@ -643,6 +681,20 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		LatestKnownChapter: latestKnown,
 		LatestReleaseAt:    latestReleaseAt,
 	}, nil
+}
+
+// parseReadingSourceFromForm reads the reading-site pin: empty/0/"auto" mean
+// auto (nil).
+func parseReadingSourceFromForm(c *fiber.Ctx) (*int64, error) {
+	raw := strings.TrimSpace(c.FormValue("reading_source_id"))
+	if raw == "" || raw == "0" || strings.EqualFold(raw, "auto") {
+		return nil, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, fmt.Errorf("Invalid reading site")
+	}
+	return &id, nil
 }
 
 func parseOptionalFloat(raw string) (*float64, error) {

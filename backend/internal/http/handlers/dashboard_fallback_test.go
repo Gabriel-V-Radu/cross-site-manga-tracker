@@ -533,3 +533,37 @@ func TestFetchChapterURLPrefersResolvedOverOfflineGuess(t *testing.T) {
 		t.Fatalf("expected the resolved url to win over the guess, got %q", chapterURL)
 	}
 }
+
+// TestPinnedReadingRef pins the pin semantics: primary, alternate, stale.
+func TestPinnedReadingRef(t *testing.T) {
+	primaryID := int64(7)
+	alternateID := int64(9)
+	staleID := int64(99)
+	itemID := "abc"
+	alternates := []repository.TrackerSourceRef{
+		{SourceID: alternateID, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a"},
+	}
+	tracker := models.Tracker{ID: 1, SourceID: primaryID, SourceItemID: &itemID, SourceURL: "https://primary.example/title/a"}
+
+	if got := pinnedReadingRef(tracker, "primarysource", alternates); got != nil {
+		t.Fatalf("no pin must mean auto, got %+v", got)
+	}
+
+	tracker.ReadingSourceID = &primaryID
+	got := pinnedReadingRef(tracker, "primarysource", alternates)
+	if got == nil || got.SourceKey != "primarysource" || got.SourceURL != tracker.SourceURL {
+		t.Fatalf("primary pin = %+v", got)
+	}
+
+	tracker.ReadingSourceID = &alternateID
+	got = pinnedReadingRef(tracker, "primarysource", alternates)
+	if got == nil || got.SourceKey != "mirrorsource" {
+		t.Fatalf("alternate pin = %+v", got)
+	}
+
+	// A pin to a source the tracker no longer carries degrades to auto.
+	tracker.ReadingSourceID = &staleID
+	if got := pinnedReadingRef(tracker, "primarysource", alternates); got != nil {
+		t.Fatalf("stale pin must degrade to auto, got %+v", got)
+	}
+}
