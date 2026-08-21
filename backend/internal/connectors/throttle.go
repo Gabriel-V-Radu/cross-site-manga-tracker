@@ -42,9 +42,13 @@ const (
 
 // hostGapOverrides widens the pacing gap for hosts whose published limits are
 // tighter than the default. MangaBaka caps search at 30 requests/minute per
-// IP; 2.5s keeps a title-by-title link scan safely under it.
+// IP; 2.5s keeps a title-by-title link scan safely under it. ComicK publishes
+// no limit but its Cloudflare is burst-sensitive — a dozen rapid requests
+// earned a temporary 403 streak in testing, while 1 request per 3-4s never
+// did.
 var hostGapOverrides = map[string]time.Duration{
 	"api.mangabaka.org": 2500 * time.Millisecond,
+	"api.comick.dev":    3500 * time.Millisecond,
 }
 
 // SourceCoolingDownError is returned without touching the network while a

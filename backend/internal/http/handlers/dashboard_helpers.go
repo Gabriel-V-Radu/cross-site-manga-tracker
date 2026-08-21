@@ -169,6 +169,8 @@ func sourceHomeURLForKey(sourceKey string) string {
 		return "https://weebcentral.com"
 	case "mangaupdates":
 		return "https://www.mangaupdates.com"
+	case "comick":
+		return "https://comick.dev"
 	default:
 		return ""
 	}
