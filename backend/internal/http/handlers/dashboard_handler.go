@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/linkscan"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
@@ -15,6 +16,8 @@ type DashboardHandler struct {
 	trackerRepo        *repository.TrackerRepository
 	sourceRepo         *repository.SourceRepository
 	profileRepo        *repository.ProfileRepository
+	linkSuggestionRepo *repository.LinkSuggestionRepository
+	linkScanner        *linkscan.Scanner
 	profileResolver    *profileContextResolver
 	registry           *connectors.Registry
 	coverCache         map[string]coverCacheEntry
@@ -195,10 +198,13 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 	if registry == nil {
 		registry = connectors.NewRegistry()
 	}
+	linkSuggestionRepo := repository.NewLinkSuggestionRepository(db)
 	return &DashboardHandler{
 		trackerRepo:        repository.NewTrackerRepository(db),
 		sourceRepo:         repository.NewSourceRepository(db),
 		profileRepo:        repository.NewProfileRepository(db),
+		linkSuggestionRepo: linkSuggestionRepo,
+		linkScanner:        linkscan.NewScanner(linkSuggestionRepo, registry, nil),
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,
 		coverCache:         make(map[string]coverCacheEntry),

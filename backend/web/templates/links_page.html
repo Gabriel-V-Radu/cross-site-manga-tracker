@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Cross-Site Tracker — Link Review</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,500;6..96,700&family=IBM+Plex+Sans+Condensed:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+    <link rel="stylesheet" href="{{assetURL "dashboard.css"}}">
+    <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+</head>
+
+<body>
+    <div class="grain"></div>
+    <main class="shell">
+        <header class="masthead">
+            <div class="masthead__copy">
+                <p class="kicker">Cross-Site Tracker</p>
+                <h1>Link Review</h1>
+                <p class="subtitle">Scan a source for series it can serve as a fallback, then settle the matches here: accept, reject, or paste the right URL yourself.</p>
+            </div>
+            <div class="profile-toolbar">
+                <label class="profile-toolbar__label profile-toolbar__label--profile">
+                    Active Profile
+                    <input type="text" value="{{.ActiveProfile.Name}}" readonly>
+                </label>
+                <a class="action-btn" href="/dashboard">Back to dashboard</a>
+            </div>
+        </header>
+
+        <section class="control-panel links-controls">
+            <label class="links-controls__source">
+                Source to link
+                <select id="links-source-select" name="source"
+                        hx-get="/dashboard/links/queue"
+                        hx-target="#links-queue"
+                        hx-swap="innerHTML"
+                        hx-include="this">
+                    {{$selected := .SelectedSourceID}}
+                    {{range .Sources}}
+                    <option value="{{.ID}}" {{if eq .ID $selected}}selected{{end}}>{{.Name}}</option>
+                    {{end}}
+                </select>
+            </label>
+            <button type="button"
+                    class="action-btn action-btn--accent"
+                    hx-post="/dashboard/links/scan"
+                    hx-include="#links-source-select"
+                    hx-target="#link-scan-status"
+                    hx-swap="outerHTML">
+                Scan for candidates
+            </button>
+            <div id="link-scan-status" class="link-scan-status"
+                 hx-get="/dashboard/links/scan-status"
+                 hx-trigger="load"
+                 hx-swap="outerHTML"></div>
+        </section>
+
+        <section id="links-queue" class="links-queue"
+                 hx-get="/dashboard/links/queue"
+                 hx-trigger="load"
+                 hx-include="#links-source-select"
+                 hx-swap="innerHTML"></section>
+    </main>
+</body>
+
+</html>

@@ -103,6 +103,45 @@ func (r *SourceRepository) GetByID(id int64) (*models.Source, error) {
 	return &source, nil
 }
 
+func (r *SourceRepository) GetByKey(key string) (*models.Source, error) {
+	row := r.db.QueryRow(`
+		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
+		FROM sources
+		WHERE key = ?
+	`, strings.TrimSpace(strings.ToLower(key)))
+
+	var source models.Source
+	var baseURL sql.NullString
+	var configPath sql.NullString
+	var enabled bool
+	if err := row.Scan(
+		&source.ID,
+		&source.Key,
+		&source.Name,
+		&source.ConnectorKind,
+		&baseURL,
+		&configPath,
+		&enabled,
+		&source.CreatedAt,
+		&source.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get source by key: %w", err)
+	}
+
+	source.Enabled = enabled
+	if baseURL.Valid {
+		source.BaseURL = &baseURL.String
+	}
+	if configPath.Valid {
+		source.ConfigPath = &configPath.String
+	}
+
+	return &source, nil
+}
+
 func (r *SourceRepository) ListProfileSourceLogoURLs(profileID int64) (map[int64]string, error) {
 	rows, err := r.db.Query(`
 		SELECT source_id, logo_url

@@ -1,0 +1,8 @@
+{{if .Group}}
+{{template "link_review_card" .Group}}
+{{else if .NoMatch}}
+{{template "link_nomatch_row" .NoMatch}}
+{{end}}
+<div id="links-summary" class="links-summary" hx-swap-oob="true">
+    {{template "link_queue_summary_body" .Summary}}
+</div>

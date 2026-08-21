@@ -1,0 +1,127 @@
+{{define "link_queue_summary_body"}}
+    <p class="links-summary__line">
+        <strong>{{.PendingCount}}</strong> candidate(s) across <strong>{{.GroupCount}}</strong> series ·
+        <strong>{{.NoMatchCount}}</strong> without a candidate on {{.SourceName}}
+    </p>
+    {{if .ShowAcceptable}}
+    <button type="button"
+            class="action-btn action-btn--accent"
+            hx-post="/dashboard/links/accept-exact?source={{.SourceID}}"
+            hx-target="#links-queue"
+            hx-swap="innerHTML"
+            hx-confirm="Accept every unambiguous exact title match ({{.ExactCount}} series)?">
+        Accept {{.ExactCount}} exact match(es)
+    </button>
+    {{end}}
+{{end}}
+
+{{define "link_manual_form"}}
+<form class="link-manual"
+      hx-post="/dashboard/links/trackers/{{.ID}}/manual?source={{.SourceID}}"
+      hx-target="closest .link-card"
+      hx-swap="outerHTML">
+    <input type="url" name="url" placeholder="Paste a series URL from any supported site" required>
+    <button type="submit" class="action-btn">Link URL</button>
+</form>
+{{end}}
+
+{{define "link_review_card"}}
+<article class="link-card" id="link-card-{{.Tracker.ID}}">
+    <div class="link-card__tracker">
+        <h3 class="link-card__title">{{.Tracker.Title}}</h3>
+        <p class="link-card__meta">
+            {{.Tracker.StatusLabel}}
+            {{if .Tracker.LatestChapterLabel}} · {{.Tracker.LatestChapterLabel}}{{end}}
+            {{if .Tracker.LatestReleaseAgo}} · updated {{.Tracker.LatestReleaseAgo}}{{end}}
+        </p>
+        {{if .Tracker.PrimaryURL}}
+        <a class="link-card__open" href="{{.Tracker.PrimaryURL}}" target="_blank" rel="noopener">
+            Open on {{if .Tracker.PrimarySourceName}}{{.Tracker.PrimarySourceName}}{{else}}primary site{{end}}
+        </a>
+        {{end}}
+        {{if .Tracker.Error}}<p class="link-card__error">{{.Tracker.Error}}</p>{{end}}
+    </div>
+    <div class="link-card__candidates">
+        {{range .Suggestions}}
+        <div class="link-candidate">
+            {{if .CoverURL}}<img class="link-candidate__cover" src="{{.CoverURL}}" alt="" loading="lazy">{{end}}
+            <div class="link-candidate__body">
+                <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></p>
+                <p class="link-candidate__meta">
+                    <span class="link-score{{if .Exact}} link-score--exact{{end}}">{{.ScoreLabel}}</span>
+                    {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
+                    {{if .ReleaseAgo}} · {{.ReleaseAgo}}{{end}}
+                </p>
+            </div>
+            <div class="link-candidate__actions">
+                <button type="button" class="action-btn action-btn--accent"
+                        hx-post="/dashboard/links/suggestions/{{.ID}}/accept"
+                        hx-target="closest .link-card"
+                        hx-swap="outerHTML">Accept</button>
+                <button type="button" class="action-btn"
+                        hx-post="/dashboard/links/suggestions/{{.ID}}/reject"
+                        hx-target="closest .link-card"
+                        hx-swap="outerHTML">Reject</button>
+            </div>
+        </div>
+        {{end}}
+    </div>
+    <footer class="link-card__footer">
+        {{template "link_manual_form" .Tracker}}
+        <button type="button" class="action-btn link-card__dismiss"
+                hx-post="/dashboard/links/trackers/{{.Tracker.ID}}/dismiss?source={{.Tracker.SourceID}}"
+                hx-target="closest .link-card"
+                hx-swap="outerHTML"
+                hx-confirm="Mark this series as having no match on this source?">No match</button>
+    </footer>
+</article>
+{{end}}
+
+{{define "link_nomatch_row"}}
+<article class="link-card link-card--nomatch" id="link-card-{{.ID}}">
+    <div class="link-card__tracker">
+        <h3 class="link-card__title">{{.Title}}</h3>
+        <p class="link-card__meta">
+            {{.StatusLabel}}
+            {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
+        </p>
+        {{if .PrimaryURL}}
+        <a class="link-card__open" href="{{.PrimaryURL}}" target="_blank" rel="noopener">
+            Open on {{if .PrimarySourceName}}{{.PrimarySourceName}}{{else}}primary site{{end}}
+        </a>
+        {{end}}
+        {{if .Error}}<p class="link-card__error">{{.Error}}</p>{{end}}
+    </div>
+    <footer class="link-card__footer">
+        {{template "link_manual_form" .}}
+        <button type="button" class="action-btn link-card__dismiss"
+                hx-post="/dashboard/links/trackers/{{.ID}}/dismiss?source={{.SourceID}}"
+                hx-target="closest .link-card"
+                hx-swap="outerHTML"
+                hx-confirm="Hide this series from the review queue?">Dismiss</button>
+    </footer>
+</article>
+{{end}}
+
+<div id="links-summary" class="links-summary">
+    {{template "link_queue_summary_body" .Summary}}
+</div>
+
+{{if .Groups}}
+<h2 class="links-section-heading">Candidates to review</h2>
+{{range .Groups}}
+{{template "link_review_card" .}}
+{{end}}
+{{end}}
+
+{{if .NoCandidates}}
+<h2 class="links-section-heading">No candidate found</h2>
+<p class="links-section-hint">The scan found nothing usable for these series. Paste the series URL yourself — any supported site works — or dismiss them.</p>
+{{range .NoCandidates}}
+{{template "link_nomatch_row" .}}
+{{end}}
+{{end}}
+
+{{if and (not .Groups) (not .NoCandidates)}}
+<p class="links-empty">Every tracker is linked to {{.Summary.SourceName}} (or reviewed). Nothing to do here.</p>
+{{end}}

@@ -1,0 +1,23 @@
+{{if .Running}}
+<div id="link-scan-status" class="link-scan-status link-scan-status--running"
+     hx-get="/dashboard/links/scan-status"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+    <span class="link-scan-status__spinner" aria-hidden="true"></span>
+    Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
+    {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
+</div>
+{{else}}
+<div id="link-scan-status" class="link-scan-status">
+    {{if .SourceName}}
+    Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates.
+    {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
+    {{end}}
+    {{if .JustFinished}}
+    <span hx-get="/dashboard/links/queue?source={{.SourceID}}"
+          hx-trigger="load"
+          hx-target="#links-queue"
+          hx-swap="innerHTML"></span>
+    {{end}}
+</div>
+{{end}}
