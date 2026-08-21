@@ -48,31 +48,34 @@
             <label class="links-controls__field">
                 Status
                 <select name="status">
-                    <option value="all">All statuses</option>
-                    <option value="reading+plan">Reading + Plan to read</option>
-                    <option value="reading">Reading only</option>
-                    <option value="plan_to_read">Plan to read only</option>
-                    <option value="on_hold">On hold</option>
-                    <option value="completed">Completed</option>
-                    <option value="dropped">Dropped</option>
+                    {{$status := .SelectedStatus}}
+                    <option value="all" {{if eq $status "all"}}selected{{end}}>All statuses</option>
+                    <option value="reading+plan" {{if eq $status "reading+plan"}}selected{{end}}>Reading + Plan to read</option>
+                    <option value="reading" {{if eq $status "reading"}}selected{{end}}>Reading only</option>
+                    <option value="plan_to_read" {{if eq $status "plan_to_read"}}selected{{end}}>Plan to read only</option>
+                    <option value="on_hold" {{if eq $status "on_hold"}}selected{{end}}>On hold</option>
+                    <option value="completed" {{if eq $status "completed"}}selected{{end}}>Completed</option>
+                    <option value="dropped" {{if eq $status "dropped"}}selected{{end}}>Dropped</option>
                 </select>
             </label>
             <label class="links-controls__field">
                 Primary source
                 <select name="primary">
-                    <option value="any">Any</option>
-                    <option value="broken">Broken right now</option>
+                    {{$primary := .SelectedPrimary}}
+                    <option value="any" {{if eq $primary "any"}}selected{{end}}>Any</option>
+                    <option value="broken" {{if eq $primary "broken"}}selected{{end}}>Broken right now</option>
                     {{range .Sources}}
-                    <option value="{{.ID}}">{{.Name}}</option>
+                    <option value="{{.ID}}" {{if eq (printf "%d" .ID) $primary}}selected{{end}}>{{.Name}}</option>
                     {{end}}
                 </select>
             </label>
             <label class="links-controls__field">
                 Linked alternates
                 <select name="alternates">
-                    <option value="any">Any number</option>
-                    <option value="0">None yet</option>
-                    <option value="1">At most one</option>
+                    {{$alternates := .SelectedAlternates}}
+                    <option value="any" {{if eq $alternates "any"}}selected{{end}}>Any number</option>
+                    <option value="0" {{if eq $alternates "0"}}selected{{end}}>None yet</option>
+                    <option value="1" {{if eq $alternates "1"}}selected{{end}}>At most one</option>
                 </select>
             </label>
             <label class="links-controls__field">

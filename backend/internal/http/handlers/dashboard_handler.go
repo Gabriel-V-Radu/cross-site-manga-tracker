@@ -39,6 +39,10 @@ type DashboardHandler struct {
 	sourceHealthMu        sync.Mutex
 	sourceHealthUnhealthy []int64
 	sourceHealthExpires   time.Time
+	// The raw scope values of the last scan launched, so reopening the review
+	// page shows the slice that scan covered instead of everything unlinked.
+	lastLinkScanMu    sync.Mutex
+	lastLinkScanScope map[string]string
 	templates          *template.Template
 	templateOnce       sync.Once
 	templateErr        error

@@ -26,6 +26,12 @@ type linksPageData struct {
 	ActiveProfile    models.Profile
 	Sources          []models.Source
 	SelectedSourceID int64
+	// The scope selects reopen showing the last scan's slice: the queue's
+	// point after a scan is reviewing what that scan covered, not everything
+	// that has ever gone unlinked.
+	SelectedStatus     string
+	SelectedPrimary    string
+	SelectedAlternates string
 }
 
 // linkScanScope is the parsed form of the scope controls: what slice of the
@@ -214,11 +220,47 @@ func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
 
-	return h.render(c, "links_page.html", linksPageData{
-		ActiveProfile:    *profile,
-		Sources:          sources,
-		SelectedSourceID: h.selectedLinkSource(c, sources),
-	})
+	lastScope := h.lastLinkScanScopeValues()
+	data := linksPageData{
+		ActiveProfile:      *profile,
+		Sources:            sources,
+		SelectedSourceID:   h.selectedLinkSource(c, sources),
+		SelectedStatus:     lastScope["status"],
+		SelectedPrimary:    lastScope["primary"],
+		SelectedAlternates: lastScope["alternates"],
+	}
+	if c.Query("source") == "" {
+		if id, err := strconv.ParseInt(lastScope["source"], 10, 64); err == nil && id > 0 {
+			data.SelectedSourceID = id
+		}
+	}
+	return h.render(c, "links_page.html", data)
+}
+
+// rememberLinkScanScope keeps the raw scope values a scan launched with, and
+// lastLinkScanScopeValues serves them back with defaults filled in.
+func (h *DashboardHandler) rememberLinkScanScope(c *fiber.Ctx, sourceID int64) {
+	scope := map[string]string{
+		"source":     strconv.FormatInt(sourceID, 10),
+		"status":     strings.ToLower(strings.TrimSpace(c.FormValue("status"))),
+		"primary":    strings.ToLower(strings.TrimSpace(c.FormValue("primary"))),
+		"alternates": strings.ToLower(strings.TrimSpace(c.FormValue("alternates"))),
+	}
+	h.lastLinkScanMu.Lock()
+	h.lastLinkScanScope = scope
+	h.lastLinkScanMu.Unlock()
+}
+
+func (h *DashboardHandler) lastLinkScanScopeValues() map[string]string {
+	values := map[string]string{"source": "", "status": "all", "primary": "any", "alternates": "any"}
+	h.lastLinkScanMu.Lock()
+	defer h.lastLinkScanMu.Unlock()
+	for key, value := range h.lastLinkScanScope {
+		if strings.TrimSpace(value) != "" {
+			values[key] = value
+		}
+	}
+	return values
 }
 
 // scannableSources are the enabled sources that have a registered connector —
@@ -411,6 +453,7 @@ func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 		// live status instead.
 		return h.renderLinkScanStatus(c, false)
 	}
+	h.rememberLinkScanScope(c, source.ID)
 	return h.renderLinkScanStatus(c, false)
 }
 
