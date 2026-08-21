@@ -312,11 +312,18 @@ func derefChapter(value *float64) float64 {
 	return *value
 }
 
-// resolveFromAlternates tries the tracker's non-primary linked sources in order
-// and returns the first that resolves, along with the source it came from. It
-// returns (nil, zero) when the tracker has no alternates or none of them answer,
-// leaving the caller to report the primary source's error.
+// resolveFromAlternates consults every one of the tracker's non-primary linked
+// sources and returns the best answer: the highest chapter number, breaking
+// ties in favour of a result that carries a release date. Taking the first
+// source that answered used to let a mirror that is merely alive-but-stale
+// (MangaBuddy lags real releases by chapters) shadow a fresher one linked
+// later (MangaUpdates). It returns (nil, zero) when the tracker has no
+// alternates or none of them answer, leaving the caller to report the primary
+// source's error.
 func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.PollingTracker) (*connectors.MangaResult, repository.TrackerSourceRef) {
+	var best *connectors.MangaResult
+	var bestSource repository.TrackerSourceRef
+
 	for _, source := range tracker.AlternateSources {
 		if strings.TrimSpace(source.SourceURL) == "" {
 			continue
@@ -336,12 +343,37 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 				"trackerId", tracker.ID, "sourceKey", source.SourceKey, "error", err)
 			continue
 		}
-		if result != nil {
-			return result, source
+		if result == nil {
+			continue
+		}
+
+		if betterFallbackResult(best, result) {
+			best = result
+			bestSource = source
 		}
 	}
 
-	return nil, repository.TrackerSourceRef{}
+	return best, bestSource
+}
+
+// betterFallbackResult decides whether candidate should replace current as the
+// fallback answer. A chapter number beats none, a higher one beats a lower
+// one, and between equals a result carrying a release date beats one without —
+// it can fill a stored date the primary never provided.
+func betterFallbackResult(current *connectors.MangaResult, candidate *connectors.MangaResult) bool {
+	if current == nil {
+		return true
+	}
+	if candidate.LatestChapter == nil {
+		return false
+	}
+	if current.LatestChapter == nil {
+		return true
+	}
+	if *candidate.LatestChapter != *current.LatestChapter {
+		return *candidate.LatestChapter > *current.LatestChapter
+	}
+	return current.LastUpdatedAt == nil && candidate.LastUpdatedAt != nil
 }
 
 // shouldSkipIdle reports whether a non-reading tracker was checked recently

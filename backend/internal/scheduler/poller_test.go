@@ -614,6 +614,89 @@ func TestPollerRunOnce_FallbackNeverLowersLatestChapter(t *testing.T) {
 	}
 }
 
+// TestPollerRunOnce_FallbackPrefersFreshestAlternate pins why the fallback
+// consults every alternate instead of stopping at the first that answers: a
+// mirror that is alive but stale (MangaBuddy lags releases by chapters) must
+// not shadow a fresher tracking source linked after it (MangaUpdates).
+func TestPollerRunOnce_FallbackPrefersFreshestAlternate(t *testing.T) {
+	prev := 100.0
+	stale := 102.0
+	fresh := 105.0
+	freshDate := time.Now().UTC().Add(-2 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "stalemirror", SourceURL: "https://stale/series"},
+			{SourceKey: "freshtracker", SourceURL: "https://fresh/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "stalemirror", result: &connectors.MangaResult{
+		SourceKey: "stalemirror", LatestChapter: &stale,
+	}}); err != nil {
+		t.Fatalf("register stale connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "freshtracker", result: &connectors.MangaResult{
+		SourceKey: "freshtracker", LatestChapter: &fresh, LastUpdatedAt: &freshDate,
+	}}); err != nil {
+		t.Fatalf("register fresh connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != fresh {
+		t.Fatalf("expected the freshest alternate's chapter %.1f, got %#v", fresh, repo.updatedLatest)
+	}
+	if repo.updatedAt == nil || !repo.updatedAt.Equal(freshDate) {
+		t.Fatalf("expected the freshest alternate's release date, got %v", repo.updatedAt)
+	}
+}
+
+// TestBetterFallbackResult pins the ranking between fallback answers.
+func TestBetterFallbackResult(t *testing.T) {
+	date := time.Now().UTC()
+	withChapter := func(chapter float64) *connectors.MangaResult {
+		return &connectors.MangaResult{LatestChapter: &chapter}
+	}
+	withChapterAndDate := func(chapter float64) *connectors.MangaResult {
+		return &connectors.MangaResult{LatestChapter: &chapter, LastUpdatedAt: &date}
+	}
+
+	if !betterFallbackResult(nil, &connectors.MangaResult{}) {
+		t.Fatal("any answer beats none")
+	}
+	if betterFallbackResult(withChapter(10), &connectors.MangaResult{}) {
+		t.Fatal("a chapterless answer must not replace a chaptered one")
+	}
+	if !betterFallbackResult(&connectors.MangaResult{}, withChapter(10)) {
+		t.Fatal("a chaptered answer must replace a chapterless one")
+	}
+	if !betterFallbackResult(withChapter(10), withChapter(12)) {
+		t.Fatal("a higher chapter must win")
+	}
+	if betterFallbackResult(withChapter(12), withChapter(10)) {
+		t.Fatal("a lower chapter must not win")
+	}
+	if !betterFallbackResult(withChapter(10), withChapterAndDate(10)) {
+		t.Fatal("on equal chapters, a release date must win")
+	}
+	if betterFallbackResult(withChapterAndDate(10), withChapter(10)) {
+		t.Fatal("on equal chapters, no date must not replace a date")
+	}
+}
+
 // TestPollerRunOnce_NoUpdateWhenPrimaryFailsWithoutAlternates preserves the
 // pre-existing behaviour: a failing source with nothing to fall back to is
 // skipped, never written with partial data.
