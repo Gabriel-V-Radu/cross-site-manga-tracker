@@ -91,9 +91,13 @@
                     hx-swap="outerHTML">
                 Scan for candidates
             </button>
+            <!-- hx-target="this" is load-bearing: the div sits inside the scope
+                 form, whose hx-target="#links-queue" would otherwise be
+                 inherited — swapping the status INTO the results section. -->
             <div id="link-scan-status" class="link-scan-status"
                  hx-get="/dashboard/links/scan-status"
                  hx-trigger="load"
+                 hx-target="this"
                  hx-swap="outerHTML"></div>
         </form>
 

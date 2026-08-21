@@ -1,13 +1,16 @@
 {{if .Running}}
+<!-- hx-target="this" everywhere in this partial: the div lives inside the
+     scope form, whose hx-target would otherwise be inherited. -->
 <div id="link-scan-status" class="link-scan-status link-scan-status--running"
      hx-get="/dashboard/links/scan-status"
      hx-trigger="every 2s"
+     hx-target="this"
      hx-swap="outerHTML">
     <span class="link-scan-status__spinner" aria-hidden="true"></span>
     Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
     <button type="button" class="action-btn link-scan-status__stop"
             hx-post="/dashboard/links/scan/stop"
-            hx-target="#link-scan-status"
+            hx-target="closest .link-scan-status"
             hx-swap="outerHTML">Stop</button>
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
 </div>
