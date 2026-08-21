@@ -62,12 +62,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *Connector) {
 	mux.HandleFunc("/series/"+testSeriesID+"/full-chapter-list", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(seriesPageFixture))
 	})
-	mux.HandleFunc("/search/simple", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		if err := r.ParseForm(); err != nil || strings.TrimSpace(r.PostFormValue("text")) == "" {
+	mux.HandleFunc("/search/data", func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.URL.Query().Get("text")) == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}

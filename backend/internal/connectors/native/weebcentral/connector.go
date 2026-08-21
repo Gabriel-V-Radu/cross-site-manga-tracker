@@ -29,6 +29,10 @@ import (
 // "Suggestion 192" — so only the trailing number is meaningful. The catalog is
 // English-only, which is exactly what makes its chapter numbers comparable to
 // the tracker's: no other-language releases to inflate the count.
+//
+// Search uses /search/data (the endpoint Mihon's extension uses): unlike the
+// /search/simple quick search it returns the full match list, which is what
+// the link scan needs for ambiguous titles.
 const canonicalBaseURL = "https://weebcentral.com"
 
 // maxPlausibleChapter mirrors the MangaBuddy guard: a parsed number beyond
@@ -276,14 +280,17 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, err
 }
 
 func (c *Connector) fetchSearchFragment(ctx context.Context, query string) (string, error) {
-	form := url.Values{"text": {strings.TrimSpace(query)}}
-	endpoint := c.baseURL + "/search/simple?location=main"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	params := url.Values{
+		"text":         {strings.TrimSpace(query)},
+		"limit":        {"32"},
+		"offset":       {"0"},
+		"display_mode": {"Full Display"},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/search/data?"+params.Encode(), nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "text/html,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
