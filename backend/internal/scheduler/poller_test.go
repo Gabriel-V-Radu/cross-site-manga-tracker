@@ -664,6 +664,104 @@ func TestPollerRunOnce_FallbackPrefersFreshestAlternate(t *testing.T) {
 	}
 }
 
+// TestImplausibleChapterAdvance pins the margin that separates a real advance
+// from the junk numbers sources have reported in production: years parsed as
+// chapters, numbers lifted from series titles, placeholder entries.
+func TestImplausibleChapterAdvance(t *testing.T) {
+	cases := []struct {
+		name     string
+		stored   *float64
+		reported float64
+		want     bool
+	}{
+		{name: "no stored number accepts anything", stored: nil, reported: 10000, want: false},
+		{name: "young trackers may catch up freely", stored: chapterPtr(5), reported: 600, want: false},
+		{name: "cross-language inflation stays inside the margin", stored: chapterPtr(176), reported: 302, want: false},
+		{name: "just under the margin is accepted", stored: chapterPtr(230), reported: 560, want: false},
+		{name: "a placeholder chapter 1000 over a run of 230 is rejected", stored: chapterPtr(230), reported: 1000, want: true},
+		{name: "a year reported as a chapter is rejected", stored: chapterPtr(271), reported: 2019, want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := implausibleChapterAdvance(tc.stored, tc.reported); got != tc.want {
+				t.Fatalf("implausibleChapterAdvance(%v, %v) = %v, want %v", tc.stored, tc.reported, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPollerRunOnce_IgnoresImplausibleJumpFromPrimary guards the stored chapter
+// against a primary source reporting a junk number: once stored, the same
+// source re-confirms it every cycle and nothing can ever walk it back.
+func TestPollerRunOnce_IgnoresImplausibleJumpFromPrimary(t *testing.T) {
+	prev := 271.0
+	junk := 2019.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &junk}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != prev {
+		t.Fatalf("expected the junk jump to be ignored and %.0f kept, got %#v", prev, repo.updatedLatest)
+	}
+	if repo.clearedReleaseAt {
+		t.Fatalf("an ignored number must not clear the stored release date")
+	}
+}
+
+// TestPollerRunOnce_FallbackIgnoresImplausibleJumpAndUsesSaneMirror pins why
+// junk answers are filtered before ranking the alternates: the highest number
+// wins that comparison, so one source's junk would shadow a real advance from
+// another mirror.
+func TestPollerRunOnce_FallbackIgnoresImplausibleJumpAndUsesSaneMirror(t *testing.T) {
+	prev := 230.0
+	junk := 1000.0
+	sane := 232.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "junkmirror", SourceURL: "https://junk/series"},
+			{SourceKey: "sanemirror", SourceURL: "https://sane/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "junkmirror", result: &connectors.MangaResult{
+		SourceKey: "junkmirror", LatestChapter: &junk,
+	}}); err != nil {
+		t.Fatalf("register junk connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "sanemirror", result: &connectors.MangaResult{
+		SourceKey: "sanemirror", LatestChapter: &sane,
+	}}); err != nil {
+		t.Fatalf("register sane connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != sane {
+		t.Fatalf("expected the sane mirror's %.0f to win over junk, got %#v", sane, repo.updatedLatest)
+	}
+}
+
 // TestBetterFallbackResult pins the ranking between fallback answers.
 func TestBetterFallbackResult(t *testing.T) {
 	date := time.Now().UTC()

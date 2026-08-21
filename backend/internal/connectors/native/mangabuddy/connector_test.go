@@ -89,6 +89,58 @@ func TestResolveByURLIgnoresCorruptChapterNumbers(t *testing.T) {
 	}
 }
 
+// TestResolveByURLDropsIsolatedOutlierChapters covers the junk entries the API
+// plants inside the hard cap: a lone "Chapter 1000" on a series whose real run
+// ends at 249, and a 9999 stacked on a 999 above a real 209. Both were observed
+// live and had poisoned trackers' latest-chapter counts.
+func TestResolveByURLDropsIsolatedOutlierChapters(t *testing.T) {
+	cases := []struct {
+		name     string
+		chapters []apiChapter
+		want     float64
+	}{
+		{
+			name:     "single junk entry far above the real run",
+			chapters: []apiChapter{{Number: 248}, {Number: 249}, {Number: 1000}},
+			want:     249,
+		},
+		{
+			name:     "stacked junk entries are peeled one by one",
+			chapters: []apiChapter{{Number: 208}, {Number: 209}, {Number: 999}, {Number: 9999}},
+			want:     209,
+		},
+		{
+			name:     "exactly the cap is junk too",
+			chapters: []apiChapter{{Number: 61}, {Number: 62}, {Number: 10000}},
+			want:     62,
+		},
+		{
+			name:     "split chapters and ordinary gaps survive",
+			chapters: []apiChapter{{Number: 249}, {Number: 249.5}, {Number: 260}},
+			want:     260,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const slugHash = "outlier-series.ZDTEST"
+			payload := apiSeriesResponse{
+				Comic:    apiComic{Title: "Outlier Series", Slug: "outlier-series"},
+				Chapters: tc.chapters,
+			}
+			connector, _ := newTestConnector(t, seriesHandler(t, slugHash, payload))
+
+			result, err := connector.ResolveByURL(context.Background(), "https://mangabuddy1.co.uk/series/"+slugHash)
+			if err != nil {
+				t.Fatalf("resolve failed: %v", err)
+			}
+			if result.LatestChapter == nil || *result.LatestChapter != tc.want {
+				t.Fatalf("expected latest chapter %v, got %#v", tc.want, result.LatestChapter)
+			}
+		})
+	}
+}
+
 // TestResolveByURLPublishesNoReleaseDate pins the decision not to trust the
 // API's per-chapter "time" field, which misreports ages badly enough to churn
 // stored release dates.

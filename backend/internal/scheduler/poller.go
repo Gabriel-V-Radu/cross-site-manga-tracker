@@ -147,6 +147,21 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			continue
 		}
 
+		// A corrupt number from any single source must not poison the stored
+		// chapter: once stored, the same source re-confirms it every cycle and
+		// the pending-lower path can never walk it back. Fallback candidates
+		// are filtered inside resolveFromAlternates; this catches the primary.
+		if result.LatestChapter != nil && implausibleChapterAdvance(tracker.LatestKnownChapter, *result.LatestChapter) {
+			p.logger.Warn("poll reported an implausible chapter jump; ignoring the number",
+				"trackerId", tracker.ID,
+				"title", tracker.Title,
+				"sourceKey", tracker.SourceKey,
+				"stored", derefChapter(tracker.LatestKnownChapter),
+				"reported", *result.LatestChapter,
+				"usedFallback", usedFallback)
+			result.LatestChapter = nil
+		}
+
 		now := time.Now().UTC()
 		outcome := decideChapter(tracker, result.LatestChapter, usedFallback, now, p.lowerConfirmationDelay)
 		latest := outcome.latest
@@ -305,6 +320,22 @@ func decideChapter(
 	return chapterOutcome{latest: stored, pendingLower: reported}
 }
 
+// implausibleChapterAdvance reports whether a reported chapter number is too
+// far above the stored one to be a real release. Sources have been observed
+// reporting junk numbers — years ("Chapter 2019"), numbers lifted from series
+// titles ("LVL 9999"), placeholder entries ("Chapter 1000" on a run of 249) —
+// and the highest-number-wins reconciliation stores such a value permanently:
+// every later cycle re-confirms it, so update detection freezes. The margin is
+// far above the largest legitimate divergence seen between sources (~1.7x from
+// cross-language chapter inflation), and very young trackers are exempt
+// because a freshly linked series can genuinely catch up by that much.
+func implausibleChapterAdvance(stored *float64, reported float64) bool {
+	if stored == nil || *stored < 10 {
+		return false
+	}
+	return reported > *stored*2+100
+}
+
 func derefChapter(value *float64) float64 {
 	if value == nil {
 		return 0
@@ -345,6 +376,19 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 		}
 		if result == nil {
 			continue
+		}
+
+		// Drop an implausible number here rather than after picking the best:
+		// one source's junk answer would otherwise shadow a sane advance from
+		// another mirror, since the highest number wins the comparison below.
+		if result.LatestChapter != nil && implausibleChapterAdvance(tracker.LatestKnownChapter, *result.LatestChapter) {
+			p.logger.Warn("fallback source reported an implausible chapter jump; ignoring the number",
+				"trackerId", tracker.ID,
+				"title", tracker.Title,
+				"sourceKey", source.SourceKey,
+				"stored", derefChapter(tracker.LatestKnownChapter),
+				"reported", *result.LatestChapter)
+			result.LatestChapter = nil
 		}
 
 		if betterFallbackResult(best, result) {

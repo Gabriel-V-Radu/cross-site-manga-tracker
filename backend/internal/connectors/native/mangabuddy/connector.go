@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,9 +30,10 @@ import (
 const canonicalBaseURL = "https://mangabuddy1.co.uk"
 
 // maxPlausibleChapter guards against the corrupt chapter numbers the API
-// occasionally reports (one series lists a chapter 13521). Anything beyond this
-// is treated as data noise rather than a real release, so it cannot inflate a
-// tracker's latest-chapter count.
+// occasionally reports (one series lists a chapter 13521). Anything at or
+// beyond this is treated as data noise rather than a real release, so it
+// cannot inflate a tracker's latest-chapter count. The bound itself is
+// excluded because the API plants exactly-10000 junk entries too.
 const maxPlausibleChapter = 10000
 
 type Connector struct {
@@ -264,24 +266,43 @@ func (c *Connector) resultFromSeries(slugHash string, series *apiSeriesResponse)
 }
 
 // latestChapter returns the highest plausible chapter number. The chapter array
-// is ordered oldest-first, but it is scanned in full rather than read from the
-// tail so that a corrupt entry anywhere cannot become the answer.
+// order varies per series, so it is collected in full rather than read from
+// either end — a corrupt entry anywhere must not become the answer.
+//
+// Beyond the hard cap, the API also plants isolated junk entries well inside
+// it: a "Chapter 1000" with one image on a series whose real run ends at 249,
+// a 9999 and a 999 above a real 209. A genuine latest chapter always sits near
+// its predecessors, so the numbers are inspected from the top down and any
+// that dwarfs the next one below it is discarded as noise.
 func latestChapter(chapters []apiChapter) (float64, bool) {
-	latest := 0.0
-	found := false
+	numbers := make([]float64, 0, len(chapters))
 	for _, entry := range chapters {
 		number := entry.Number
 		if math.IsNaN(number) || math.IsInf(number, 0) {
 			continue
 		}
-		if number <= 0 || number > maxPlausibleChapter {
+		if number <= 0 || number >= maxPlausibleChapter {
 			continue
 		}
-		if !found || number > latest {
-			latest, found = number, true
-		}
+		numbers = append(numbers, number)
 	}
-	return latest, found
+	if len(numbers) == 0 {
+		return 0, false
+	}
+
+	sort.Sort(sort.Reverse(sort.Float64Slice(numbers)))
+	for len(numbers) > 1 && isolatedOutlier(numbers[0], numbers[1]) {
+		numbers = numbers[1:]
+	}
+	return numbers[0], true
+}
+
+// isolatedOutlier reports whether top sits too far above the next highest
+// number to be a real release. Doubling the runner-up plus a margin is beyond
+// any legitimate numbering jump, while split chapters (249 → 249.5), specials
+// and ordinary gaps stay well inside the allowance.
+func isolatedOutlier(top float64, next float64) bool {
+	return top > next*2+10
 }
 
 func (c *Connector) seriesURL(slugHash string) string {
