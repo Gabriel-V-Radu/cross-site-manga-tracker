@@ -25,6 +25,7 @@ func SeedDefaults(db *sql.DB) error {
 		{key: "webtoons", name: "WEBTOON", kind: "native", enabled: true},
 		{key: "freewebnovel", name: "FreeWebNovel", kind: "native", enabled: true},
 		{key: "mangabuddy", name: "MangaBuddy", kind: "native", enabled: true},
+		{key: "weebcentral", name: "WeebCentral", kind: "native", enabled: true},
 	}
 
 	for _, source := range defaultSources {

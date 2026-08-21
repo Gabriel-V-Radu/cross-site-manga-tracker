@@ -165,6 +165,8 @@ func sourceHomeURLForKey(sourceKey string) string {
 		return "https://www.webtoons.com"
 	case "freewebnovel":
 		return "https://freewebnovel.com"
+	case "weebcentral":
+		return "https://weebcentral.com"
 	default:
 		return ""
 	}
@@ -421,6 +423,8 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "webtoons"
 	case strings.Contains(host, "freewebnovel"):
 		return "freewebnovel"
+	case strings.Contains(host, "weebcentral"):
+		return "weebcentral"
 	default:
 		return ""
 	}

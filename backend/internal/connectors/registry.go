@@ -124,6 +124,8 @@ func normalizeConnectorKey(raw string) string {
 		return "webtoons"
 	case "freewebnovel.com":
 		return "freewebnovel"
+	case "weebcentral.com":
+		return "weebcentral"
 	default:
 		return key
 	}

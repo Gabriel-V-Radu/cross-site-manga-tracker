@@ -10,6 +10,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mgeko"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/webtoons"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/weebcentral"
 )
 
 func NewRegistry() *connectors.Registry {
@@ -22,6 +23,7 @@ func NewRegistry() *connectors.Registry {
 	_ = registry.Register(mgeko.NewConnector())
 	_ = registry.Register(webtoons.NewConnector())
 	_ = registry.Register(freewebnovel.NewConnector())
+	_ = registry.Register(weebcentral.NewConnector())
 
 	return registry
 }
