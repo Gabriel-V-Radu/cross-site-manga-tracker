@@ -7,6 +7,7 @@
     <button type="button"
             class="action-btn action-btn--accent"
             hx-post="/dashboard/links/accept-exact?source={{.SourceID}}"
+            hx-include="#links-scope"
             hx-target="#links-queue"
             hx-swap="innerHTML"
             hx-confirm="Accept every unambiguous exact title match ({{.ExactCount}} series)?">
@@ -18,6 +19,7 @@
 {{define "link_manual_form"}}
 <form class="link-manual"
       hx-post="/dashboard/links/trackers/{{.ID}}/manual?source={{.SourceID}}"
+      hx-include="#links-scope"
       hx-target="closest .link-card"
       hx-swap="outerHTML">
     <input type="url" name="url" placeholder="Paste a series URL from any supported site" required>
@@ -56,10 +58,12 @@
             <div class="link-candidate__actions">
                 <button type="button" class="action-btn action-btn--accent"
                         hx-post="/dashboard/links/suggestions/{{.ID}}/accept"
+                        hx-include="#links-scope"
                         hx-target="closest .link-card"
                         hx-swap="outerHTML">Accept</button>
                 <button type="button" class="action-btn"
                         hx-post="/dashboard/links/suggestions/{{.ID}}/reject"
+                        hx-include="#links-scope"
                         hx-target="closest .link-card"
                         hx-swap="outerHTML">Reject</button>
             </div>
@@ -70,6 +74,7 @@
         {{template "link_manual_form" .Tracker}}
         <button type="button" class="action-btn link-card__dismiss"
                 hx-post="/dashboard/links/trackers/{{.Tracker.ID}}/dismiss?source={{.Tracker.SourceID}}"
+                hx-include="#links-scope"
                 hx-target="closest .link-card"
                 hx-swap="outerHTML"
                 hx-confirm="Mark this series as having no match on this source?">No match</button>
@@ -96,6 +101,7 @@
         {{template "link_manual_form" .}}
         <button type="button" class="action-btn link-card__dismiss"
                 hx-post="/dashboard/links/trackers/{{.ID}}/dismiss?source={{.SourceID}}"
+                hx-include="#links-scope"
                 hx-target="closest .link-card"
                 hx-swap="outerHTML"
                 hx-confirm="Hide this series from the review queue?">Dismiss</button>

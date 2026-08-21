@@ -66,10 +66,28 @@ func NewLinkSuggestionRepository(db *sql.DB) *LinkSuggestionRepository {
 	return &LinkSuggestionRepository{db: db}
 }
 
+// LinkScanFilter narrows which of a profile's unlinked trackers a scan (and
+// the review queue) covers. The zero value filters nothing. The point is
+// workload: most of the time only a slice needs linking — series whose
+// primary source is down, or series with no working fallback yet — and a
+// scan of everything wastes requests on trackers that are already fine.
+type LinkScanFilter struct {
+	// Statuses keeps only trackers in these reading statuses.
+	Statuses []string
+	// PrimarySourceIDs keeps only trackers whose primary source is one of
+	// these. A non-nil empty slice matches nothing (the caller resolved
+	// "broken sources" and found none).
+	PrimarySourceIDs []int64
+	// MaxAlternates keeps only trackers with at most this many linked
+	// alternate sources (linked sources other than the primary). Nil = any.
+	MaxAlternates *int
+}
+
 // linkableTrackersQuery selects a profile's trackers that still lack the given
 // source: not their primary, not already linked, not dismissed, no accepted
-// suggestion. Parameters: source, source, profile, source.
-const linkableTrackersQuery = `
+// suggestion — narrowed by the filter.
+func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilter) (string, []any) {
+	query := `
 	SELECT t.id, t.title, t.related_titles, t.status, t.source_id, t.source_url,
 	       t.latest_known_chapter, t.latest_release_at
 	FROM trackers t
@@ -85,11 +103,47 @@ const linkableTrackersQuery = `
 	        AND marker.status IN ('dismissed', 'accepted')
 	  )
 `
+	args := []any{sourceID, sourceID, profileID, sourceID}
+
+	if len(filter.Statuses) > 0 {
+		query += ` AND LOWER(TRIM(t.status)) IN (` + placeholders(len(filter.Statuses)) + `)`
+		for _, status := range filter.Statuses {
+			args = append(args, strings.ToLower(strings.TrimSpace(status)))
+		}
+	}
+
+	if filter.PrimarySourceIDs != nil {
+		if len(filter.PrimarySourceIDs) == 0 {
+			// "Broken sources" resolved to none: match nothing rather than
+			// silently widening to everything.
+			query += ` AND 1 = 0`
+		} else {
+			query += ` AND t.source_id IN (` + placeholders(len(filter.PrimarySourceIDs)) + `)`
+			for _, id := range filter.PrimarySourceIDs {
+				args = append(args, id)
+			}
+		}
+	}
+
+	if filter.MaxAlternates != nil {
+		query += ` AND (
+			SELECT COUNT(1) FROM tracker_sources alt
+			WHERE alt.tracker_id = t.id AND alt.source_id != t.source_id
+		) <= ?`
+		args = append(args, *filter.MaxAlternates)
+	}
+
+	return query, args
+}
+
+func placeholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", count), ", ")
+}
 
 // ListScanTargets returns the trackers a scan of sourceID should look up.
-func (r *LinkSuggestionRepository) ListScanTargets(profileID int64, sourceID int64) ([]LinkScanTarget, error) {
-	rows, err := r.db.Query(linkableTrackersQuery+` ORDER BY t.title ASC`,
-		sourceID, sourceID, profileID, sourceID)
+func (r *LinkSuggestionRepository) ListScanTargets(profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
+	query, args := linkableTrackersQuery(profileID, sourceID, filter)
+	rows, err := r.db.Query(query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list link scan targets: %w", err)
 	}
@@ -171,9 +225,9 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(trackerID int64, so
 // ListReviewQueue returns every tracker of the profile that still lacks the
 // source, with its pending candidates. Trackers whose Suggestions are empty
 // form the "no candidate found" section of the queue.
-func (r *LinkSuggestionRepository) ListReviewQueue(profileID int64, sourceID int64) ([]LinkReviewTracker, error) {
-	rows, err := r.db.Query(linkableTrackersQuery+` ORDER BY t.title ASC`,
-		sourceID, sourceID, profileID, sourceID)
+func (r *LinkSuggestionRepository) ListReviewQueue(profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkReviewTracker, error) {
+	query, args := linkableTrackersQuery(profileID, sourceID, filter)
+	rows, err := r.db.Query(query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list review queue trackers: %w", err)
 	}

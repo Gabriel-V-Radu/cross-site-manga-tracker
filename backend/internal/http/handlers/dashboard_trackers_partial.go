@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -97,11 +98,20 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	}
 
 	cards, pendingCovers := h.buildTrackerCards(items, sourceByID, sourceLogoBySourceID, alternatesByTracker, refreshKey)
-	siteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID)
+
+	// The connector shortcuts rank by how many trackers each source serves:
+	// with ten registered sources the row would otherwise wrap into a second
+	// line, so only the top few show and the rest fold behind a toggle.
+	trackerCountsBySource, err := h.trackerRepo.CountTrackersBySource(activeProfile.ID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to count linked sites")
+	}
+	topSiteLinks, moreSiteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID, trackerCountsBySource)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
 		Trackers:      cards,
-		SiteLinks:     siteLinks,
+		SiteLinks:     topSiteLinks,
+		MoreSiteLinks: moreSiteLinks,
 		ViewMode:      viewMode,
 		Page:          page,
 		PrevPage:      max(1, page-1),
@@ -384,8 +394,17 @@ func findServingSource(servingSourceKey, primarySourceKey string, alternates []r
 	return repository.TrackerSourceRef{}, false
 }
 
-func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string) []trackerSiteLinkView {
-	links := make([]trackerSiteLinkView, 0, len(sources))
+// maxVisibleSiteLinks is how many connector shortcuts show before the rest
+// fold behind the "+N" toggle.
+const maxVisibleSiteLinks = 4
+
+func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string, trackerCounts map[int64]int) ([]trackerSiteLinkView, []trackerSiteLinkView) {
+	type rankedLink struct {
+		view  trackerSiteLinkView
+		count int
+	}
+
+	ranked := make([]rankedLink, 0, len(sources))
 	for _, source := range sources {
 		homeURL := sourceHomeURLForKey(source.Key)
 		if source.BaseURL != nil && strings.TrimSpace(*source.BaseURL) != "" {
@@ -395,14 +414,31 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 			continue
 		}
 
-		links = append(links, trackerSiteLinkView{
-			Name:    source.Name,
-			HomeURL: homeURL,
-			LogoURL: strings.TrimSpace(sourceLogoBySourceID[source.ID]),
+		ranked = append(ranked, rankedLink{
+			view: trackerSiteLinkView{
+				Name:    source.Name,
+				HomeURL: homeURL,
+				LogoURL: strings.TrimSpace(sourceLogoBySourceID[source.ID]),
+			},
+			count: trackerCounts[source.ID],
 		})
 	}
 
-	return links
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].count != ranked[j].count {
+			return ranked[i].count > ranked[j].count
+		}
+		return ranked[i].view.Name < ranked[j].view.Name
+	})
+
+	links := make([]trackerSiteLinkView, 0, len(ranked))
+	for _, item := range ranked {
+		links = append(links, item.view)
+	}
+	if len(links) <= maxVisibleSiteLinks {
+		return links, nil
+	}
+	return links[:maxVisibleSiteLinks], links[maxVisibleSiteLinks:]
 }
 
 // getCachedOrQueueCover returns the cover URL, the source key that supplied it,

@@ -5,16 +5,21 @@
      hx-swap="outerHTML">
     <span class="link-scan-status__spinner" aria-hidden="true"></span>
     Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
+    <button type="button" class="action-btn link-scan-status__stop"
+            hx-post="/dashboard/links/scan/stop"
+            hx-target="#link-scan-status"
+            hx-swap="outerHTML">Stop</button>
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
 </div>
 {{else}}
 <div id="link-scan-status" class="link-scan-status">
     {{if .SourceName}}
-    Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates.
+    Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Stopped}} — stopped early{{end}}.
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
     {{end}}
     {{if .JustFinished}}
-    <span hx-get="/dashboard/links/queue?source={{.SourceID}}"
+    <span hx-get="/dashboard/links/queue"
+          hx-include="#links-scope"
           hx-trigger="load"
           hx-target="#links-queue"
           hx-swap="innerHTML"></span>

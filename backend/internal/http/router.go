@@ -59,6 +59,7 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	app.Get("/dashboard/links", dashboard.LinksPage)
 	app.Get("/dashboard/links/queue", dashboard.LinksQueuePartial)
 	app.Post("/dashboard/links/scan", dashboard.StartLinkScan)
+	app.Post("/dashboard/links/scan/stop", dashboard.StopLinkScan)
 	app.Get("/dashboard/links/scan-status", dashboard.LinkScanStatus)
 	app.Post("/dashboard/links/suggestions/:id/accept", dashboard.AcceptLinkSuggestion)
 	app.Post("/dashboard/links/suggestions/:id/reject", dashboard.RejectLinkSuggestion)

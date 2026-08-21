@@ -165,7 +165,7 @@ h1 {
 }
 
 .filter-multi-select > summary::after {
-    content: "▾";
+    content: "â–¾";
     float: right;
     color: #b8c4dd;
 }
@@ -948,7 +948,7 @@ input:focus, select:focus {
 
 .tracker-rating__stars::before,
 .tracker-rating__stars::after {
-    content: "★★★★★★★★★★";
+    content: "â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…â˜…";
 }
 
 .tracker-rating__stars::before {
@@ -1362,7 +1362,7 @@ input.is-loading::placeholder {
     opacity: 0.85;
 }
 
-/* Why a field stayed empty — a failed lookup reads differently from a title that
+/* Why a field stayed empty â€” a failed lookup reads differently from a title that
    genuinely has no number. */
 .field-note {
     display: block;
@@ -2099,29 +2099,39 @@ input.is-loading::placeholder {
     }
 }
 
-/* ── Link review ─────────────────────────────────────────────────────── */
+/* â”€â”€ Link review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .links-controls {
-    grid-template-columns: minmax(200px, 320px) auto 1fr;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 14px;
     align-items: end;
 }
 
-.links-controls__source {
+.links-controls__field {
     display: grid;
     gap: 6px;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.14em;
     color: var(--ink-soft);
+    flex: 0 1 auto;
+    min-width: 150px;
 }
 
-.links-controls__source select {
+.links-controls__field select {
     height: 40px;
     padding: 8px 10px;
     background: #0e1725;
     color: var(--ink);
     border: 1px solid var(--line);
-    font-size: 14px;
+    font-size: 13px;
+    max-width: 240px;
+}
+
+.link-scan-status__stop {
+    padding: 6px 10px;
+    font-size: 11px;
 }
 
 .action-btn { text-decoration: none; display: inline-block; }
@@ -2302,4 +2312,41 @@ input.is-loading::placeholder {
     .links-controls { grid-template-columns: 1fr; align-items: stretch; }
     .link-candidate { flex-wrap: wrap; }
     .links-summary { flex-direction: column; align-items: flex-start; }
+}
+
+/* Folded connector shortcuts: everything past the top few lives in a
+   dropdown so the row never wraps into a second line on its own. */
+.site-links-more {
+    position: relative;
+}
+
+.site-links-more__toggle {
+    list-style: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+}
+
+.site-links-more__toggle::-webkit-details-marker { display: none; }
+
+.site-links-more[open] .site-links-more__toggle {
+    border-color: #587198;
+    color: #f2f6ff;
+}
+
+.site-links-more__menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: 320px;
+    padding: 8px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: var(--shadow);
 }

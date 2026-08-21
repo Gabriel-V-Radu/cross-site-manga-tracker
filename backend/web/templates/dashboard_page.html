@@ -31,6 +31,7 @@
                     Active Profile
                     <input type="text" value="{{.ActiveProfile.Name}}" readonly>
                 </label>
+                <a class="action-btn" href="/dashboard/links">Link review</a>
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/profile/menu"
@@ -138,7 +139,6 @@
                         List
                     </button>
                 </div>
-                <a class="action-btn" href="/dashboard/links">Link review</a>
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/trackers/new"

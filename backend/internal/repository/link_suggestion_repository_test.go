@@ -84,12 +84,93 @@ func TestScanTargetsExcludeLinkedAndDecidedTrackers(t *testing.T) {
 		t.Fatalf("dismiss tracker: %v", err)
 	}
 
-	targets, err := repo.ListScanTargets(1, weebcentral)
+	targets, err := repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list scan targets: %v", err)
 	}
 	if len(targets) != 1 || targets[0].TrackerID != unlinked {
 		t.Fatalf("targets = %+v, want only the unlinked tracker %d", targets, unlinked)
+	}
+}
+
+// TestScanFilterNarrowsTargets pins the scope controls: status, primary
+// source, and how many alternates a tracker already has.
+func TestScanFilterNarrowsTargets(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	trackerRepo := repository.NewTrackerRepository(db)
+	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	mangafire := sourceIDByKey(t, db, "mangafire")
+	mangadex := sourceIDByKey(t, db, "mangadex")
+	mangabuddy := sourceIDByKey(t, db, "mangabuddy")
+
+	reading := seedLinkTracker(t, db, "reading-no-alternates")
+
+	planned := seedLinkTracker(t, db, "planned")
+	if _, err := db.Exec(`UPDATE trackers SET status = 'plan_to_read' WHERE id = ?`, planned); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+
+	onMangadex := seedLinkTracker(t, db, "on-mangadex")
+	if _, err := db.Exec(`UPDATE trackers SET source_id = ? WHERE id = ?`, mangadex, onMangadex); err != nil {
+		t.Fatalf("repoint primary: %v", err)
+	}
+
+	withAlternate := seedLinkTracker(t, db, "with-alternate")
+	if err := trackerRepo.UpsertTrackerSource(1, withAlternate, models.TrackerSource{
+		SourceID:  mangabuddy,
+		SourceURL: "https://mangabuddy1.co.uk/series/with-alternate.xx",
+	}); err != nil {
+		t.Fatalf("link alternate: %v", err)
+	}
+
+	// Status: reading + plan_to_read leaves out nothing here except nothing;
+	// reading alone leaves out the planned tracker.
+	targets, err := repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{Statuses: []string{"reading"}})
+	if err != nil {
+		t.Fatalf("status filter: %v", err)
+	}
+	for _, target := range targets {
+		if target.TrackerID == planned {
+			t.Fatalf("status filter leaked the plan_to_read tracker: %+v", targets)
+		}
+	}
+
+	// Primary source: only the mangafire ones.
+	targets, err = repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{PrimarySourceIDs: []int64{mangafire}})
+	if err != nil {
+		t.Fatalf("primary filter: %v", err)
+	}
+	for _, target := range targets {
+		if target.TrackerID == onMangadex {
+			t.Fatalf("primary filter leaked the mangadex tracker: %+v", targets)
+		}
+	}
+
+	// A non-nil empty primary set ("broken" resolved to none) matches nothing.
+	targets, err = repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{PrimarySourceIDs: []int64{}})
+	if err != nil {
+		t.Fatalf("empty primary filter: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("empty primary set matched %+v, want nothing", targets)
+	}
+
+	// Max alternates 0: the tracker that already has a fallback drops out.
+	zero := 0
+	targets, err = repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{MaxAlternates: &zero})
+	if err != nil {
+		t.Fatalf("alternates filter: %v", err)
+	}
+	found := map[int64]bool{}
+	for _, target := range targets {
+		found[target.TrackerID] = true
+	}
+	if found[withAlternate] {
+		t.Fatalf("alternates filter leaked a tracker with a fallback: %+v", targets)
+	}
+	if !found[reading] {
+		t.Fatalf("alternates filter dropped a tracker without fallbacks: %+v", targets)
 	}
 }
 
@@ -104,7 +185,7 @@ func TestRejectedCandidateDoesNotResurface(t *testing.T) {
 		t.Fatalf("store suggestion: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(1, weebcentral)
+	queue, err := repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -120,7 +201,7 @@ func TestRejectedCandidateDoesNotResurface(t *testing.T) {
 	if err := repo.ReplacePendingSuggestions(trackerID, weebcentral, []repository.LinkSuggestion{candidate}); err != nil {
 		t.Fatalf("re-store suggestion: %v", err)
 	}
-	queue, err = repo.ListReviewQueue(1, weebcentral)
+	queue, err = repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue after rescan: %v", err)
 	}
@@ -143,7 +224,7 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 		t.Fatalf("store suggestions: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(1, weebcentral)
+	queue, err := repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -165,7 +246,7 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 		t.Fatalf("link tracker: %v", err)
 	}
 
-	queue, err = repo.ListReviewQueue(1, weebcentral)
+	queue, err = repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue after accept: %v", err)
 	}
@@ -173,7 +254,7 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 		t.Fatalf("queue after accept = %+v, want empty", queue)
 	}
 
-	targets, err := repo.ListScanTargets(1, weebcentral)
+	targets, err := repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list scan targets: %v", err)
 	}
@@ -191,11 +272,12 @@ func TestMergeRelatedTitlesUnionsAndFilters(t *testing.T) {
 		t.Fatalf("seed related titles: %v", err)
 	}
 
+	nonLatin := "나노마신" // Korean, must be filtered out
 	if err := repo.MergeRelatedTitles(trackerID, []string{
-		"Existing Name",   // duplicate, must not double up
-		"New Alt Name",    // survives
-		"나노마신",            // non-Latin, filtered
-		"  ",              // empty, filtered
+		"Existing Name", // duplicate, must not double up
+		"New Alt Name",  // survives
+		nonLatin,
+		"  ", // empty, filtered
 	}); err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -207,7 +289,7 @@ func TestMergeRelatedTitlesUnionsAndFilters(t *testing.T) {
 	if !strings.Contains(raw, "Existing Name") || !strings.Contains(raw, "New Alt Name") {
 		t.Fatalf("merged titles = %s", raw)
 	}
-	if strings.Contains(raw, "나노마신") {
+	if strings.Contains(raw, nonLatin) {
 		t.Fatalf("non-Latin title leaked: %s", raw)
 	}
 	if strings.Count(raw, "Existing Name") != 1 {
@@ -227,7 +309,7 @@ func TestQueueScopedToProfile(t *testing.T) {
 		t.Fatalf("store suggestion: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(2, weebcentral)
+	queue, err := repo.ListReviewQueue(2, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue for other profile: %v", err)
 	}
@@ -235,7 +317,7 @@ func TestQueueScopedToProfile(t *testing.T) {
 		t.Fatalf("other profile sees %d queue entries, want 0", len(queue))
 	}
 
-	suggestionQueue, err := repo.ListReviewQueue(1, weebcentral)
+	suggestionQueue, err := repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}

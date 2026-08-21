@@ -34,6 +34,11 @@ type DashboardHandler struct {
 	chapterURLFetchSem chan struct{}
 	activePageMu       sync.RWMutex
 	activePageKey      string
+	// Cached result of the last connector health sweep, for the link review
+	// scope's "broken sources" option — the sweep hits every site at once.
+	sourceHealthMu        sync.Mutex
+	sourceHealthUnhealthy []int64
+	sourceHealthExpires   time.Time
 	templates          *template.Template
 	templateOnce       sync.Once
 	templateErr        error
@@ -77,6 +82,7 @@ type dashboardPageData struct {
 type trackersPartialData struct {
 	Trackers      []trackerCardView
 	SiteLinks     []trackerSiteLinkView
+	MoreSiteLinks []trackerSiteLinkView
 	ViewMode      string
 	Page          int
 	PrevPage      int

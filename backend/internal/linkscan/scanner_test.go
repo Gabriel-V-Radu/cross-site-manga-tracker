@@ -29,7 +29,7 @@ func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
 	}
 }
 
-func (s *stubStore) ListScanTargets(int64, int64) ([]repository.LinkScanTarget, error) {
+func (s *stubStore) ListScanTargets(int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
 	return s.targets, nil
 }
 
@@ -92,7 +92,7 @@ func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid
 		t.Fatalf("register connector: %v", err)
 	}
 	scanner := NewScanner(store, registry, aid, slog.Default())
-	if err := scanner.Start(1, 42, connector.Key(), connector.Name()); err != nil {
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

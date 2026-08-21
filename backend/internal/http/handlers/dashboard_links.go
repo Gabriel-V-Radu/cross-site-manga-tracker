@@ -28,6 +28,113 @@ type linksPageData struct {
 	SelectedSourceID int64
 }
 
+// linkScanScope is the parsed form of the scope controls: what slice of the
+// library a scan (and the queue view) covers. Most sessions only need the
+// series whose primary source is down or that still lack a working fallback,
+// so scanning everything is the exception, not the default workflow.
+type linkScanScope struct {
+	Filter repository.LinkScanFilter
+	// Show narrows the queue view only: "", "with" (only trackers with
+	// candidates) or "without" (only trackers without).
+	Show string
+}
+
+// linkStatusChoices are the tracker statuses the scope selector offers. The
+// combined option exists because "find fallbacks for what I'm actually
+// reading or about to" is the 90% case.
+var linkStatusChoices = map[string][]string{
+	"reading":      {"reading"},
+	"plan_to_read": {"plan_to_read"},
+	"reading+plan": {"reading", "plan_to_read"},
+	"completed":    {"completed"},
+	"on_hold":      {"on_hold"},
+	"dropped":      {"dropped"},
+}
+
+func (h *DashboardHandler) parseLinkScanScope(c *fiber.Ctx) linkScanScope {
+	value := func(name string) string {
+		raw := strings.TrimSpace(c.FormValue(name))
+		if raw == "" {
+			raw = strings.TrimSpace(c.Query(name))
+		}
+		return strings.ToLower(raw)
+	}
+
+	scope := linkScanScope{}
+
+	if statuses, ok := linkStatusChoices[value("status")]; ok {
+		scope.Filter.Statuses = statuses
+	}
+
+	switch primary := value("primary"); primary {
+	case "", "any":
+	case "broken":
+		// Resolved to the concrete set of failing sources at parse time. An
+		// empty (non-nil) set deliberately matches nothing.
+		scope.Filter.PrimarySourceIDs = h.unhealthySourceIDs(c.Context())
+	default:
+		if id, err := strconv.ParseInt(primary, 10, 64); err == nil && id > 0 {
+			scope.Filter.PrimarySourceIDs = []int64{id}
+		}
+	}
+
+	switch value("alternates") {
+	case "0":
+		zero := 0
+		scope.Filter.MaxAlternates = &zero
+	case "1":
+		one := 1
+		scope.Filter.MaxAlternates = &one
+	}
+
+	switch show := value("show"); show {
+	case "with", "without":
+		scope.Show = show
+	}
+
+	return scope
+}
+
+// unhealthySourceIDs health-checks every connector and returns the source ids
+// of the ones that failed. The sweep is cached briefly: it fires a request at
+// every site at once, which is not something a queue refresh should repeat.
+func (h *DashboardHandler) unhealthySourceIDs(ctx context.Context) []int64 {
+	h.sourceHealthMu.Lock()
+	if time.Now().Before(h.sourceHealthExpires) && h.sourceHealthUnhealthy != nil {
+		cached := append([]int64(nil), h.sourceHealthUnhealthy...)
+		h.sourceHealthMu.Unlock()
+		return cached
+	}
+	h.sourceHealthMu.Unlock()
+
+	healthCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	statuses := h.registry.Health(healthCtx)
+
+	unhealthyKeys := map[string]bool{}
+	for _, status := range statuses {
+		if !status.Healthy {
+			unhealthyKeys[status.Key] = true
+		}
+	}
+
+	ids := []int64{}
+	if sources, err := h.scannableSources(); err == nil {
+		for _, source := range sources {
+			if unhealthyKeys[source.Key] {
+				ids = append(ids, source.ID)
+			}
+		}
+	}
+
+	h.sourceHealthMu.Lock()
+	h.sourceHealthUnhealthy = append([]int64(nil), ids...)
+	h.sourceHealthExpires = time.Now().Add(5 * time.Minute)
+	h.sourceHealthMu.Unlock()
+
+	return ids
+}
+
 type linkSuggestionView struct {
 	ID                 int64
 	TrackerID          int64
@@ -82,6 +189,7 @@ type linkScanStatusData struct {
 	Total          int
 	Done           int
 	WithCandidates int
+	Stopped        bool
 	LastError      string
 	JustFinished   bool
 }
@@ -159,7 +267,7 @@ func (h *DashboardHandler) LinksQueuePartial(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
-	data, err := h.buildLinkQueue(profile.ID, source)
+	data, err := h.buildLinkQueue(profile.ID, source, h.parseLinkScanScope(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
@@ -185,8 +293,8 @@ func (h *DashboardHandler) linkSourceFromRequest(c *fiber.Ctx) (*models.Source, 
 	return source, nil
 }
 
-func (h *DashboardHandler) buildLinkQueue(profileID int64, source *models.Source) (linkQueueData, error) {
-	queue, err := h.linkSuggestionRepo.ListReviewQueue(profileID, source.ID)
+func (h *DashboardHandler) buildLinkQueue(profileID int64, source *models.Source, scope linkScanScope) (linkQueueData, error) {
+	queue, err := h.linkSuggestionRepo.ListReviewQueue(profileID, source.ID, scope.Filter)
 	if err != nil {
 		return linkQueueData{}, err
 	}
@@ -214,6 +322,15 @@ func (h *DashboardHandler) buildLinkQueue(profileID int64, source *models.Source
 		data.Summary.GroupCount++
 	}
 	data.Summary.ShowAcceptable = data.Summary.ExactCount > 0
+
+	// The view filter hides a section without touching the summary counts:
+	// the numbers keep describing everything in scope.
+	switch scope.Show {
+	case "with":
+		data.NoCandidates = nil
+	case "without":
+		data.Groups = nil
+	}
 
 	return data, nil
 }
@@ -289,11 +406,18 @@ func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
-	if err := h.linkScanner.Start(profile.ID, source.ID, source.Key, source.Name); err != nil {
+	if err := h.linkScanner.Start(profile.ID, source.ID, source.Key, source.Name, h.parseLinkScanScope(c).Filter); err != nil {
 		// An already-running scan is not a failure worth a dead end: show the
 		// live status instead.
 		return h.renderLinkScanStatus(c, false)
 	}
+	return h.renderLinkScanStatus(c, false)
+}
+
+// StopLinkScan winds down a running scan after the tracker it is on; what it
+// already stored stands.
+func (h *DashboardHandler) StopLinkScan(c *fiber.Ctx) error {
+	h.linkScanner.Stop()
 	return h.renderLinkScanStatus(c, false)
 }
 
@@ -310,6 +434,7 @@ func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, fromPoll bool) err
 		Total:          progress.Total,
 		Done:           progress.Done,
 		WithCandidates: progress.WithCandidates,
+		Stopped:        progress.Stopped,
 		LastError:      progress.LastError,
 		// A poll that finds the scan freshly finished is the transition edge:
 		// that render carries the one-shot queue refresh. The recency window
@@ -498,7 +623,8 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
 	}
 
-	queue, err := h.linkSuggestionRepo.ListReviewQueue(profile.ID, source.ID)
+	scope := h.parseLinkScanScope(c)
+	queue, err := h.linkSuggestionRepo.ListReviewQueue(profile.ID, source.ID, scope.Filter)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
@@ -517,7 +643,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 		}
 	}
 
-	data, err := h.buildLinkQueue(profile.ID, source)
+	data, err := h.buildLinkQueue(profile.ID, source, scope)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
@@ -533,7 +659,9 @@ func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64,
 		return c.Status(fiber.StatusInternalServerError).SendString("source lookup failed")
 	}
 
-	data, err := h.buildLinkQueue(profileID, source)
+	// The action buttons include the scope controls, so the re-rendered
+	// summary keeps counting the same slice the queue is showing.
+	data, err := h.buildLinkQueue(profileID, source, h.parseLinkScanScope(c))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}

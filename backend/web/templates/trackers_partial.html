@@ -1,3 +1,16 @@
+{{define "pagination_site_link"}}
+<a class="pagination-site-link{{if not .LogoURL}} pagination-site-link--text{{end}}"
+   href="{{.HomeURL}}"
+   target="_blank"
+   rel="noopener noreferrer"
+   title="{{.Name}}">
+    {{if .LogoURL}}
+    <img src="{{.LogoURL}}" alt="{{.Name}}">
+    {{else}}
+    <span class="pagination-site-link__text">{{.Name}}</span>
+    {{end}}
+</a>
+{{end}}
 {{if eq (len .Trackers) 0}}
 <div class="empty-state">
     <h2>No trackers found</h2>
@@ -37,17 +50,18 @@
     </div>
     <div class="pagination-site-links" aria-label="Connector websites">
         {{range .SiteLinks}}
-        <a class="pagination-site-link{{if not .LogoURL}} pagination-site-link--text{{end}}"
-           href="{{.HomeURL}}"
-           target="_blank"
-           rel="noopener noreferrer"
-           title="{{.Name}}">
-            {{if .LogoURL}}
-            <img src="{{.LogoURL}}" alt="{{.Name}}">
-            {{else}}
-            <span class="pagination-site-link__text">{{.Name}}</span>
-            {{end}}
-        </a>
+        {{template "pagination_site_link" .}}
+        {{end}}
+        {{if .MoreSiteLinks}}
+        <details class="site-links-more">
+            <summary class="pagination-site-link pagination-site-link--text site-links-more__toggle"
+                     title="Show all connectors">+{{len .MoreSiteLinks}}</summary>
+            <div class="site-links-more__menu">
+                {{range .MoreSiteLinks}}
+                {{template "pagination_site_link" .}}
+                {{end}}
+            </div>
+        </details>
         {{end}}
     </div>
 </div>

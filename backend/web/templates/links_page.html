@@ -31,24 +31,62 @@
             </div>
         </header>
 
-        <section class="control-panel links-controls">
-            <label class="links-controls__source">
+        <form id="links-scope" class="control-panel links-controls"
+              hx-get="/dashboard/links/queue"
+              hx-target="#links-queue"
+              hx-swap="innerHTML"
+              hx-trigger="change">
+            <label class="links-controls__field">
                 Source to link
-                <select id="links-source-select" name="source"
-                        hx-get="/dashboard/links/queue"
-                        hx-target="#links-queue"
-                        hx-swap="innerHTML"
-                        hx-include="this">
+                <select id="links-source-select" name="source">
                     {{$selected := .SelectedSourceID}}
                     {{range .Sources}}
                     <option value="{{.ID}}" {{if eq .ID $selected}}selected{{end}}>{{.Name}}</option>
                     {{end}}
                 </select>
             </label>
+            <label class="links-controls__field">
+                Status
+                <select name="status">
+                    <option value="all">All statuses</option>
+                    <option value="reading+plan">Reading + Plan to read</option>
+                    <option value="reading">Reading only</option>
+                    <option value="plan_to_read">Plan to read only</option>
+                    <option value="on_hold">On hold</option>
+                    <option value="completed">Completed</option>
+                    <option value="dropped">Dropped</option>
+                </select>
+            </label>
+            <label class="links-controls__field">
+                Primary source
+                <select name="primary">
+                    <option value="any">Any</option>
+                    <option value="broken">Broken right now</option>
+                    {{range .Sources}}
+                    <option value="{{.ID}}">{{.Name}}</option>
+                    {{end}}
+                </select>
+            </label>
+            <label class="links-controls__field">
+                Linked alternates
+                <select name="alternates">
+                    <option value="any">Any number</option>
+                    <option value="0">None yet</option>
+                    <option value="1">At most one</option>
+                </select>
+            </label>
+            <label class="links-controls__field">
+                View
+                <select name="show">
+                    <option value="all">Everything</option>
+                    <option value="with">Only with candidates</option>
+                    <option value="without">Only without candidates</option>
+                </select>
+            </label>
             <button type="button"
                     class="action-btn action-btn--accent"
                     hx-post="/dashboard/links/scan"
-                    hx-include="#links-source-select"
+                    hx-include="#links-scope"
                     hx-target="#link-scan-status"
                     hx-swap="outerHTML">
                 Scan for candidates
@@ -57,12 +95,12 @@
                  hx-get="/dashboard/links/scan-status"
                  hx-trigger="load"
                  hx-swap="outerHTML"></div>
-        </section>
+        </form>
 
         <section id="links-queue" class="links-queue"
                  hx-get="/dashboard/links/queue"
                  hx-trigger="load"
-                 hx-include="#links-source-select"
+                 hx-include="#links-scope"
                  hx-swap="innerHTML"></section>
     </main>
 </body>

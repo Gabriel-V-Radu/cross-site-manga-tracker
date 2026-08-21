@@ -45,6 +45,43 @@ func (r *TrackerRepository) ListLinkedSourceIDs(profileID int64) ([]int64, error
 	return ids, nil
 }
 
+// CountTrackersBySource reports how many of a profile's trackers each source
+// serves, counting a tracker once per source whether it is the primary or a
+// linked alternate. The dashboard uses it to rank the connector shortcuts.
+func (r *TrackerRepository) CountTrackersBySource(profileID int64) (map[int64]int, error) {
+	rows, err := r.db.Query(`
+		SELECT source_id, COUNT(1)
+		FROM (
+			SELECT id AS tracker_id, source_id FROM trackers WHERE profile_id = ?
+			UNION
+			SELECT ts.tracker_id, ts.source_id
+			FROM tracker_sources ts
+			INNER JOIN trackers t ON t.id = ts.tracker_id
+			WHERE t.profile_id = ?
+		)
+		WHERE source_id > 0
+		GROUP BY source_id
+	`, profileID, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("count trackers by source: %w", err)
+	}
+	defer rows.Close()
+
+	counts := map[int64]int{}
+	for rows.Next() {
+		var sourceID int64
+		var count int
+		if err := rows.Scan(&sourceID, &count); err != nil {
+			return nil, fmt.Errorf("scan tracker count by source: %w", err)
+		}
+		counts[sourceID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tracker counts by source: %w", err)
+	}
+	return counts, nil
+}
+
 func (r *TrackerRepository) ListTrackerSources(profileID int64, trackerID int64) ([]models.TrackerSource, error) {
 	rows, err := r.db.Query(`
 		SELECT

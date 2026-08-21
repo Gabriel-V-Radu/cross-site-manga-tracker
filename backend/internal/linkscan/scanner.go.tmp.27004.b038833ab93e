@@ -65,9 +65,9 @@ type Scanner struct {
 	aid      AidLookup
 	logger   *slog.Logger
 
-	mu            sync.Mutex
-	progress      Progress
-	stopRequested bool
+	mu       sync.Mutex
+	progress Progress
+	stop     bool
 }
 
 func NewScanner(store suggestionStore, registry *connectors.Registry, aid AidLookup, logger *slog.Logger) *Scanner {
@@ -80,7 +80,7 @@ func NewScanner(store suggestionStore, registry *connectors.Registry, aid AidLoo
 // Start launches a scan in the background. Only one scan runs at a time — the
 // second caller gets an error rather than a queue, because a scan walks an
 // entire library against one site and two of them would defeat the pacing.
-func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourceName string, filter repository.LinkScanFilter) error {
+func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourceName string) error {
 	connector, ok := s.registry.Get(sourceKey)
 	if !ok {
 		return fmt.Errorf("no connector registered for source %q", sourceKey)
@@ -97,21 +97,9 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 		SourceName: sourceName,
 		StartedAt:  time.Now().UTC(),
 	}
-	s.stopRequested = false
 
-	go s.run(profileID, sourceID, connector, filter)
+	go s.run(profileID, sourceID, connector)
 	return nil
-}
-
-// Stop asks a running scan to wind down after the tracker it is on. Whatever
-// it already stored stands — stopping is for "that's enough requests", not a
-// rollback.
-func (s *Scanner) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.progress.Running {
-		s.stopRequested = true
-	}
 }
 
 func (s *Scanner) Snapshot() Progress {
@@ -120,23 +108,16 @@ func (s *Scanner) Snapshot() Progress {
 	return s.progress
 }
 
-func (s *Scanner) shouldStop() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stopRequested
-}
-
-func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Connector, filter repository.LinkScanFilter) {
+func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Connector) {
 	defer func() {
 		s.mu.Lock()
 		now := time.Now().UTC()
 		s.progress.Running = false
 		s.progress.FinishedAt = &now
-		s.progress.Stopped = s.stopRequested
 		s.mu.Unlock()
 	}()
 
-	targets, err := s.store.ListScanTargets(profileID, sourceID, filter)
+	targets, err := s.store.ListScanTargets(profileID, sourceID)
 	if err != nil {
 		s.setError(fmt.Sprintf("load scan targets: %v", err))
 		return
@@ -147,10 +128,6 @@ func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Conn
 	s.mu.Unlock()
 
 	for _, target := range targets {
-		if s.shouldStop() {
-			return
-		}
-
 		suggestions := s.findCandidates(connector, target, sourceID)
 
 		if err := s.store.ReplacePendingSuggestions(target.TrackerID, sourceID, suggestions); err != nil {
