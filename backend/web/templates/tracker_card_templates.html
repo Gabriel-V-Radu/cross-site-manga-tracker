@@ -55,7 +55,7 @@ before, so a one-line change to a card meant editing it in five places.
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Set last read</button>
         <a class="mini-btn mini-btn--highlight"
-           href="{{.SourceURL}}"
+           href="{{if .HighlightURL}}{{.HighlightURL}}{{else}}{{.SourceURL}}{{end}}"
            target="_blank"
            rel="noopener noreferrer">Open</a>
         <button type="button"
@@ -194,7 +194,7 @@ before, so a one-line change to a card meant editing it in five places.
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Set last read</button>
         <a class="mini-btn mini-btn--highlight"
-           href="{{.SourceURL}}"
+           href="{{if .HighlightURL}}{{.HighlightURL}}{{else}}{{.SourceURL}}{{end}}"
            target="_blank"
            rel="noopener noreferrer">Highlight</a>
     </div>

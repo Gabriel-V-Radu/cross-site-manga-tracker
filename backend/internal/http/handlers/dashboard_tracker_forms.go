@@ -429,6 +429,10 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save reading site")
 	}
 
+	// The saved links or pin may differ from what the cached chapter URLs
+	// were computed against.
+	h.invalidateLinkLookups()
+
 	fullTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
 	if err != nil || fullTracker == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)

@@ -290,12 +290,14 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		// A pinned reading source narrows the chapter links to that one site:
 		// its resolved chapter page, its offline-built reader URL, or at worst
 		// its series page — never another site. Auto keeps the full chain.
+		pinned := pinnedReadingRef(item, sourceKey, alternates)
 		chapterKey, chapterBaseURL, chapterAlternates := sourceKey, item.SourceURL, alternates
-		if pinned := pinnedReadingRef(item, sourceKey, alternates); pinned != nil {
+		if pinned != nil {
 			chapterKey, chapterBaseURL, chapterAlternates = pinned.SourceKey, pinned.SourceURL, nil
 			card.LatestKnownChapterURL = pinned.SourceURL
 			card.LastReadChapterURL = pinned.SourceURL
 		}
+		card.HighlightURL = chapterBaseURL
 
 		if item.LatestKnownChapter != nil {
 			latestChapterURL, resolvedLatest, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
@@ -306,6 +308,19 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 			}
 			if waitingLatestChapterURL {
 				pendingCovers = true
+			}
+		}
+
+		// Under auto, point the open-to-read button at the same site the
+		// latest-chapter link lands on: a MangaUpdates-primary tracker whose
+		// chapters open on MangaFire should open its series there too.
+		if pinned == nil && latestChapterSourceKey != "" && latestChapterSourceKey != sourceKey {
+			for _, alternate := range alternates {
+				if strings.EqualFold(strings.TrimSpace(alternate.SourceKey), latestChapterSourceKey) &&
+					strings.TrimSpace(alternate.SourceURL) != "" {
+					card.HighlightURL = alternate.SourceURL
+					break
+				}
 			}
 		}
 

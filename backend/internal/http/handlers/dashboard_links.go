@@ -526,6 +526,7 @@ func (h *DashboardHandler) acceptSuggestion(profileID int64, suggestion reposito
 	if err := h.linkSuggestionRepo.DecideSuggestion(profileID, suggestion.ID, repository.LinkSuggestionAccepted); err != nil {
 		return err
 	}
+	h.invalidateLinkLookups()
 	return h.linkSuggestionRepo.RejectPendingSiblings(suggestion.TrackerID, suggestion.SourceID, suggestion.ID)
 }
 
@@ -667,6 +668,8 @@ func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID i
 	}); err != nil {
 		return nil, err
 	}
+
+	h.invalidateLinkLookups()
 	return linkedSource, nil
 }
 

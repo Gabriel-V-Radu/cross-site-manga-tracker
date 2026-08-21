@@ -493,6 +493,25 @@ func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey
 	h.cacheMu.Unlock()
 }
 
+// invalidateLinkLookups drops the chapter-URL cache and every negative cover
+// entry. Called whenever a tracker's linked sources or reading pin change: a
+// "no link found" computed before a source was attached would otherwise
+// outlive the attachment by its whole TTL, which reads as the new link not
+// working. Found covers stay — a new link cannot make a good cover worse.
+func (h *DashboardHandler) invalidateLinkLookups() {
+	h.chapterURLCacheMu.Lock()
+	h.chapterURLCache = make(map[string]chapterURLCacheEntry)
+	h.chapterURLCacheMu.Unlock()
+
+	h.cacheMu.Lock()
+	for key, entry := range h.coverCache {
+		if !entry.Found {
+			delete(h.coverCache, key)
+		}
+	}
+	h.cacheMu.Unlock()
+}
+
 // assetURL stamps a static asset's URL with its last-modified time. The static
 // handler sends no Cache-Control and no ETag, only Last-Modified, which leaves
 // browsers free to guess a freshness lifetime from the file's age — so a script

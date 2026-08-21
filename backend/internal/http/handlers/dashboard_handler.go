@@ -118,6 +118,10 @@ type trackerCardView struct {
 	SourceURL             string
 	LatestKnownChapterURL string
 	LastReadChapterURL    string
+	// HighlightURL is where the card's open-to-read button goes: the pinned
+	// reading site, or the site the latest-chapter link resolved to — not
+	// blindly the primary source, which may be a tracking-only site.
+	HighlightURL string
 	// Which site each chapter link actually opens. A card's links can land on
 	// different sites when one of them is unreadable, so each says where it goes
 	// rather than leaving the user to discover it by clicking.
