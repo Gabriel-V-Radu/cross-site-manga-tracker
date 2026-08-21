@@ -44,9 +44,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: []string{"mangabuddy1.co.uk"},
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		httpClient:  connectors.NewThrottledClient(20 * time.Second),
 	}
 }
 

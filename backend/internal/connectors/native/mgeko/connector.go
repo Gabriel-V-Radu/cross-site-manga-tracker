@@ -69,9 +69,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: []string{"mgeko.cc"},
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
+		httpClient:  connectors.NewThrottledClient(12 * time.Second),
 	}
 }
 

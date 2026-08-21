@@ -104,7 +104,7 @@ func newChromeHTTPClient(timeout time.Duration) *http.Client {
 		TLSHandshakeTimeout:   12 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	return &http.Client{Timeout: timeout, Jar: jar, Transport: transport}
+	return &http.Client{Timeout: timeout, Jar: jar, Transport: connectors.ThrottleTransport(transport)}
 }
 
 func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) {

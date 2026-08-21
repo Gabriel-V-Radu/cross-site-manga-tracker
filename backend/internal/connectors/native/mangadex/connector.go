@@ -29,9 +29,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		apiBaseURL:  "https://api.mangadex.org",
 		allowedHost: []string{"mangadex.org"},
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		httpClient:  connectors.NewThrottledClient(10 * time.Second),
 	}
 }
 

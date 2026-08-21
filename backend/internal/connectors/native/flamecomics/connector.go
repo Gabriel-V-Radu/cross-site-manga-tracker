@@ -43,9 +43,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     "https://flamecomics.xyz",
 		allowedHost: []string{"flamecomics.xyz"},
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
+		httpClient:  connectors.NewThrottledClient(12 * time.Second),
 	}
 }
 

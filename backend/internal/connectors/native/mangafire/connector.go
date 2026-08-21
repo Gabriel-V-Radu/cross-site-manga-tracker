@@ -52,10 +52,8 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     "https://mangafire.to",
 		allowedHost: []string{"mangafire.to"},
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
-		signer: newSigner(),
+		httpClient:  connectors.NewThrottledClient(12 * time.Second),
+		signer:      newSigner(),
 		// Cloudflare on mangafire.to blocks IPs that burst requests, so the
 		// live connector paces itself much more conservatively than the
 		// local test servers need.

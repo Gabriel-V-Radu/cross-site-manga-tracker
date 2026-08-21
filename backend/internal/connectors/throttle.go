@@ -1,0 +1,187 @@
+package connectors
+
+import (
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// The sites this app reads answer sustained bursts by putting up a bot
+// challenge, and one already has (MangaFire). Every native connector therefore
+// shares one transport-level throttle with two behaviours:
+//
+//   - pacing: requests to the same host are spaced at least hostRequestGap
+//     apart, whoever issues them (the poller, a dashboard page, a link scan);
+//   - a circuit breaker: after hostFailureThreshold consecutive failures a
+//     host is left alone for hostCooldown, so a site that has gone dark fails
+//     fast instead of eating a full timeout per tracker per cycle.
+//
+// The state is keyed by host, and no two connectors share a host, so one
+// shared throttler is equivalent to one per connector — minus eight copies.
+const (
+	hostRequestGap       = 1 * time.Second
+	hostFailureThreshold = 5
+	// hostCooldown matches the dashboard's lookupRetryTTL rationale: long
+	// enough to matter against a site that punishes hammering, short enough to
+	// recover from an ordinary outage within one sitting.
+	hostCooldown = 10 * time.Minute
+	// maxQueueWait caps how far behind the pacing queue a request will wait.
+	// A concurrent burst (a page of covers) would otherwise queue waits longer
+	// than any client timeout and sleep them off pointlessly; failing fast
+	// lets the caller's own retry/cache machinery deal with it.
+	maxQueueWait = 30 * time.Second
+)
+
+// SourceCoolingDownError is returned without touching the network while a
+// host's circuit breaker is open. Callers that want to distinguish "the site
+// refused us" from "we are deliberately not asking" can errors.As for it.
+type SourceCoolingDownError struct {
+	Host       string
+	RetryAfter time.Duration
+}
+
+func (e *SourceCoolingDownError) Error() string {
+	return fmt.Sprintf("%s is cooling down after repeated failures (retry in %s)", e.Host, e.RetryAfter.Round(time.Second))
+}
+
+type hostState struct {
+	nextAllowed         time.Time
+	consecutiveFailures int
+	blockedUntil        time.Time
+}
+
+type throttler struct {
+	gap              time.Duration
+	failureThreshold int
+	cooldown         time.Duration
+
+	mu    sync.Mutex
+	hosts map[string]*hostState
+}
+
+var defaultThrottler = &throttler{
+	gap:              hostRequestGap,
+	failureThreshold: hostFailureThreshold,
+	cooldown:         hostCooldown,
+	hosts:            map[string]*hostState{},
+}
+
+// reserve either admits a request — returning how long the caller must wait to
+// honour the host's pacing gap — or refuses it because the host is cooling
+// down. The slot is claimed under the lock, so concurrent callers queue up at
+// gap-length intervals instead of racing through together.
+func (t *throttler) reserve(host string, now time.Time) (time.Duration, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, ok := t.hosts[host]
+	if !ok {
+		state = &hostState{}
+		t.hosts[host] = state
+	}
+
+	if state.blockedUntil.After(now) {
+		return 0, &SourceCoolingDownError{Host: host, RetryAfter: state.blockedUntil.Sub(now)}
+	}
+
+	start := state.nextAllowed
+	if start.Before(now) {
+		start = now
+	}
+	if wait := start.Sub(now); wait > maxQueueWait {
+		// Refuse without claiming the slot, so the queue cannot grow past the
+		// cap. Not counted as a host failure — the host did nothing wrong.
+		return 0, &SourceCoolingDownError{Host: host, RetryAfter: wait}
+	}
+	state.nextAllowed = start.Add(t.gap)
+	return start.Sub(now), nil
+}
+
+// observe records a request's outcome. A refused or unreachable host opens the
+// circuit after failureThreshold consecutive failures; any success closes it.
+func (t *throttler) observe(host string, now time.Time, failed bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, ok := t.hosts[host]
+	if !ok {
+		state = &hostState{}
+		t.hosts[host] = state
+	}
+
+	if !failed {
+		state.consecutiveFailures = 0
+		return
+	}
+
+	state.consecutiveFailures++
+	if state.consecutiveFailures >= t.failureThreshold {
+		state.blockedUntil = now.Add(t.cooldown)
+		state.consecutiveFailures = 0
+	}
+}
+
+type throttledTransport struct {
+	base      http.RoundTripper
+	throttler *throttler
+}
+
+func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+
+	wait, err := t.throttler.reserve(host, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-timer.C:
+		}
+	}
+
+	res, err := t.base.RoundTrip(req)
+	t.throttler.observe(host, time.Now(), isThrottleFailure(res, err))
+	return res, err
+}
+
+// isThrottleFailure classifies an outcome for the circuit breaker. A 404 is a
+// valid answer (the series is gone), not a failing site; what opens the
+// circuit is the site being unreachable, refusing us, or dying server-side.
+func isThrottleFailure(res *http.Response, err error) bool {
+	if err != nil {
+		return true
+	}
+	switch {
+	case res.StatusCode == http.StatusForbidden,
+		res.StatusCode == http.StatusTooManyRequests,
+		res.StatusCode >= 500:
+		return true
+	default:
+		return false
+	}
+}
+
+// ThrottleTransport wraps base with the shared per-host throttle. Connectors
+// that need a custom transport (freewebnovel's TLS-fingerprint dialer) wrap it
+// here so their traffic is paced like everyone else's.
+func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &throttledTransport{base: base, throttler: defaultThrottler}
+}
+
+// NewThrottledClient is the client every connector's default constructor uses.
+// Tests keep injecting plain clients through the WithOptions constructors and
+// stay unpaced.
+func NewThrottledClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: ThrottleTransport(nil),
+	}
+}

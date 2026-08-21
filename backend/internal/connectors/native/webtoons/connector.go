@@ -64,9 +64,7 @@ func NewConnector() *Connector {
 		searchLocale: "en",
 		allowedHost:  []string{"webtoons.com"},
 		imageBaseURL: "https://swebtoon-phinf.pstatic.net",
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
+		httpClient:   connectors.NewThrottledClient(12 * time.Second),
 	}
 }
 

@@ -58,9 +58,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     "https://asurascans.com",
 		allowedHost: []string{"asurascans.com", "asuracomic.net"},
-		httpClient: &http.Client{
-			Timeout: 12 * time.Second,
-		},
+		httpClient:  connectors.NewThrottledClient(12 * time.Second),
 	}
 }
 
