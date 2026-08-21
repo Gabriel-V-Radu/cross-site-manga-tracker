@@ -1,11 +1,15 @@
 package handlers_test
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func TestLinksQueueAcceptFlow(t *testing.T) {
@@ -133,5 +137,79 @@ func TestLinksDismissRemovesFromQueue(t *testing.T) {
 	queueBody, _ := io.ReadAll(queueRes.Body)
 	if strings.Contains(string(queueBody), "Obscure Series") {
 		t.Fatalf("dismissed tracker still in queue: %s", queueBody)
+	}
+}
+
+// unreachableConnector stands in for a site behind a browser challenge: it is
+// registered, but every request fails.
+type unreachableConnector struct{ key string }
+
+func (u unreachableConnector) Key() string                       { return u.key }
+func (u unreachableConnector) Name() string                      { return u.key }
+func (u unreachableConnector) Kind() string                      { return connectors.KindNative }
+func (u unreachableConnector) HealthCheck(context.Context) error { return errors.New("blocked") }
+func (u unreachableConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, errors.New("blocked")
+}
+func (u unreachableConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	return nil, errors.New("behind a browser challenge")
+}
+
+// TestManualLinkAcceptsUnverifiableURL pins that the paste-a-URL fallback does
+// not gate on the site answering: the sites most worth hand-linking are the
+// ones this server cannot reach while the reader's browser can (MangaFire).
+func TestManualLinkAcceptsUnverifiableURL(t *testing.T) {
+	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
+		if err := registry.Register(unreachableConnector{key: "mangafire"}); err != nil {
+			t.Fatalf("register unreachable connector: %v", err)
+		}
+	})
+	defer cleanup()
+
+	var weebcentralID, mangadexID, mangafireID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'weebcentral'`).Scan(&weebcentralID); err != nil {
+		t.Fatalf("look up weebcentral source: %v", err)
+	}
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangadex'`).Scan(&mangadexID); err != nil {
+		t.Fatalf("look up mangadex source: %v", err)
+	}
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangafire'`).Scan(&mangafireID); err != nil {
+		t.Fatalf("look up mangafire source: %v", err)
+	}
+
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+		VALUES (1, 'Series', ?, 'https://mangadex.org/title/abc', 'reading')
+	`, mangadexID)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+	trackerID, _ := result.LastInsertId()
+
+	form := url.Values{"url": {"https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi"}}
+	req := httptest.NewRequest("POST",
+		"/dashboard/links/trackers/"+toString(int(trackerID))+"/manual?source="+toString(int(weebcentralID)),
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("manual link request: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 {
+		t.Fatalf("manual link status = %d: %s", res.StatusCode, body)
+	}
+	if strings.Contains(string(body), "Could not verify") {
+		t.Fatalf("unreachable site must not block the manual link: %s", body)
+	}
+
+	var linkedURL string
+	if err := db.QueryRow(`
+		SELECT source_url FROM tracker_sources WHERE tracker_id = ? AND source_id = ?
+	`, trackerID, mangafireID).Scan(&linkedURL); err != nil {
+		t.Fatalf("expected the pasted URL to be linked: %v", err)
+	}
+	if linkedURL != "https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi" {
+		t.Fatalf("linked url = %q", linkedURL)
 	}
 }

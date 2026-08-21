@@ -602,6 +602,13 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 	attempted := false
 	var lastErr error
 
+	// A reader URL some connector can construct without the network. Kept as
+	// the second-best answer: a resolved URL is verified to exist, a built one
+	// is a well-founded guess — worth having when every resolution fails
+	// because the readable site sits behind a browser challenge the server
+	// cannot pass while the reader's own browser can (MangaFire).
+	guessedURL := ""
+
 	for _, candidate := range candidates {
 		candidateKey := strings.TrimSpace(candidate.SourceKey)
 		candidateURL := strings.TrimSpace(candidate.SourceURL)
@@ -613,6 +620,14 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 		if !ok {
 			lastErr = fmt.Errorf("connector not found")
 			continue
+		}
+
+		if guessedURL == "" {
+			if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
+				if built, buildOK := linker.BuildChapterURL(candidateURL, chapter); buildOK {
+					guessedURL = built
+				}
+			}
 		}
 
 		resolver, ok := connector.(connectors.ChapterURLResolver)
@@ -634,6 +649,14 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 
 		h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
 		return chapterURL, nil
+	}
+
+	if guessedURL != "" {
+		// Cached for the retry span, not the full 12 hours: once the site
+		// answers the server again, a verified resolution should replace the
+		// guess soon rather than a day later.
+		h.setCachedChapterURL(cacheKey, guessedURL, true, jitteredTTL(lookupRetryTTL))
+		return guessedURL, nil
 	}
 
 	negativeTTL := lookupUnreachableTTL

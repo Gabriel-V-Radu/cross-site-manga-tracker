@@ -614,20 +614,23 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "That site is not registered as a source.")
 	}
 
+	// Verification is best-effort, not a gate: the sites most worth linking by
+	// hand are exactly the ones this server cannot reach (MangaFire behind its
+	// browser challenge) while the reader's own browser can. The host already
+	// mapped to a registered connector; if the site refuses to confirm the
+	// URL, it is linked as pasted and the connector canonicalizes it whenever
+	// the site answers again.
 	ctx, cancel := context.WithTimeout(c.Context(), 15*time.Second)
 	defer cancel()
-	resolved, err := connector.ResolveByURL(ctx, rawURL)
-	if err != nil {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Could not verify that URL: "+err.Error())
-	}
-
-	canonicalURL := strings.TrimSpace(resolved.URL)
-	if canonicalURL == "" {
-		canonicalURL = rawURL
-	}
+	canonicalURL := rawURL
 	var itemID *string
-	if resolvedItemID := strings.TrimSpace(resolved.SourceItemID); resolvedItemID != "" {
-		itemID = &resolvedItemID
+	if resolved, err := connector.ResolveByURL(ctx, rawURL); err == nil && resolved != nil {
+		if resolvedURL := strings.TrimSpace(resolved.URL); resolvedURL != "" {
+			canonicalURL = resolvedURL
+		}
+		if resolvedItemID := strings.TrimSpace(resolved.SourceItemID); resolvedItemID != "" {
+			itemID = &resolvedItemID
+		}
 	}
 
 	if err := h.trackerRepo.UpsertTrackerSource(profile.ID, trackerID, models.TrackerSource{

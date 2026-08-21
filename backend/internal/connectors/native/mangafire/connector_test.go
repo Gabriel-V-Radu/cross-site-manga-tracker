@@ -385,3 +385,63 @@ func TestMangaFireConnectorCoolsDownAfterForbidden(t *testing.T) {
 		t.Fatalf("expected no additional requests while cooling down, got %d", requests)
 	}
 }
+
+// TestBuildChapterURL pins the offline reader-URL construction: the scheme the
+// site serves readers on, derivable from a stored series URL with no network.
+func TestBuildChapterURL(t *testing.T) {
+	connector := NewConnector()
+
+	cases := []struct {
+		name    string
+		url     string
+		chapter float64
+		want    string
+		wantOK  bool
+	}{
+		{
+			name:    "current title url",
+			url:     "https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi",
+			chapter: 177,
+			want:    "https://mangafire.to/read/kyou-kara-hajimeru-osananajimi.l3z6m/en/chapter-177",
+			wantOK:  true,
+		},
+		{
+			name:    "decimal chapter",
+			url:     "https://mangafire.to/title/dkw-one-piece",
+			chapter: 1044.5,
+			want:    "https://mangafire.to/read/one-piece.dkw/en/chapter-1044.5",
+			wantOK:  true,
+		},
+		{
+			name:    "legacy url falls back to a cosmetic slug",
+			url:     "https://mangafire.to/manga/one-piece.dkw",
+			chapter: 3,
+			want:    "https://mangafire.to/read/title.dkw/en/chapter-3",
+			wantOK:  true,
+		},
+		{
+			name:    "foreign host refused",
+			url:     "https://example.com/title/dkw-one-piece",
+			chapter: 3,
+			wantOK:  false,
+		},
+		{
+			name:    "invalid chapter refused",
+			url:     "https://mangafire.to/title/dkw-one-piece",
+			chapter: 0,
+			wantOK:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := connector.BuildChapterURL(tc.url, tc.chapter)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("url = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

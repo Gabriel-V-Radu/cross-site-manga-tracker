@@ -479,3 +479,57 @@ func TestJitteredTTLStaysWithinItsBand(t *testing.T) {
 		t.Fatalf("expected a zero span to stay zero, got %s", got)
 	}
 }
+
+// blockedLinkableConnector is a blocked source that can still construct its
+// reader URLs offline, the way the MangaFire connector can.
+type blockedLinkableConnector struct{ blockedConnector }
+
+func (b blockedLinkableConnector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
+	return rawURL + "/read/chapter-" + strconv.FormatFloat(chapter, 'f', -1, 64), true
+}
+
+// TestFetchChapterURLFallsBackToOfflineGuess covers the reader whose fresh
+// chapter number came from a tracking-only source while every readable site
+// is unresolvable server-side: the constructed reader link is served rather
+// than nothing, because the reader's own browser can pass the challenge.
+func TestFetchChapterURLFallsBackToOfflineGuess(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
+		t.Fatalf("register blocked linkable connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+
+	chapterURL, err := h.fetchChapterURL("blockedsource", "https://blocked.example/title/a", 177, nil)
+	if err != nil {
+		t.Fatalf("expected the offline guess to be served: %v", err)
+	}
+	if chapterURL != "https://blocked.example/title/a/read/chapter-177" {
+		t.Fatalf("unexpected guessed url %q", chapterURL)
+	}
+}
+
+// TestFetchChapterURLPrefersResolvedOverOfflineGuess pins the ranking: a URL a
+// live site confirmed to exist beats a constructed one.
+func TestFetchChapterURLPrefersResolvedOverOfflineGuess(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
+		t.Fatalf("register blocked linkable connector: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "mirrorsource"}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
+	}
+
+	chapterURL, err := h.fetchChapterURL("blockedsource", "https://blocked.example/title/a", 12, alternates)
+	if err != nil {
+		t.Fatalf("expected the mirror to resolve: %v", err)
+	}
+	if chapterURL != "https://mirror.example/series/a.ZD1/chapter-12" {
+		t.Fatalf("expected the resolved url to win over the guess, got %q", chapterURL)
+	}
+}

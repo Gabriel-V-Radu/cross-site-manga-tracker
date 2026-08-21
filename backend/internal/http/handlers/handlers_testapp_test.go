@@ -9,12 +9,21 @@ import (
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
 	"github.com/gofiber/fiber/v2"
 )
 
 func setupTestApp(t *testing.T) (*sql.DB, *fiber.App, func()) {
+	t.Helper()
+	return setupTestAppWithRegistry(t, nil)
+}
+
+// setupTestAppWithRegistry builds the app around a custom connector registry,
+// for tests that need a connector with a known key to behave a chosen way
+// (e.g. an unreachable "mangafire") without touching the network.
+func setupTestAppWithRegistry(t *testing.T, configure func(*connectors.Registry)) (*sql.DB, *fiber.App, func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -51,7 +60,14 @@ func setupTestApp(t *testing.T) (*sql.DB, *fiber.App, func()) {
 	}
 
 	cfg := config.Config{AppName: "test-app"}
-	app := apihttp.NewServer(cfg, db)
+	var app *fiber.App
+	if configure != nil {
+		registry := connectors.NewRegistry()
+		configure(registry)
+		app = apihttp.NewServerWithRegistry(cfg, db, registry)
+	} else {
+		app = apihttp.NewServer(cfg, db)
+	}
 
 	cleanup := func() {
 		_ = app.Shutdown()

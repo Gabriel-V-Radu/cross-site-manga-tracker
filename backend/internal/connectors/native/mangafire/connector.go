@@ -282,6 +282,31 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	return "https://mangafire.to/title/" + titleKey(hid, slug) + "/" + strconv.FormatInt(match.ID, 10), nil
 }
 
+// BuildChapterURL constructs the site's reader URL for a chapter without any
+// network access: https://mangafire.to/read/{slug}.{hid}/en/chapter-{n}. The
+// site routes readers on the id after the dot (the slug is cosmetic — the
+// same reason parseTitleURL trusts only the id on legacy URLs), so the link
+// works even when the stored slug drifts from the site's. It is a best-effort
+// guess that the chapter exists: it serves trackers whose fresh chapter came
+// from a tracking-only source while mangafire.to sits behind a browser
+// challenge this server cannot pass but the reader's own browser can.
+func (c *Connector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
+	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+		return "", false
+	}
+
+	hid, slug, err := c.parseTitleURL(rawURL)
+	if err != nil || hid == "" {
+		return "", false
+	}
+	if slug == "" {
+		slug = "title"
+	}
+
+	return "https://mangafire.to/read/" + slug + "." + hid + "/en/chapter-" +
+		strconv.FormatFloat(chapter, 'f', -1, 64), true
+}
+
 // parseTitleURL extracts the title hid (and slug when present) from both the
 // current /title/{hid}-{slug} URLs and the legacy /manga/{slug}.{hid} and
 // /read/{slug}.{hid}/... URLs that existing trackers still have stored.

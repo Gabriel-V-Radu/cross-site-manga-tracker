@@ -32,3 +32,12 @@ type Connector interface {
 type ChapterURLResolver interface {
 	ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error)
 }
+
+// OfflineChapterLinker builds a best-effort reader URL for a chapter from the
+// series URL alone, without touching the network. It exists for sites whose
+// reader URL scheme is derivable but whose API sits behind a bot challenge
+// the server cannot pass while a human's browser can: the constructed link is
+// not verified to exist, which is why resolved URLs always take precedence.
+type OfflineChapterLinker interface {
+	BuildChapterURL(rawURL string, chapter float64) (string, bool)
+}
