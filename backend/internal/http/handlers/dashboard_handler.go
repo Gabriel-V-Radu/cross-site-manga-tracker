@@ -8,6 +8,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/linkscan"
+	"github.com/gabriel/cross-site-tracker/backend/internal/mangabaka"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
@@ -204,7 +205,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		sourceRepo:         repository.NewSourceRepository(db),
 		profileRepo:        repository.NewProfileRepository(db),
 		linkSuggestionRepo: linkSuggestionRepo,
-		linkScanner:        linkscan.NewScanner(linkSuggestionRepo, registry, nil),
+		linkScanner:        linkscan.NewScanner(linkSuggestionRepo, registry, mangabaka.NewClient(), nil),
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,
 		coverCache:         make(map[string]coverCacheEntry),

@@ -3,6 +3,7 @@ package repository_test
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
@@ -178,6 +179,39 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 	}
 	if len(targets) != 0 {
 		t.Fatalf("scan targets after accept = %+v, want empty", targets)
+	}
+}
+
+func TestMergeRelatedTitlesUnionsAndFilters(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	trackerID := seedLinkTracker(t, db, "series")
+
+	if _, err := db.Exec(`UPDATE trackers SET related_titles = '["Existing Name"]' WHERE id = ?`, trackerID); err != nil {
+		t.Fatalf("seed related titles: %v", err)
+	}
+
+	if err := repo.MergeRelatedTitles(trackerID, []string{
+		"Existing Name",   // duplicate, must not double up
+		"New Alt Name",    // survives
+		"나노마신",            // non-Latin, filtered
+		"  ",              // empty, filtered
+	}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	var raw string
+	if err := db.QueryRow(`SELECT related_titles FROM trackers WHERE id = ?`, trackerID).Scan(&raw); err != nil {
+		t.Fatalf("read merged titles: %v", err)
+	}
+	if !strings.Contains(raw, "Existing Name") || !strings.Contains(raw, "New Alt Name") {
+		t.Fatalf("merged titles = %s", raw)
+	}
+	if strings.Contains(raw, "나노마신") {
+		t.Fatalf("non-Latin title leaked: %s", raw)
+	}
+	if strings.Count(raw, "Existing Name") != 1 {
+		t.Fatalf("duplicate not collapsed: %s", raw)
 	}
 }
 

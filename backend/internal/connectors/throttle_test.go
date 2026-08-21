@@ -80,6 +80,29 @@ func TestThrottlerSuccessResetsFailureStreak(t *testing.T) {
 	}
 }
 
+func TestThrottlerHonorsHostGapOverride(t *testing.T) {
+	th := newTestThrottler()
+	th.gapOverrides = map[string]time.Duration{"slow.example": 5 * time.Second}
+	now := time.Unix(1000, 0)
+
+	if _, err := th.reserve("slow.example", now); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	wait, err := th.reserve("slow.example", now)
+	if err != nil || wait != 5*time.Second {
+		t.Fatalf("override gap = %v err=%v, want 5s", wait, err)
+	}
+
+	// Other hosts keep the default gap.
+	if _, err := th.reserve("fast.example", now); err != nil {
+		t.Fatalf("fast host first request: %v", err)
+	}
+	wait, err = th.reserve("fast.example", now)
+	if err != nil || wait != time.Second {
+		t.Fatalf("default gap = %v err=%v, want 1s", wait, err)
+	}
+}
+
 func TestThrottlerCapsQueueWait(t *testing.T) {
 	th := newTestThrottler()
 	now := time.Unix(1000, 0)

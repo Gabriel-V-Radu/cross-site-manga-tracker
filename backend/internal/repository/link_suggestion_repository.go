@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 // Suggestion lifecycle. Pending rows are the review queue; decided rows are
@@ -325,6 +327,42 @@ func (r *LinkSuggestionRepository) RejectPendingSiblings(trackerID int64, source
 	`, trackerID, sourceID, exceptID)
 	if err != nil {
 		return fmt.Errorf("reject pending siblings: %w", err)
+	}
+	return nil
+}
+
+// MergeRelatedTitles unions new alternate titles into a tracker's stored set.
+// The link scan calls it when a metadata aggregator confirms a series' other
+// names: those names make every future scan and dashboard search match better,
+// so they are worth keeping once learned.
+func (r *LinkSuggestionRepository) MergeRelatedTitles(trackerID int64, titles []string) error {
+	incoming := searchutil.FilterEnglishAlphabetNames(titles)
+	if len(incoming) == 0 {
+		return nil
+	}
+
+	var existingRaw sql.NullString
+	if err := r.db.QueryRow(`SELECT related_titles FROM trackers WHERE id = ?`, trackerID).Scan(&existingRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("read related titles: %w", err)
+	}
+
+	existing := []string{}
+	if existingRaw.Valid {
+		existing = decodeRelatedTitlesJSON(existingRaw.String)
+	}
+	merged := sanitizeRelatedTitles(append(existing, incoming...))
+	if len(merged) == len(sanitizeRelatedTitles(existing)) {
+		return nil
+	}
+
+	encoded := encodeRelatedTitlesJSON(merged)
+	if _, err := r.db.Exec(`
+		UPDATE trackers SET related_titles = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, encoded, trackerID); err != nil {
+		return fmt.Errorf("write related titles: %w", err)
 	}
 	return nil
 }

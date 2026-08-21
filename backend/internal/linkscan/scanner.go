@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gabriel/cross-site-tracker/backend/internal/mangabaka"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
+	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 // minKeepScore is the floor below which a search hit is not even worth showing
@@ -43,22 +45,32 @@ type Progress struct {
 type suggestionStore interface {
 	ListScanTargets(profileID int64, sourceID int64) ([]repository.LinkScanTarget, error)
 	ReplacePendingSuggestions(trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
+	MergeRelatedTitles(trackerID int64, titles []string) error
+}
+
+// AidLookup is the metadata aggregator consulted per tracker before searching
+// the source itself — in production, MangaBaka. A confirmed record contributes
+// every alternate title the series has (better scoring, better queries) and
+// the series' MangaUpdates id (an exact link instead of a fuzzy search).
+type AidLookup interface {
+	Search(ctx context.Context, query string, limit int) ([]mangabaka.Series, error)
 }
 
 type Scanner struct {
 	store    suggestionStore
 	registry *connectors.Registry
+	aid      AidLookup
 	logger   *slog.Logger
 
 	mu       sync.Mutex
 	progress Progress
 }
 
-func NewScanner(store suggestionStore, registry *connectors.Registry, logger *slog.Logger) *Scanner {
+func NewScanner(store suggestionStore, registry *connectors.Registry, aid AidLookup, logger *slog.Logger) *Scanner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Scanner{store: store, registry: registry, logger: logger}
+	return &Scanner{store: store, registry: registry, aid: aid, logger: logger}
 }
 
 // Start launches a scan in the background. Only one scan runs at a time — the
@@ -135,16 +147,38 @@ func (s *Scanner) setError(message string) {
 }
 
 // findCandidates searches the source for one tracker and scores what comes
-// back. The tracker's title is tried first; its known alternate titles cover
-// the case where the source catalogs the series under another language's name.
+// back. A metadata-aggregator lookup runs first: a confirmed record widens
+// the title set candidates are scored against, and on MangaUpdates it skips
+// the fuzzy search entirely in favour of the record's exact series id.
 func (s *Scanner) findCandidates(connector connectors.Connector, target repository.LinkScanTarget, sourceID int64) []repository.LinkSuggestion {
 	wanted := append([]string{target.Title}, target.RelatedTitles...)
 
+	if aid := s.lookupAid(target); aid != nil {
+		wanted = searchutil.UniqueNonEmpty(append(wanted, aid.Titles...))
+		// Names learned from a confirmed record outlive this scan: they make
+		// every future scan and dashboard search match better.
+		if err := s.store.MergeRelatedTitles(target.TrackerID, aid.Titles); err != nil {
+			s.logger.Warn("merge related titles failed", "trackerId", target.TrackerID, "error", err)
+		}
+
+		if connector.Key() == "mangaupdates" {
+			if suggestion := s.directSuggestion(connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
+				return []repository.LinkSuggestion{*suggestion}
+			}
+		}
+	}
+
 	queries := []string{target.Title}
-	// One alternate-title query is enough of a second chance: every extra
-	// query multiplies a full-library scan's request count.
-	if len(target.RelatedTitles) > 0 {
-		queries = append(queries, target.RelatedTitles[0])
+	// A couple of alternate-title queries are enough of a second chance:
+	// every extra query multiplies a full-library scan's request count.
+	for _, alternate := range searchutil.FilterEnglishAlphabetNames(wanted) {
+		if len(queries) >= 3 {
+			break
+		}
+		if searchutil.Normalize(alternate) == searchutil.Normalize(target.Title) {
+			continue
+		}
+		queries = append(queries, alternate)
 	}
 
 	seen := map[string]struct{}{}
@@ -207,6 +241,73 @@ func (s *Scanner) findCandidates(connector connectors.Connector, target reposito
 	}
 
 	return best
+}
+
+// lookupAid asks the aggregator about the tracker and returns its record only
+// on an exact normalized title match — a wrong record would poison both the
+// scoring set and the id link, so near matches are not good enough.
+func (s *Scanner) lookupAid(target repository.LinkScanTarget) *mangabaka.Series {
+	if s.aid == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), perRequestTimeout)
+	defer cancel()
+
+	results, err := s.aid.Search(ctx, target.Title, 8)
+	if err != nil {
+		s.logger.Debug("aggregator lookup failed", "title", target.Title, "error", err)
+		return nil
+	}
+
+	trackerTitles := map[string]struct{}{}
+	for _, title := range append([]string{target.Title}, target.RelatedTitles...) {
+		if normalized := searchutil.Normalize(title); normalized != "" {
+			trackerTitles[normalized] = struct{}{}
+		}
+	}
+
+	for index, series := range results {
+		for _, title := range series.Titles {
+			if _, ok := trackerTitles[searchutil.Normalize(title)]; ok {
+				return &results[index]
+			}
+		}
+	}
+	return nil
+}
+
+// directSuggestion resolves a known series URL on the source and wraps it as
+// the tracker's single, exact suggestion. Returns nil when there is no URL or
+// the source cannot confirm it, letting the caller fall back to searching.
+func (s *Scanner) directSuggestion(connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, url string) *repository.LinkSuggestion {
+	if strings.TrimSpace(url) == "" {
+		return nil
+	}
+	resolved := s.resolve(connector, url)
+	if resolved == nil {
+		return nil
+	}
+
+	suggestion := repository.LinkSuggestion{
+		TrackerID:      target.TrackerID,
+		SourceID:       sourceID,
+		CandidateURL:   strings.TrimSpace(resolved.URL),
+		CandidateTitle: strings.TrimSpace(resolved.Title),
+		Score:          1.0,
+	}
+	if suggestion.CandidateURL == "" {
+		suggestion.CandidateURL = url
+	}
+	if itemID := strings.TrimSpace(resolved.SourceItemID); itemID != "" {
+		suggestion.CandidateItemID = &itemID
+	}
+	if cover := strings.TrimSpace(resolved.CoverImageURL); cover != "" {
+		suggestion.CandidateCoverURL = &cover
+	}
+	suggestion.CandidateLatestChapter = resolved.LatestChapter
+	suggestion.CandidateReleaseAt = resolved.LastUpdatedAt
+	return &suggestion
 }
 
 func (s *Scanner) search(connector connectors.Connector, query string) []connectors.MangaResult {

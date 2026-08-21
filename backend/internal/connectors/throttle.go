@@ -33,6 +33,13 @@ const (
 	maxQueueWait = 30 * time.Second
 )
 
+// hostGapOverrides widens the pacing gap for hosts whose published limits are
+// tighter than the default. MangaBaka caps search at 30 requests/minute per
+// IP; 2.5s keeps a title-by-title link scan safely under it.
+var hostGapOverrides = map[string]time.Duration{
+	"api.mangabaka.org": 2500 * time.Millisecond,
+}
+
 // SourceCoolingDownError is returned without touching the network while a
 // host's circuit breaker is open. Callers that want to distinguish "the site
 // refused us" from "we are deliberately not asking" can errors.As for it.
@@ -53,6 +60,7 @@ type hostState struct {
 
 type throttler struct {
 	gap              time.Duration
+	gapOverrides     map[string]time.Duration
 	failureThreshold int
 	cooldown         time.Duration
 
@@ -60,8 +68,16 @@ type throttler struct {
 	hosts map[string]*hostState
 }
 
+func (t *throttler) gapFor(host string) time.Duration {
+	if override, ok := t.gapOverrides[host]; ok {
+		return override
+	}
+	return t.gap
+}
+
 var defaultThrottler = &throttler{
 	gap:              hostRequestGap,
+	gapOverrides:     hostGapOverrides,
 	failureThreshold: hostFailureThreshold,
 	cooldown:         hostCooldown,
 	hosts:            map[string]*hostState{},
@@ -94,7 +110,7 @@ func (t *throttler) reserve(host string, now time.Time) (time.Duration, error) {
 		// cap. Not counted as a host failure — the host did nothing wrong.
 		return 0, &SourceCoolingDownError{Host: host, RetryAfter: wait}
 	}
-	state.nextAllowed = start.Add(t.gap)
+	state.nextAllowed = start.Add(t.gapFor(host))
 	return start.Sub(now), nil
 }
 
