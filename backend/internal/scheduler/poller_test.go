@@ -11,30 +11,283 @@ import (
 )
 
 type fakeRepo struct {
-	items             []repository.PollingTracker
-	updatedCount      int
-	updatedItemID     *string
-	updatedURL        string
-	updatedLatest     *float64
-	updatedAt         *time.Time
-	updatedSourceID   int64
-	updatedCurrentURL string
-	clearedReleaseAt  bool
+	items               []repository.PollingTracker
+	updatedCount        int
+	updatedItemID       *string
+	updatedURL          string
+	updatedLatest       *float64
+	updatedAt           *time.Time
+	updatedSourceID     int64
+	updatedCurrentURL   string
+	clearedReleaseAt    bool
+	updatedPendingLower *float64
 }
 
 func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(_ int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, _ bool, _ time.Time) error {
+func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
 	f.updatedCount++
-	f.updatedItemID = sourceItemID
-	f.updatedURL = sourceURL
-	f.updatedLatest = latestKnownChapter
-	f.updatedAt = latestReleaseAt
-	f.updatedSourceID = sourceID
-	f.updatedCurrentURL = currentSourceURL
+	f.updatedItemID = update.SourceItemID
+	f.updatedURL = update.SourceURL
+	f.updatedLatest = update.LatestKnownChapter
+	f.updatedAt = update.LatestReleaseAt
+	f.updatedSourceID = update.SourceID
+	f.updatedCurrentURL = update.CurrentSourceURL
+	f.clearedReleaseAt = update.ClearLatestReleaseAt
+	f.updatedPendingLower = update.PendingLowerChapter
 	return nil
+}
+
+func chapterPtr(value float64) *float64 { return &value }
+
+// TestDecideChapter covers reconciling a reported chapter against the stored one.
+// The two failure modes pull in opposite directions: a mirror that lags must not
+// walk a tracker backwards, while a stored number that is simply wrong must not
+// stay frozen forever. MangaFire produced the second case by reporting the
+// highest chapter in any language, leaving trackers holding a raw-Japanese number
+// no English mirror could ever correct.
+func TestDecideChapter(t *testing.T) {
+	const window = 24 * time.Hour
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	longAgo := now.Add(-48 * time.Hour)
+	recently := now.Add(-1 * time.Hour)
+
+	cases := []struct {
+		name             string
+		stored           *float64
+		lastRead         *float64
+		pending          *float64
+		pendingSeenAt    *time.Time
+		reported         *float64
+		usedFallback     bool
+		wantLatest       *float64
+		wantPendingLower *float64
+		wantCorrected    bool
+	}{
+		{
+			name:       "nothing reported keeps the stored number",
+			stored:     chapterPtr(302),
+			reported:   nil,
+			wantLatest: chapterPtr(302),
+		},
+		{
+			name:       "no stored number takes whatever is reported",
+			reported:   chapterPtr(176),
+			wantLatest: chapterPtr(176),
+		},
+		{
+			name:         "a fallback advance is applied",
+			stored:       chapterPtr(53),
+			reported:     chapterPtr(57),
+			usedFallback: true,
+			wantLatest:   chapterPtr(57),
+		},
+		{
+			name:             "an advance clears a pending correction",
+			stored:           chapterPtr(53),
+			pending:          chapterPtr(50),
+			pendingSeenAt:    &longAgo,
+			reported:         chapterPtr(57),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(57),
+			wantPendingLower: nil,
+		},
+		{
+			name:             "agreement clears a pending correction",
+			stored:           chapterPtr(176),
+			pending:          chapterPtr(170),
+			pendingSeenAt:    &longAgo,
+			reported:         chapterPtr(176),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(176),
+			wantPendingLower: nil,
+		},
+		{
+			name:             "a first lower report is remembered, not applied",
+			stored:           chapterPtr(302),
+			reported:         chapterPtr(176),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(302),
+			wantPendingLower: chapterPtr(176),
+		},
+		{
+			name:             "a lower report still inside the window is not applied",
+			stored:           chapterPtr(302),
+			pending:          chapterPtr(176),
+			pendingSeenAt:    &recently,
+			reported:         chapterPtr(176),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(302),
+			wantPendingLower: chapterPtr(176),
+		},
+		{
+			name:          "a lower report confirmed past the window is applied",
+			stored:        chapterPtr(302),
+			pending:       chapterPtr(176),
+			pendingSeenAt: &longAgo,
+			reported:      chapterPtr(176),
+			usedFallback:  true,
+			wantLatest:    chapterPtr(176),
+			wantCorrected: true,
+		},
+		{
+			name:             "a different lower report restarts confirmation",
+			stored:           chapterPtr(302),
+			pending:          chapterPtr(176),
+			pendingSeenAt:    &longAgo,
+			reported:         chapterPtr(170),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(302),
+			wantPendingLower: chapterPtr(170),
+		},
+		{
+			name:          "a primary source corrects downwards immediately",
+			stored:        chapterPtr(302),
+			reported:      chapterPtr(176),
+			usedFallback:  false,
+			wantLatest:    chapterPtr(176),
+			wantCorrected: true,
+		},
+		{
+			name:          "a correction is clamped at the read position",
+			stored:        chapterPtr(302),
+			lastRead:      chapterPtr(200),
+			pending:       chapterPtr(176),
+			pendingSeenAt: &longAgo,
+			reported:      chapterPtr(176),
+			usedFallback:  true,
+			wantLatest:    chapterPtr(200),
+			wantCorrected: true,
+		},
+		{
+			name:       "a correction entirely below the read position is refused",
+			stored:     chapterPtr(302),
+			lastRead:   chapterPtr(302),
+			reported:   chapterPtr(176),
+			wantLatest: chapterPtr(302),
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tracker := repository.PollingTracker{
+				LatestKnownChapter:      testCase.stored,
+				LastReadChapter:         testCase.lastRead,
+				PendingLowerChapter:     testCase.pending,
+				PendingLowerFirstSeenAt: testCase.pendingSeenAt,
+			}
+
+			got := decideChapter(tracker, testCase.reported, testCase.usedFallback, now, window)
+
+			assertChapter(t, "latest", got.latest, testCase.wantLatest)
+			assertChapter(t, "pendingLower", got.pendingLower, testCase.wantPendingLower)
+			if got.corrected != testCase.wantCorrected {
+				t.Fatalf("expected corrected=%v, got %v", testCase.wantCorrected, got.corrected)
+			}
+		})
+	}
+}
+
+func assertChapter(t *testing.T, label string, got *float64, want *float64) {
+	t.Helper()
+	switch {
+	case want == nil && got == nil:
+		return
+	case want == nil:
+		t.Fatalf("expected %s to be unset, got %.1f", label, *got)
+	case got == nil:
+		t.Fatalf("expected %s to be %.1f, got unset", label, *want)
+	case *got != *want:
+		t.Fatalf("expected %s to be %.1f, got %.1f", label, *want, *got)
+	}
+}
+
+// TestPollerRunOnce_RecordsPendingLowerChapter proves the decision reaches the
+// repository: a lagging mirror leaves the stored number alone but its report is
+// persisted, which is what lets a later poll confirm it.
+func TestPollerRunOnce_RecordsPendingLowerChapter(t *testing.T) {
+	stored := 302.0
+	reported := 176.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &stored,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &reported,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the stored chapter to survive the first lower report, got %#v", repo.updatedLatest)
+	}
+	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != reported {
+		t.Fatalf("expected the lower report to be recorded as pending, got %#v", repo.updatedPendingLower)
+	}
+}
+
+// TestPollerRunOnce_AppliesConfirmedLowerChapter is the same tracker one window
+// later: the mirror has kept saying the same thing, so the wrong stored number is
+// finally replaced instead of staying frozen.
+func TestPollerRunOnce_AppliesConfirmedLowerChapter(t *testing.T) {
+	stored := 302.0
+	reported := 176.0
+	pending := 176.0
+	firstSeen := time.Now().UTC().Add(-48 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                      1,
+		Title:                   "A",
+		Status:                  "reading",
+		SourceURL:               "https://blocked/series",
+		SourceKey:               "blockedsource",
+		LatestKnownChapter:      &stored,
+		PendingLowerChapter:     &pending,
+		PendingLowerFirstSeenAt: &firstSeen,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &reported,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute, LowerConfirmationDelay: 24 * time.Hour}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != reported {
+		t.Fatalf("expected the confirmed correction to be applied, got %#v", repo.updatedLatest)
+	}
+	if repo.updatedPendingLower != nil {
+		t.Fatalf("expected the pending record to be cleared once applied, got %#v", repo.updatedPendingLower)
+	}
 }
 
 // scriptedConnector is a connector with a chosen key that either fails or

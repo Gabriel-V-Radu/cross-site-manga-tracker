@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
@@ -232,7 +231,9 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 	query := `
 		SELECT
-			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url, t.latest_known_chapter, t.latest_release_at, s.key, t.last_checked_at
+			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
+			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
+			t.pending_lower_chapter, t.pending_lower_first_seen_at
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
 	`
@@ -248,9 +249,16 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		var item PollingTracker
 		var sourceItemID sql.NullString
 		var latest sql.NullFloat64
+		var lastRead sql.NullFloat64
 		var latestReleaseAt sql.NullTime
 		var lastCheckedAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL, &latest, &latestReleaseAt, &item.SourceKey, &lastCheckedAt); err != nil {
+		var pendingLower sql.NullFloat64
+		var pendingLowerSeenAt sql.NullTime
+		if err := rows.Scan(
+			&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
+			&latest, &lastRead, &latestReleaseAt, &item.SourceKey, &lastCheckedAt,
+			&pendingLower, &pendingLowerSeenAt,
+		); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
 		}
 		if sourceItemID.Valid {
@@ -259,6 +267,9 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		if latest.Valid {
 			item.LatestKnownChapter = &latest.Float64
 		}
+		if lastRead.Valid {
+			item.LastReadChapter = &lastRead.Float64
+		}
 		if latestReleaseAt.Valid {
 			releaseAt := latestReleaseAt.Time.UTC()
 			item.LatestReleaseAt = &releaseAt
@@ -266,6 +277,13 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		if lastCheckedAt.Valid {
 			checkedAt := lastCheckedAt.Time.UTC()
 			item.LastCheckedAt = &checkedAt
+		}
+		if pendingLower.Valid {
+			item.PendingLowerChapter = &pendingLower.Float64
+		}
+		if pendingLowerSeenAt.Valid {
+			seenAt := pendingLowerSeenAt.Time.UTC()
+			item.PendingLowerFirstSeenAt = &seenAt
 		}
 		items = append(items, item)
 	}
@@ -346,29 +364,36 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 	return alternates, nil
 }
 
-func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, clearLatestReleaseAt bool, checkedAt time.Time) error {
+func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
 	var latestReleaseValue any
-	if latestReleaseAt != nil {
-		latestReleaseValue = latestReleaseAt.UTC()
+	if update.LatestReleaseAt != nil {
+		latestReleaseValue = update.LatestReleaseAt.UTC()
 	}
-	trimmedSourceURL := strings.TrimSpace(sourceURL)
-	trimmedCurrentSourceURL := strings.TrimSpace(currentSourceURL)
+	trimmedSourceURL := strings.TrimSpace(update.SourceURL)
+	trimmedCurrentSourceURL := strings.TrimSpace(update.CurrentSourceURL)
 	var sourceURLValue any
 	if trimmedSourceURL != "" {
 		sourceURLValue = trimmedSourceURL
 	}
 	var sourceItemIDValue any
-	if sourceItemID != nil {
-		trimmedSourceItemID := strings.TrimSpace(*sourceItemID)
+	if update.SourceItemID != nil {
+		trimmedSourceItemID := strings.TrimSpace(*update.SourceItemID)
 		if trimmedSourceItemID != "" {
 			sourceItemIDValue = trimmedSourceItemID
 		}
 	}
 
+	checkedAt := update.CheckedAt.UTC()
+	latestKnownChapter := update.LatestKnownChapter
+	pendingLower := update.PendingLowerChapter
+
 	// Every expression here is evaluated against the row as it stands before the
 	// update, which is what lets latest_chapter_seen_at compare the incoming
 	// chapter number against the stored one without the caller passing a flag —
-	// the same way last_read_at is stamped in Update.
+	// the same way last_read_at is stamped in Update. pending_lower_first_seen_at
+	// uses the same trick: it only restarts when the pending number itself
+	// changes, so a value that keeps being reported keeps its original timestamp
+	// and can age into confirmation.
 	_, err := r.db.Exec(`
 		UPDATE trackers
 		SET source_item_id = COALESCE(?, source_item_id),
@@ -379,6 +404,12 @@ func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, current
 				ELSE COALESCE(latest_chapter_seen_at, ?)
 			END,
 			latest_known_chapter = ?,
+			pending_lower_first_seen_at = CASE
+				WHEN ? IS NULL THEN NULL
+				WHEN pending_lower_chapter IS NOT ? THEN ?
+				ELSE COALESCE(pending_lower_first_seen_at, ?)
+			END,
+			pending_lower_chapter = ?,
 			latest_release_at = CASE
 				WHEN ? THEN NULL
 				WHEN ? IS NOT NULL THEN ?
@@ -387,19 +418,21 @@ func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, current
 			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, sourceItemIDValue, sourceURLValue,
-		latestKnownChapter, latestKnownChapter, checkedAt.UTC(), checkedAt.UTC(),
+		latestKnownChapter, latestKnownChapter, checkedAt, checkedAt,
 		latestKnownChapter,
-		clearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt.UTC(), id)
+		pendingLower, pendingLower, checkedAt, checkedAt,
+		pendingLower,
+		update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt, update.TrackerID)
 	if err != nil {
 		return fmt.Errorf("update polling state: %w", err)
 	}
 
-	if sourceID > 0 && trimmedSourceURL != "" {
+	if update.SourceID > 0 && trimmedSourceURL != "" {
 		if trimmedCurrentSourceURL != "" && !strings.EqualFold(trimmedCurrentSourceURL, trimmedSourceURL) {
 			if _, err := r.db.Exec(`
 				DELETE FROM tracker_sources
 				WHERE tracker_id = ? AND source_id = ? AND LOWER(source_url) = LOWER(?)
-			`, id, sourceID, trimmedCurrentSourceURL); err != nil {
+			`, update.TrackerID, update.SourceID, trimmedCurrentSourceURL); err != nil {
 				return fmt.Errorf("delete stale polling tracker source: %w", err)
 			}
 		}
@@ -411,7 +444,7 @@ func (r *TrackerRepository) UpdatePollingState(id int64, sourceID int64, current
 			DO UPDATE SET
 				source_item_id = excluded.source_item_id,
 				updated_at = CURRENT_TIMESTAMP
-		`, id, sourceID, sourceItemID, trimmedSourceURL); err != nil {
+		`, update.TrackerID, update.SourceID, update.SourceItemID, trimmedSourceURL); err != nil {
 			return fmt.Errorf("upsert polling tracker source: %w", err)
 		}
 	}

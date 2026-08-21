@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -13,16 +14,17 @@ import (
 
 type pollRepository interface {
 	ListForPolling() ([]repository.PollingTracker, error)
-	UpdatePollingState(id int64, sourceID int64, currentSourceURL string, sourceItemID *string, sourceURL string, latestKnownChapter *float64, latestReleaseAt *time.Time, clearLatestReleaseAt bool, checkedAt time.Time) error
+	UpdatePollingState(update repository.PollingUpdate) error
 }
 
 type Poller struct {
-	repo         pollRepository
-	registry     *connectors.Registry
-	interval     time.Duration
-	idleInterval time.Duration
-	logger       *slog.Logger
-	stopCh       chan struct{}
+	repo                   pollRepository
+	registry               *connectors.Registry
+	interval               time.Duration
+	idleInterval           time.Duration
+	lowerConfirmationDelay time.Duration
+	logger                 *slog.Logger
+	stopCh                 chan struct{}
 }
 
 type PollerConfig struct {
@@ -31,6 +33,12 @@ type PollerConfig struct {
 	// not in "reading" status; they rarely change, so polling them every
 	// cycle just burns the sources' rate limits.
 	IdleInterval time.Duration
+	// LowerConfirmationDelay is how long a lower chapter number must keep being
+	// reported before it replaces the stored one. It guards the two failure modes
+	// against each other: a mirror that lags for one cycle never walks a tracker
+	// backwards, while a genuinely wrong stored number still gets corrected
+	// instead of staying frozen forever.
+	LowerConfirmationDelay time.Duration
 }
 
 func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
@@ -43,17 +51,21 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 	if cfg.IdleInterval < cfg.Interval {
 		cfg.IdleInterval = cfg.Interval
 	}
+	if cfg.LowerConfirmationDelay <= 0 {
+		cfg.LowerConfirmationDelay = 24 * time.Hour
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &Poller{
-		repo:         repo,
-		registry:     registry,
-		interval:     cfg.Interval,
-		idleInterval: cfg.IdleInterval,
-		logger:       logger,
-		stopCh:       make(chan struct{}),
+		repo:                   repo,
+		registry:               registry,
+		interval:               cfg.Interval,
+		idleInterval:           cfg.IdleInterval,
+		lowerConfirmationDelay: cfg.LowerConfirmationDelay,
+		logger:                 logger,
+		stopCh:                 make(chan struct{}),
 	}
 }
 
@@ -136,15 +148,16 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 
 		now := time.Now().UTC()
-		latest := tracker.LatestKnownChapter
-		if result.LatestChapter != nil {
-			latest = result.LatestChapter
-		}
-		if usedFallback && !isNewChapter(tracker.LatestKnownChapter, result.LatestChapter) {
-			// Mirrors routinely lag the primary source. Letting a fallback lower
-			// latest_known_chapter would resurrect chapters the user already read,
-			// so a fallback may advance the count but never walk it back.
-			latest = tracker.LatestKnownChapter
+		outcome := decideChapter(tracker, result.LatestChapter, usedFallback, now, p.lowerConfirmationDelay)
+		latest := outcome.latest
+		if outcome.corrected {
+			p.logger.Info("poll corrected the stored chapter downwards",
+				"trackerId", tracker.ID,
+				"title", tracker.Title,
+				"from", derefChapter(tracker.LatestKnownChapter),
+				"to", derefChapter(latest),
+				"sourceKey", tracker.SourceKey,
+				"usedFallback", usedFallback)
 		}
 
 		newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
@@ -197,7 +210,18 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			currentSourceURL = ""
 		}
 
-		if err := p.repo.UpdatePollingState(tracker.ID, sourceID, currentSourceURL, canonicalSourceItemID, canonicalSourceURL, latest, latestReleaseAt, clearLatestReleaseAt, now); err != nil {
+		if err := p.repo.UpdatePollingState(repository.PollingUpdate{
+			TrackerID:            tracker.ID,
+			SourceID:             sourceID,
+			CurrentSourceURL:     currentSourceURL,
+			SourceItemID:         canonicalSourceItemID,
+			SourceURL:            canonicalSourceURL,
+			LatestKnownChapter:   latest,
+			LatestReleaseAt:      latestReleaseAt,
+			ClearLatestReleaseAt: clearLatestReleaseAt,
+			PendingLowerChapter:  outcome.pendingLower,
+			CheckedAt:            now,
+		}); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue
 		}
@@ -208,6 +232,84 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// chapterOutcome is what a poll decides to record for a tracker's chapter
+// number: the value to store, any lower value still awaiting confirmation, and
+// whether the stored number was walked backwards.
+type chapterOutcome struct {
+	latest       *float64
+	pendingLower *float64
+	corrected    bool
+}
+
+// decideChapter reconciles the number a poll reported with the one on record.
+//
+// A primary source is authoritative: whatever it reports is stored, corrections
+// downwards included, which is how a source that used to over-report gets to fix
+// its own history. A fallback is not — it may be a mirror that simply lags — so a
+// lower number from one is only applied once it has kept reporting the same value
+// for confirmationDelay. Until then it is remembered, not acted on.
+//
+// Both paths refuse to record a chapter below the one the reader has already
+// finished, so no correction can make read chapters look unread.
+func decideChapter(
+	tracker repository.PollingTracker,
+	reported *float64,
+	usedFallback bool,
+	now time.Time,
+	confirmationDelay time.Duration,
+) chapterOutcome {
+	stored := tracker.LatestKnownChapter
+
+	// Nothing was reported, so there is nothing to decide and nothing to keep
+	// waiting on.
+	if reported == nil {
+		return chapterOutcome{latest: stored}
+	}
+	if stored == nil {
+		return chapterOutcome{latest: reported}
+	}
+
+	if *reported > *stored || sameChapterNumber(*reported, *stored) {
+		// An advance, or agreement. Either way any pending correction is stale.
+		if *reported > *stored {
+			return chapterOutcome{latest: reported}
+		}
+		return chapterOutcome{latest: stored}
+	}
+
+	// The report is lower than the stored number.
+	candidate := *reported
+	if tracker.LastReadChapter != nil && candidate < *tracker.LastReadChapter {
+		candidate = *tracker.LastReadChapter
+	}
+	if candidate >= *stored {
+		// Clamping to the read position swallowed the whole correction.
+		return chapterOutcome{latest: stored}
+	}
+
+	if !usedFallback {
+		return chapterOutcome{latest: &candidate, corrected: true}
+	}
+
+	confirmed := tracker.PendingLowerChapter != nil &&
+		sameChapterNumber(*tracker.PendingLowerChapter, *reported) &&
+		tracker.PendingLowerFirstSeenAt != nil &&
+		!now.Before(tracker.PendingLowerFirstSeenAt.Add(confirmationDelay))
+
+	if confirmed {
+		return chapterOutcome{latest: &candidate, corrected: true}
+	}
+
+	return chapterOutcome{latest: stored, pendingLower: reported}
+}
+
+func derefChapter(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 // resolveFromAlternates tries the tracker's non-primary linked sources in order
@@ -262,6 +364,14 @@ func isNewChapter(previous *float64, current *float64) bool {
 		return true
 	}
 	return *current > *previous
+}
+
+// sameChapterNumber compares two chapter numbers with a tolerance. The pending
+// correction is compared against a value that has round-tripped through JSON and
+// a SQLite REAL column since it was first seen, so exact equality is the wrong
+// test for deciding whether a source is still reporting the same thing.
+func sameChapterNumber(a float64, b float64) bool {
+	return math.Abs(a-b) < 1e-9
 }
 
 // chapterNumberChanged reports whether the recorded latest chapter differs from

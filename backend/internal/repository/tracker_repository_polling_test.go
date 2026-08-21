@@ -77,7 +77,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 
 	newChapter := 20.0
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if err := repo.UpdatePollingState(trackerID, 0, "", nil, "", &newChapter, nil, true, discoveredAt); err != nil {
+	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 	// re-stamping on every cycle is exactly the drift that made a dateless tracker
 	// look freshly updated forever.
 	laterCheck := discoveredAt.Add(6 * time.Hour)
-	if err := repo.UpdatePollingState(trackerID, 0, "", nil, "", &newChapter, nil, false, laterCheck); err != nil {
+	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestUpdatePollingStateKeepsChapterSeenAtWhenReleaseDateIsKnown(t *testing.T
 	newChapter := 20.0
 	releasedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if err := repo.UpdatePollingState(trackerID, 0, "", nil, "", &newChapter, &releasedAt, false, discoveredAt); err != nil {
+	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
