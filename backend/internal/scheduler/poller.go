@@ -12,6 +12,11 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
+// pollResolveTimeout is the per-source budget of one poll resolve, shared
+// throttle wait included. 15s proved too tight for a 3.5s-gap host whenever
+// anything else queued requests against it.
+const pollResolveTimeout = 30 * time.Second
+
 type pollRepository interface {
 	ListForPolling() ([]repository.PollingTracker, error)
 	UpdatePollingState(update repository.PollingUpdate) error
@@ -121,7 +126,12 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			continue
 		}
 
-		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		// The budget covers the shared throttle's slot wait too: a host with a
+		// widened gap (api.comick.dev at 3.5s) plus a burst of dashboard-driven
+		// requests can queue a resolve for >15s, and a poll that gives up then
+		// hands the answer to a staler mirror. The poller is a background loop,
+		// so waiting longer costs nothing.
+		requestCtx, cancel := context.WithTimeout(ctx, pollResolveTimeout)
 		result, resolveErr := connector.ResolveByURL(requestCtx, tracker.SourceURL)
 		cancel()
 
@@ -365,7 +375,7 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 			continue
 		}
 
-		requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		requestCtx, cancel := context.WithTimeout(ctx, pollResolveTimeout)
 		result, err := connector.ResolveByURL(requestCtx, source.SourceURL)
 		cancel()
 
