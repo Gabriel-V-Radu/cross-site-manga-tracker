@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,8 @@ func newFallbackHandler(t *testing.T, registry *connectors.Registry) *DashboardH
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 2),
+		// Tests must not probe real image hosts.
+		coverURLChecker: func(context.Context, string) bool { return true },
 	}
 }
 
@@ -299,6 +302,65 @@ func TestFetchCoverURLRecordsPrimaryWhenItServes(t *testing.T) {
 	_, servingKey, _, _ := h.getCachedCoverWithSource(cacheKey)
 	if servingKey != "primarysource" {
 		t.Fatalf("expected the primary source to be recorded, got %q", servingKey)
+	}
+}
+
+// TestFetchCoverURLSkipsUnloadableCovers pins the ComicK CDN outage shape: the
+// API keeps answering with cover URLs whose image host is dead, and the card
+// must fall through to a linked source whose image actually loads instead of
+// caching the broken URL for 12 hours.
+func TestFetchCoverURLSkipsUnloadableCovers(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(mirrorConnector{key: "primarysource", cover: "https://dead.cdn.example/cover.webp"}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "mirrorsource", cover: "https://live.cdn.example/cover.webp"}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	h.coverURLChecker = func(_ context.Context, coverURL string) bool {
+		return !strings.Contains(coverURL, "dead.cdn")
+	}
+	alternates := []repository.TrackerSourceRef{
+		{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
+	}
+
+	coverURL, err := h.fetchCoverURL(context.Background(), "primarysource", "https://primary.example/title/a", nil, alternates)
+	if err != nil {
+		t.Fatalf("expected the alternate's loadable cover: %v", err)
+	}
+	if coverURL != "https://live.cdn.example/cover.webp" {
+		t.Fatalf("expected the loadable cover to win, got %q", coverURL)
+	}
+
+	// The serving source must be the one whose image loads, so the badge
+	// matches the picture.
+	cacheKey := buildCoverCacheKey("primarysource", "https://primary.example/title/a", nil)
+	_, servingKey, found, ok := h.getCachedCoverWithSource(cacheKey)
+	if !ok || !found || servingKey != "mirrorsource" {
+		t.Fatalf("expected the mirror recorded as serving source, got %q (found=%v ok=%v)", servingKey, found, ok)
+	}
+}
+
+// TestFetchCoverURLAllCoversUnloadableCachesNegative: with every candidate's
+// image host down, the failure is cached for the retry span, not served as a
+// broken image.
+func TestFetchCoverURLAllCoversUnloadableCachesNegative(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(mirrorConnector{key: "primarysource", cover: "https://dead.cdn.example/cover.webp"}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	h.coverURLChecker = func(context.Context, string) bool { return false }
+
+	if _, err := h.fetchCoverURL(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil); err == nil {
+		t.Fatalf("expected an error when no cover loads")
+	}
+	entry := negativeCoverEntry(t, h, buildCoverCacheKey("primarysource", "https://primary.example/title/a", nil))
+	if remaining := time.Until(entry.ExpiresAt); remaining > maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected the retry negative TTL, got %s", remaining)
 	}
 }
 

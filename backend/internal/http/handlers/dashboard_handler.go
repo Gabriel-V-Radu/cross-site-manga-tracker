@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"html/template"
 	"log/slog"
@@ -27,7 +28,13 @@ type DashboardHandler struct {
 	// build the handler by struct literal). The map above stays the hot path;
 	// the store is write-through and only read once, at construction.
 	coverStore *repository.CoverCacheRepository
-	cacheMu    sync.RWMutex
+	// coverURLChecker reports whether a cover image URL actually answers.
+	// Nil means the real HTTP probe; tests inject their own. It exists
+	// because a connector can resolve a syntactically fine cover URL whose
+	// CDN is dead (ComicK's meo host, 2026-08), and caching that URL for 12h
+	// leaves a card broken with working alternates one hop away.
+	coverURLChecker func(ctx context.Context, coverURL string) bool
+	cacheMu         sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gofiber/fiber/v2"
@@ -339,7 +342,11 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 		if err != nil {
 			continue
 		}
-		if coverURL == "" {
+		// A resolved cover URL is a claim, not a picture: the connector built
+		// it from API metadata, and the image host can be dead while the API
+		// answers (ComicK's CDN outage). A URL that does not load falls
+		// through to the next linked source instead of being cached broken.
+		if coverURL == "" || !h.coverURLLoads(parent, coverURL) {
 			continue
 		}
 
@@ -359,7 +366,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 
 		coverURL, tried, err := h.resolveCoverFromConnector(parent, alternateKey, alternateURL)
 		attempted = attempted || tried
-		if err != nil || coverURL == "" {
+		if err != nil || coverURL == "" || !h.coverURLLoads(parent, coverURL) {
 			continue
 		}
 
@@ -373,6 +380,50 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	}
 	h.setCachedCover(cacheKey, "", false, jitteredTTL(negativeTTL))
 	return "", fmt.Errorf("cover not found")
+}
+
+// coverProbeClient fetches one byte of a candidate cover image. It goes
+// through the shared throttle like everything else; image CDNs are their own
+// hosts, so the pacing does not compete with API traffic.
+var coverProbeClient = &http.Client{
+	Timeout:   15 * time.Second,
+	Transport: connectors.ThrottleTransport(nil),
+}
+
+func (h *DashboardHandler) coverURLLoads(parent context.Context, coverURL string) bool {
+	if h.coverURLChecker != nil {
+		return h.coverURLChecker(parent, coverURL)
+	}
+	return probeCoverURL(parent, coverURL)
+}
+
+// probeCoverURL asks the image host for the first byte of the file. The
+// timeout is deliberately short next to the resolve timeout: the failure mode
+// this guards against is a dead CDN that hangs the connection (not a slow
+// answer), and every broken cover on a page pays it serially per host.
+func probeCoverURL(parent context.Context, coverURL string) bool {
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+	req.Header.Set("Range", "bytes=0-0")
+
+	res, err := coverProbeClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+
+	// Any refusal counts as broken: the dashboard hotlinks covers with the
+	// reader's plain browser request, so a host that turns us down here would
+	// turn the <img> tag down too.
+	return res.StatusCode >= 200 && res.StatusCode < 300
 }
 
 // resolveCoverFromConnector also reports whether a connector was actually
