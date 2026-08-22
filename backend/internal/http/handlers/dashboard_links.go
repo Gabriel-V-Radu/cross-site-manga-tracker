@@ -281,7 +281,7 @@ func (h *DashboardHandler) scannableSources() ([]models.Source, error) {
 }
 
 // selectedLinkSource honours an explicit ?source= and otherwise defaults to
-// WeebCentral, the source the review queue exists for right now.
+// MangaHub, the source the review queue exists for right now.
 func (h *DashboardHandler) selectedLinkSource(c *fiber.Ctx, sources []models.Source) int64 {
 	if raw := strings.TrimSpace(c.Query("source")); raw != "" {
 		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && id > 0 {
@@ -289,7 +289,7 @@ func (h *DashboardHandler) selectedLinkSource(c *fiber.Ctx, sources []models.Sou
 		}
 	}
 	for _, source := range sources {
-		if source.Key == "weebcentral" {
+		if source.Key == "mangahub" {
 			return source.ID
 		}
 	}

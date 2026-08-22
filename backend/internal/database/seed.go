@@ -24,8 +24,6 @@ func SeedDefaults(db *sql.DB) error {
 		{key: "mgeko", name: "Mgeko", kind: "native", enabled: true},
 		{key: "webtoons", name: "WEBTOON", kind: "native", enabled: true},
 		{key: "freewebnovel", name: "FreeWebNovel", kind: "native", enabled: true},
-		{key: "mangabuddy", name: "MangaBuddy", kind: "native", enabled: true},
-		{key: "weebcentral", name: "WeebCentral", kind: "native", enabled: true},
 		{key: "mangaupdates", name: "MangaUpdates", kind: "native", enabled: true},
 		{key: "comick", name: "ComicK", kind: "native", enabled: true},
 		{key: "mangahub", name: "MangaHub", kind: "native", enabled: true},

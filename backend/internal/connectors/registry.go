@@ -112,8 +112,6 @@ func normalizeConnectorKey(raw string) string {
 		return "mangadex"
 	case "mangafire.to":
 		return "mangafire"
-	case "mangabuddy1.co.uk":
-		return "mangabuddy"
 	case "asuracomic.net", "asurascans.com":
 		return "asuracomic"
 	case "flamecomics.xyz":
@@ -124,8 +122,6 @@ func normalizeConnectorKey(raw string) string {
 		return "webtoons"
 	case "freewebnovel.com":
 		return "freewebnovel"
-	case "weebcentral.com":
-		return "weebcentral"
 	case "mangaupdates.com", "api.mangaupdates.com":
 		return "mangaupdates"
 	case "comick.dev", "comick.io", "comick.fun", "api.comick.dev":

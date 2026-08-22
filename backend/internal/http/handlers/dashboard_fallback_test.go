@@ -161,7 +161,7 @@ func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool)
 
 	const (
 		primaryURL = "https://mangafire.to/title/npozj-akanabe"
-		mirrorURL  = "https://mangabuddy1.co.uk/series/akanabe.ZDM"
+		mirrorURL  = "https://comick.dev/comic/akanabe"
 	)
 	latest, lastRead := 65.0, 59.0
 
@@ -169,7 +169,7 @@ func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool)
 
 	// The cover came from the mirror: the primary's art endpoint was unreachable.
 	h.setCachedCoverFromSource(buildCoverCacheKey("mangafire", primaryURL, nil),
-		"https://cdn.example/cover.webp", "mangabuddy", true, time.Hour)
+		"https://cdn.example/cover.webp", "comick", true, time.Hour)
 
 	h.setCachedChapterURL(buildChapterURLCacheKey("mangafire", primaryURL, latest),
 		latestChapterURL, latestResolved, time.Hour)
@@ -186,11 +186,11 @@ func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool)
 	}}
 	sourceByID := map[int64]models.Source{
 		1: {ID: 1, Key: "mangafire", Name: "MangaFire"},
-		2: {ID: 2, Key: "mangabuddy", Name: "MangaBuddy"},
+		2: {ID: 2, Key: "comick", Name: "ComicK"},
 	}
-	logos := map[int64]string{1: "/logos/mangafire.png", 2: "/logos/mangabuddy.png"}
+	logos := map[int64]string{1: "/logos/mangafire.png", 2: "/logos/comick.png"}
 	alternates := map[int64][]repository.TrackerSourceRef{
-		1: {{SourceID: 2, SourceKey: "mangabuddy", SourceURL: mirrorURL}},
+		1: {{SourceID: 2, SourceKey: "comick", SourceURL: mirrorURL}},
 	}
 
 	cards, pending := h.buildTrackerCards(items, sourceByID, logos, alternates, "")
@@ -204,7 +204,7 @@ func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool)
 }
 
 // TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource pins the defect
-// behind "some buttons open MangaFire, others MangaBuddy": the badge and its Open
+// behind "some buttons open MangaFire, others the mirror": the badge and its Open
 // link were driven by whoever supplied the cover, which is the weakest signal on
 // the card. Cover art and chapters resolve through different endpoints, so a card
 // could badge the mirror while its newest-chapter link opened the primary.
@@ -227,8 +227,8 @@ func TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource(t *testing.T
 	if card.LatestKnownChapterSite != "MangaFire" {
 		t.Fatalf("expected the latest chapter to be labelled MangaFire, got %q", card.LatestKnownChapterSite)
 	}
-	if card.LastReadChapterSite != "MangaBuddy" {
-		t.Fatalf("expected the last read chapter to be labelled MangaBuddy, got %q", card.LastReadChapterSite)
+	if card.LastReadChapterSite != "ComicK" {
+		t.Fatalf("expected the last read chapter to be labelled ComicK, got %q", card.LastReadChapterSite)
 	}
 }
 
@@ -240,10 +240,10 @@ func TestBuildTrackerCardsFallsBackToTheCoverSource(t *testing.T) {
 	// the primary but proves nothing about who can serve the chapter.
 	card := mixedSourceCard(t, "", false)
 
-	if card.SourceLogoLabel != "MangaBuddy" {
+	if card.SourceLogoLabel != "ComicK" {
 		t.Fatalf("expected the cover's source to decide when no chapter link resolved, got %q", card.SourceLogoLabel)
 	}
-	if card.SourceURL != "https://mangabuddy1.co.uk/series/akanabe.ZDM" {
+	if card.SourceURL != "https://comick.dev/comic/akanabe" {
 		t.Fatalf("expected Open to follow the mirror, got %q", card.SourceURL)
 	}
 	if card.LatestKnownChapterSite != "" {
@@ -628,9 +628,9 @@ func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
 func TestOrderReaderCandidates(t *testing.T) {
 	candidates := []repository.TrackerSourceRef{
 		{SourceKey: "mangafire"},
-		{SourceKey: "mangabuddy"},
+		{SourceKey: "mangaupdates"},
 		{SourceKey: "comick"},
-		{SourceKey: "weebcentral"},
+		{SourceKey: "mangadex"},
 		{SourceKey: "mangahub"},
 	}
 	orderReaderCandidates(candidates)
@@ -639,7 +639,7 @@ func TestOrderReaderCandidates(t *testing.T) {
 	for _, candidate := range candidates {
 		got = append(got, candidate.SourceKey)
 	}
-	want := []string{"mangahub", "mangafire", "mangabuddy", "weebcentral", "comick"}
+	want := []string{"mangahub", "mangafire", "mangaupdates", "mangadex", "comick"}
 	for index := range want {
 		if got[index] != want[index] {
 			t.Fatalf("unexpected order %v, want %v", got, want)

@@ -158,16 +158,12 @@ func sourceHomeURLForKey(sourceKey string) string {
 		return "https://mangadex.org"
 	case "mangafire":
 		return "https://mangafire.to"
-	case "mangabuddy":
-		return "https://mangabuddy1.co.uk"
 	case "mgeko":
 		return "https://www.mgeko.cc"
 	case "webtoons":
 		return "https://www.webtoons.com"
 	case "freewebnovel":
 		return "https://freewebnovel.com"
-	case "weebcentral":
-		return "https://weebcentral.com"
 	case "mangaupdates":
 		return "https://www.mangaupdates.com"
 	case "comick":
@@ -419,8 +415,6 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "mangadex"
 	case strings.Contains(host, "mangafire"):
 		return "mangafire"
-	case strings.Contains(host, "mangabuddy"):
-		return "mangabuddy"
 	case strings.Contains(host, "mgeko"):
 		return "mgeko"
 	case strings.Contains(host, "asura"):
@@ -431,8 +425,6 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "webtoons"
 	case strings.Contains(host, "freewebnovel"):
 		return "freewebnovel"
-	case strings.Contains(host, "weebcentral"):
-		return "weebcentral"
 	case strings.Contains(host, "mangaupdates"):
 		return "mangaupdates"
 	case strings.Contains(host, "comick"):
