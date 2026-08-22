@@ -52,6 +52,8 @@ type cleanupOutcome struct {
 	PromotedTrackers   int64
 	DeletedTrackers    int64
 	DeletedLinks       int64
+	DeletedSuggestions int64
+	ClearedReadingPins int64
 	DeletedSourceLogos int64
 	DeletedSources     int64
 }
@@ -165,6 +167,8 @@ func main() {
 		"promoted_trackers", outcome.PromotedTrackers,
 		"deleted_trackers", outcome.DeletedTrackers,
 		"deleted_tracker_sources", outcome.DeletedLinks,
+		"deleted_link_suggestions", outcome.DeletedSuggestions,
+		"cleared_reading_pins", outcome.ClearedReadingPins,
 		"deleted_profile_source_logos", outcome.DeletedSourceLogos,
 		"deleted_sources", outcome.DeletedSources,
 	)
@@ -429,10 +433,35 @@ func applyCleanup(db *sql.DB, staleSources []sourceUsage, promotions []trackerPr
 		return cleanupOutcome{}, err
 	}
 
+	// Link Review decisions reference sources with ON DELETE RESTRICT, so a
+	// stale source's review history has to go with it — keeping "rejected on
+	// MangaBuddy" markers for a site the app no longer reads serves nothing.
+	outcome.DeletedSuggestions, err = deleteBySourceID(tx, "source_link_suggestions", "source_id", sourceIDs)
+	if err != nil {
+		rollback()
+		return cleanupOutcome{}, err
+	}
+
 	outcome.DeletedSourceLogos, err = deleteBySourceID(tx, "profile_source_logos", "source_id", sourceIDs)
 	if err != nil {
 		rollback()
 		return cleanupOutcome{}, err
+	}
+
+	// A reading pin to a stale source would degrade to auto anyway once its
+	// link rows are gone; clearing it keeps the column honest.
+	pinResult, err := tx.Exec(`
+		UPDATE trackers
+		SET reading_source_id = NULL
+		WHERE reading_source_id IN (`+placeholders(len(sourceIDs))+`)
+	`, int64SliceToAny(sourceIDs)...)
+	if err != nil {
+		rollback()
+		return cleanupOutcome{}, fmt.Errorf("clear stale reading pins: %w", err)
+	}
+	if outcome.ClearedReadingPins, err = pinResult.RowsAffected(); err != nil {
+		rollback()
+		return cleanupOutcome{}, fmt.Errorf("rows affected for reading pin clear: %w", err)
 	}
 
 	outcome.DeletedSources, err = deleteBySourceID(tx, "sources", "id", sourceIDs)
