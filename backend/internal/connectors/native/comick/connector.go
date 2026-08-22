@@ -22,6 +22,7 @@ package comick
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -30,6 +31,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -47,11 +49,31 @@ const (
 // scanned for the highest real number instead of trusting chapters[0].
 const chapterProbeLimit = 10
 
+// comicCacheTTL bounds how long a slug's comic record (hid, title, cover,
+// alternate titles) is reused before being refetched. The record is stable —
+// the hid never changes for a slug — so the TTL only exists to pick up title
+// or cover edits eventually. Caching it turns the steady-state resolve into a
+// single chapters request, which matters twice over: the API's host gap is a
+// wide 3.5s, and a dashboard cover pass fires dozens of resolves at once.
+const comicCacheTTL = 24 * time.Hour
+
+// comicRecord is the cached comic-payload half of a resolve.
+type comicRecord struct {
+	hid           string
+	title         string
+	coverURL      string
+	relatedTitles []string
+	fetchedAt     time.Time
+}
+
 type Connector struct {
 	siteURL     string
 	apiURL      string
 	allowedHost []string
 	httpClient  *http.Client
+
+	mu     sync.Mutex
+	comics map[string]comicRecord
 }
 
 func NewConnector() *Connector {
@@ -60,6 +82,7 @@ func NewConnector() *Connector {
 		apiURL:      canonicalAPIURL,
 		allowedHost: []string{"comick.dev", "comick.io", "comick.fun"},
 		httpClient:  connectors.NewThrottledClient(20 * time.Second),
+		comics:      map[string]comicRecord{},
 	}
 }
 
@@ -75,6 +98,7 @@ func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string
 		apiURL:      strings.TrimRight(strings.TrimSpace(apiURL), "/"),
 		allowedHost: allowedHost,
 		httpClient:  client,
+		comics:      map[string]comicRecord{},
 	}
 }
 
@@ -133,32 +157,76 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
-	var comicResponse apiComicResponse
-	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(slug)+"?tachiyomi=true", &comicResponse); err != nil {
-		return nil, fmt.Errorf("fetch comick comic: %w", err)
+	record, err := c.comicRecordFor(ctx, slug)
+	if err != nil {
+		return nil, err
 	}
-	comic := comicResponse.Comic
-	if strings.TrimSpace(comic.HID) == "" {
-		return nil, fmt.Errorf("comick comic %q not found", slug)
-	}
-	if strings.TrimSpace(comic.Slug) == "" {
-		comic.Slug = slug
-	}
-
-	result := c.resultFromComic(comic)
 
 	// English-scoped on purpose: the series-level last_chapter counts every
 	// language, which is exactly the inflation this app avoids.
-	latest, publishedAt, err := c.latestEnglishChapter(ctx, comic.HID)
+	latest, publishedAt, err := c.latestEnglishChapter(ctx, record.hid)
+	if isNotFound(err) {
+		// A stale cached hid (the comic moved or was merged) answers 404 here;
+		// refetching the record self-heals it.
+		c.forgetComic(slug)
+		if record, err = c.comicRecordFor(ctx, slug); err != nil {
+			return nil, err
+		}
+		latest, publishedAt, err = c.latestEnglishChapter(ctx, record.hid)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch comick chapters: %w", err)
 	}
+
+	result := c.resultFromRecord(slug, record)
 	if latest != nil {
 		result.LatestChapter = latest
 		result.LastUpdatedAt = publishedAt
 	}
 
 	return &result, nil
+}
+
+// comicRecordFor returns the slug's comic record, fetching and caching it when
+// missing or expired. The cache is what keeps a steady-state resolve at one
+// API request instead of two.
+func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecord, error) {
+	c.mu.Lock()
+	record, ok := c.comics[slug]
+	c.mu.Unlock()
+	if ok && time.Since(record.fetchedAt) < comicCacheTTL {
+		return record, nil
+	}
+
+	var comicResponse apiComicResponse
+	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(slug)+"?tachiyomi=true", &comicResponse); err != nil {
+		return comicRecord{}, fmt.Errorf("fetch comick comic: %w", err)
+	}
+	comic := comicResponse.Comic
+	if strings.TrimSpace(comic.HID) == "" {
+		return comicRecord{}, fmt.Errorf("comick comic %q not found", slug)
+	}
+
+	record = recordFromComic(comic)
+	c.storeComic(slug, record)
+	return record, nil
+}
+
+func (c *Connector) storeComic(slug string, record comicRecord) {
+	c.mu.Lock()
+	c.comics[slug] = record
+	c.mu.Unlock()
+}
+
+func (c *Connector) forgetComic(slug string) {
+	c.mu.Lock()
+	delete(c.comics, slug)
+	c.mu.Unlock()
+}
+
+func isNotFound(err error) bool {
+	var statusErr *httpStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == 404
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
@@ -184,12 +252,17 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 
 	mapped := make([]connectors.MangaResult, 0, len(results))
 	for _, comic := range results {
-		if strings.TrimSpace(comic.Slug) == "" || strings.TrimSpace(comic.HID) == "" {
+		slug := strings.TrimSpace(comic.Slug)
+		if slug == "" || strings.TrimSpace(comic.HID) == "" {
 			continue
 		}
+		// The search payload carries the whole comic record, so it seeds the
+		// cache: a resolve right after a search costs one request.
+		record := recordFromComic(comic)
+		c.storeComic(slug, record)
 		// The search payload's chapter count spans every language, so latest
 		// chapter is left unset; ResolveByURL fills in the English number.
-		mapped = append(mapped, c.resultFromComic(comic))
+		mapped = append(mapped, c.resultFromRecord(slug, record))
 		if len(mapped) >= limit {
 			break
 		}
@@ -208,13 +281,9 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	var comicResponse apiComicResponse
-	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(slug)+"?tachiyomi=true", &comicResponse); err != nil {
-		return "", fmt.Errorf("fetch comick comic: %w", err)
-	}
-	hid := strings.TrimSpace(comicResponse.Comic.HID)
-	if hid == "" {
-		return "", fmt.Errorf("comick comic %q not found", slug)
+	record, err := c.comicRecordFor(ctx, slug)
+	if err != nil {
+		return "", err
 	}
 
 	formatted := formatChapter(chapter)
@@ -224,7 +293,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	params.Set("limit", "1")
 
 	var chaptersResponse apiChaptersResponse
-	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(hid)+"/chapters?"+params.Encode(), &chaptersResponse); err != nil {
+	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(record.hid)+"/chapters?"+params.Encode(), &chaptersResponse); err != nil {
 		return "", fmt.Errorf("fetch comick chapters: %w", err)
 	}
 	for _, entry := range chaptersResponse.Chapters {
@@ -282,10 +351,10 @@ func parseChapterTime(values ...string) *time.Time {
 	return nil
 }
 
-func (c *Connector) resultFromComic(comic apiComic) connectors.MangaResult {
+func recordFromComic(comic apiComic) comicRecord {
 	title := strings.TrimSpace(comic.Title)
 
-	related := make([]string, 0, len(comic.MDTitles)+1)
+	related := make([]string, 0, len(comic.MDTitles))
 	for _, entry := range comic.MDTitles {
 		related = append(related, entry.Title)
 	}
@@ -298,20 +367,30 @@ func (c *Connector) resultFromComic(comic apiComic) connectors.MangaResult {
 		filtered = append(filtered, candidate)
 	}
 
-	result := connectors.MangaResult{
-		SourceKey:     c.Key(),
-		SourceItemID:  strings.TrimSpace(comic.HID),
-		Title:         title,
-		RelatedTitles: filtered,
-		URL:           c.siteURL + "/comic/" + url.PathEscape(strings.TrimSpace(comic.Slug)),
+	record := comicRecord{
+		hid:           strings.TrimSpace(comic.HID),
+		title:         title,
+		relatedTitles: filtered,
+		fetchedAt:     time.Now(),
 	}
 	for _, cover := range comic.MDCovers {
 		if key := strings.TrimSpace(cover.B2Key); key != "" {
-			result.CoverImageURL = coverCDNURL + "/" + key
+			record.coverURL = coverCDNURL + "/" + key
 			break
 		}
 	}
-	return result
+	return record
+}
+
+func (c *Connector) resultFromRecord(slug string, record comicRecord) connectors.MangaResult {
+	return connectors.MangaResult{
+		SourceKey:     c.Key(),
+		SourceItemID:  record.hid,
+		Title:         record.title,
+		RelatedTitles: record.relatedTitles,
+		URL:           c.siteURL + "/comic/" + url.PathEscape(slug),
+		CoverImageURL: record.coverURL,
+	}
 }
 
 // parseSeriesURL extracts the series slug from a comic or chapter URL

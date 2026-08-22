@@ -136,6 +136,63 @@ func TestResolveChapterURLBuildsReaderLink(t *testing.T) {
 	}
 }
 
+// TestResolveByURLCachesComicRecord pins the one-request steady state: the
+// comic payload (hid, title, cover) is stable per slug, so repeat resolves
+// must only hit the chapters endpoint. The API's host gap is a wide 3.5s and
+// dashboard cover passes fire dozens of resolves at once, so every avoided
+// request is real queue time.
+func TestResolveByURLCachesComicRecord(t *testing.T) {
+	comicHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/comic/kagura-bachi", func(w http.ResponseWriter, _ *http.Request) {
+		comicHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"comic":{"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi"}}`))
+	})
+	mux.HandleFunc("/comic/10ZRNmsG/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"chapters":[{"hid":"3wxB57iv","chap":"128","lang":"en","publish_at":"2026-08-09T15:20:12.000Z"}]}`))
+	})
+	connector := newTestConnector(t, mux)
+
+	for i := 0; i < 3; i++ {
+		if _, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi"); err != nil {
+			t.Fatalf("resolve %d failed: %v", i+1, err)
+		}
+	}
+	if comicHits != 1 {
+		t.Fatalf("expected 1 comic fetch across repeat resolves, got %d", comicHits)
+	}
+}
+
+// TestResolveByURLHealsStaleCachedHid covers a comic that moved: the cached
+// hid starts answering 404 on chapters, and the resolve must refetch the
+// record instead of failing forever until the TTL expires.
+func TestResolveByURLHealsStaleCachedHid(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/comic/kagura-bachi", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"comic":{"hid":"freshHID","slug":"kagura-bachi","title":"Kagurabachi"}}`))
+	})
+	mux.HandleFunc("/comic/staleHID/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/comic/freshHID/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"chapters":[{"hid":"x","chap":"128","lang":"en"}]}`))
+	})
+	connector := newTestConnector(t, mux)
+	connector.storeComic("kagura-bachi", comicRecord{hid: "staleHID", title: "Kagurabachi", fetchedAt: time.Now()})
+
+	result, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if result.LatestChapter == nil || *result.LatestChapter != 128 {
+		t.Fatalf("expected chapter 128 after healing, got %#v", result.LatestChapter)
+	}
+}
+
 func TestResolveByURLWithoutEnglishChaptersLeavesChapterUnset(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/comic/silent", func(w http.ResponseWriter, _ *http.Request) {
