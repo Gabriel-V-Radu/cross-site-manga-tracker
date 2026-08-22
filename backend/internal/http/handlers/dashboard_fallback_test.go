@@ -509,9 +509,13 @@ func TestFetchChapterURLFallsBackToOfflineGuess(t *testing.T) {
 	}
 }
 
-// TestFetchChapterURLPrefersResolvedOverOfflineGuess pins the ranking: a URL a
-// live site confirmed to exist beats a constructed one.
-func TestFetchChapterURLPrefersResolvedOverOfflineGuess(t *testing.T) {
+// TestFetchChapterURLBlockedLinkableClaimsItsTurn pins the reading priority
+// introduced with the MangaHub connector: a challenge-blocked site that can
+// construct its reader URL takes its turn in the chain rather than ceding to
+// a lower-priority site's resolution — the reader's own browser passes the
+// challenge the server cannot. (Before this, any resolved URL beat the
+// guess, which sent every MangaFire reader to whichever mirror answered.)
+func TestFetchChapterURLBlockedLinkableClaimsItsTurn(t *testing.T) {
 	registry := connectors.NewRegistry()
 	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
 		t.Fatalf("register blocked linkable connector: %v", err)
@@ -527,10 +531,119 @@ func TestFetchChapterURLPrefersResolvedOverOfflineGuess(t *testing.T) {
 
 	chapterURL, err := h.fetchChapterURL("blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
-		t.Fatalf("expected the mirror to resolve: %v", err)
+		t.Fatalf("expected the built url to be served: %v", err)
 	}
-	if chapterURL != "https://mirror.example/series/a.ZD1/chapter-12" {
-		t.Fatalf("expected the resolved url to win over the guess, got %q", chapterURL)
+	if chapterURL != "https://blocked.example/title/a/read/chapter-12" {
+		t.Fatalf("expected the blocked primary's built url to win its turn, got %q", chapterURL)
+	}
+}
+
+// cappedResolverConnector resolves chapter URLs only up to a latest-known
+// number, the way the MangaHub connector's range check refuses chapters the
+// site does not carry yet.
+type cappedResolverConnector struct {
+	mirrorConnector
+	latest float64
+}
+
+func (c cappedResolverConnector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
+	if chapter > c.latest {
+		return "", errors.New("chapter not found")
+	}
+	return c.mirrorConnector.ResolveChapterURL(ctx, rawURL, chapter)
+}
+
+// newReaderPriorityHandler wires the three sources of the reading chain the
+// way a MangaFire-primary tracker carries them: MangaFire primary
+// (challenge-blocked, offline-linkable), ComicK and MangaHub alternates —
+// deliberately in that linked order, since ComicK was linked first in
+// production and the priority must come from ranking, not row order.
+func newReaderPriorityHandler(t *testing.T, mangahubLatest float64) (*DashboardHandler, []repository.TrackerSourceRef) {
+	t.Helper()
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire"}}); err != nil {
+		t.Fatalf("register mangafire stub: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+		t.Fatalf("register comick stub: %v", err)
+	}
+	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub"}, mangahubLatest}); err != nil {
+		t.Fatalf("register mangahub stub: %v", err)
+	}
+
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
+		{SourceKey: "mangahub", SourceURL: "https://mangahub.example/manga/a"},
+	}
+	return newFallbackHandler(t, registry), alternates
+}
+
+// TestFetchChapterURLPrefersFreshMangaHub pins step 1 of the reading chain:
+// when MangaHub carries the requested chapter, reading happens there, even
+// though the MangaFire primary could build a link and ComicK could resolve.
+func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
+	h, alternates := newReaderPriorityHandler(t, 100)
+
+	chapterURL, err := h.fetchChapterURL("mangafire", "https://mangafire.example/title/a", 99, alternates)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if chapterURL != "https://mangahub.example/manga/a/chapter-99" {
+		t.Fatalf("expected mangahub to win when fresh, got %q", chapterURL)
+	}
+}
+
+// TestFetchChapterURLStaleMangaHubFallsBackToMangaFire pins step 2: a chapter
+// MangaHub does not carry yet must open on MangaFire's built link, not on
+// MangaHub's missing page and not on ComicK.
+func TestFetchChapterURLStaleMangaHubFallsBackToMangaFire(t *testing.T) {
+	h, alternates := newReaderPriorityHandler(t, 100)
+
+	chapterURL, err := h.fetchChapterURL("mangafire", "https://mangafire.example/title/a", 101, alternates)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if chapterURL != "https://mangafire.example/title/a/read/chapter-101" {
+		t.Fatalf("expected mangafire's built link when mangahub is stale, got %q", chapterURL)
+	}
+}
+
+// TestFetchChapterURLWithoutMangaFireFallsBackToComicK pins step 3: with no
+// MangaFire link and MangaHub stale, ComicK is the floor.
+func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
+	h, alternates := newReaderPriorityHandler(t, 100)
+
+	// The tracker's primary is ComicK here — no MangaFire in the chain.
+	chapterURL, err := h.fetchChapterURL("comick", "https://comick.example/comic/a", 101, alternates[1:])
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if chapterURL != "https://comick.example/comic/a/chapter-101" {
+		t.Fatalf("expected comick as the floor, got %q", chapterURL)
+	}
+}
+
+// TestOrderReaderCandidates pins the ranking itself: MangaHub first, ComicK
+// last, everything else keeps its incoming order.
+func TestOrderReaderCandidates(t *testing.T) {
+	candidates := []repository.TrackerSourceRef{
+		{SourceKey: "mangafire"},
+		{SourceKey: "mangabuddy"},
+		{SourceKey: "comick"},
+		{SourceKey: "weebcentral"},
+		{SourceKey: "mangahub"},
+	}
+	orderReaderCandidates(candidates)
+
+	got := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		got = append(got, candidate.SourceKey)
+	}
+	want := []string{"mangahub", "mangafire", "mangabuddy", "weebcentral", "comick"}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("unexpected order %v, want %v", got, want)
+		}
 	}
 }
 

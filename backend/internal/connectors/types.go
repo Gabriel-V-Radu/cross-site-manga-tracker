@@ -36,8 +36,13 @@ type ChapterURLResolver interface {
 // OfflineChapterLinker builds a best-effort reader URL for a chapter from the
 // series URL alone, without touching the network. It exists for sites whose
 // reader URL scheme is derivable but whose API sits behind a bot challenge
-// the server cannot pass while a human's browser can: the constructed link is
-// not verified to exist, which is why resolved URLs always take precedence.
+// the server cannot pass while a human's browser can. The constructed link is
+// not verified to exist, but it wins the site's own turn in the reader
+// priority chain: the human's browser passes the challenge the server
+// cannot, so a built MangaFire link beats falling through to a
+// lower-priority site's resolved one. Implement it only for sites with that
+// property — a queryable site whose resolver refused a chapter must fall
+// through, not paper over the refusal with a link to a missing page.
 type OfflineChapterLinker interface {
 	BuildChapterURL(rawURL string, chapter float64) (string, bool)
 }

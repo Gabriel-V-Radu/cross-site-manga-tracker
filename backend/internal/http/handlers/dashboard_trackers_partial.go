@@ -619,9 +619,42 @@ func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
 	return strings.TrimSpace(pageKey) != "" && strings.TrimSpace(pageKey) == strings.TrimSpace(activePage)
 }
 
-// fetchChapterURL resolves a chapter's reader URL from a tracker's primary source,
-// falling back to its alternate linked sources when the primary cannot answer, so
-// a blocked site does not leave every chapter link pointing nowhere useful.
+// readerCandidateRank orders a tracker's linked sources for chapter-link
+// resolution when no reading pin narrows the choice. MangaHub goes first: it
+// is English-only fresh and, unlike ComicK, a real reader site, so when it
+// carries the requested chapter — its resolver refuses chapters beyond its
+// latest, which is exactly the "is it up to date?" test — reading happens
+// there. ComicK goes last: it always has the chapter page, which makes it
+// the reliable floor, but its reader is the worst of the chain. Everything
+// else (the MangaFire primary included, whose built link claims its turn
+// while the site is challenge-blocked) keeps its relative order in between.
+func readerCandidateRank(sourceKey string) int {
+	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
+	case "mangahub":
+		return 0
+	case "comick":
+		return 2
+	default:
+		return 1
+	}
+}
+
+// orderReaderCandidates reorders candidates in place by readerCandidateRank,
+// keeping the incoming order (primary first, then linked alternates) between
+// sources of equal rank.
+func orderReaderCandidates(candidates []repository.TrackerSourceRef) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return readerCandidateRank(candidates[i].SourceKey) < readerCandidateRank(candidates[j].SourceKey)
+	})
+}
+
+// fetchChapterURL resolves a chapter's reader URL across a tracker's linked
+// sources in reading-priority order (see orderReaderCandidates), so a blocked
+// site does not leave every chapter link pointing nowhere useful. Within one
+// candidate, a verified resolution wins; a candidate that cannot be queried
+// but can construct its reader URL offline (MangaFire behind its challenge)
+// claims its turn with the built link rather than ceding to a lower-priority
+// site — the reader's own browser passes the challenge the server cannot.
 func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
@@ -641,22 +674,17 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 		return trimmedSourceURL, fmt.Errorf("chapter url not found")
 	}
 
-	// Primary source first, then the tracker's other linked sources.
+	// Primary source first, then the tracker's other linked sources, reordered
+	// by reading priority.
 	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
 	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: trimmedSourceKey, SourceURL: trimmedSourceURL})
 	candidates = append(candidates, alternates...)
+	orderReaderCandidates(candidates)
 
 	// A source that was actually queried and failed may succeed shortly; one with
 	// no usable connector will not, so the two are cached for different spans.
 	attempted := false
 	var lastErr error
-
-	// A reader URL some connector can construct without the network. Kept as
-	// the second-best answer: a resolved URL is verified to exist, a built one
-	// is a well-founded guess — worth having when every resolution fails
-	// because the readable site sits behind a browser challenge the server
-	// cannot pass while the reader's own browser can (MangaFire).
-	guessedURL := ""
 
 	for _, candidate := range candidates {
 		candidateKey := strings.TrimSpace(candidate.SourceKey)
@@ -671,41 +699,33 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 			continue
 		}
 
-		if guessedURL == "" {
-			if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
-				if built, buildOK := linker.BuildChapterURL(candidateURL, chapter); buildOK {
-					guessedURL = built
-				}
+		if resolver, ok := connector.(connectors.ChapterURLResolver); ok {
+			attempted = true
+			chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
+			switch {
+			case err != nil:
+				lastErr = err
+			case chapterURL == "":
+				lastErr = fmt.Errorf("chapter url empty")
+			default:
+				h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
+				return chapterURL, nil
+			}
+		} else {
+			lastErr = fmt.Errorf("chapter resolver not supported")
+		}
+
+		// The candidate could not answer, but a challenge-blocked site's
+		// constructed link claims its turn instead of ceding to the next site
+		// (see OfflineChapterLinker). Cached for the retry span, not the full
+		// 12 hours: once the site answers the server again, a verified
+		// resolution should replace the guess soon rather than a day later.
+		if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
+			if built, buildOK := linker.BuildChapterURL(candidateURL, chapter); buildOK && strings.TrimSpace(built) != "" {
+				h.setCachedChapterURL(cacheKey, built, true, jitteredTTL(lookupRetryTTL))
+				return built, nil
 			}
 		}
-
-		resolver, ok := connector.(connectors.ChapterURLResolver)
-		if !ok {
-			lastErr = fmt.Errorf("chapter resolver not supported")
-			continue
-		}
-
-		attempted = true
-		chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if chapterURL == "" {
-			lastErr = fmt.Errorf("chapter url empty")
-			continue
-		}
-
-		h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
-		return chapterURL, nil
-	}
-
-	if guessedURL != "" {
-		// Cached for the retry span, not the full 12 hours: once the site
-		// answers the server again, a verified resolution should replace the
-		// guess soon rather than a day later.
-		h.setCachedChapterURL(cacheKey, guessedURL, true, jitteredTTL(lookupRetryTTL))
-		return guessedURL, nil
 	}
 
 	negativeTTL := lookupUnreachableTTL
