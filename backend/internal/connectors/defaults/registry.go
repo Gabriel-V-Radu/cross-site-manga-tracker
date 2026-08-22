@@ -9,6 +9,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangabuddy"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangadex"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangafire"
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangahub"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mangaupdates"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/mgeko"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors/native/webtoons"
@@ -28,6 +29,7 @@ func NewRegistry() *connectors.Registry {
 	_ = registry.Register(weebcentral.NewConnector())
 	_ = registry.Register(mangaupdates.NewConnector())
 	_ = registry.Register(comick.NewConnector())
+	_ = registry.Register(mangahub.NewConnector())
 
 	return registry
 }

@@ -130,6 +130,8 @@ func normalizeConnectorKey(raw string) string {
 		return "mangaupdates"
 	case "comick.dev", "comick.io", "comick.fun", "api.comick.dev":
 		return "comick"
+	case "mangahub.io", "api.mghcdn.com":
+		return "mangahub"
 	default:
 		return key
 	}
