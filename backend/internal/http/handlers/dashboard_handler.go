@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"html/template"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -22,7 +23,11 @@ type DashboardHandler struct {
 	profileResolver    *profileContextResolver
 	registry           *connectors.Registry
 	coverCache         map[string]coverCacheEntry
-	cacheMu            sync.RWMutex
+	// coverStore persists cover entries across restarts (nil in tests that
+	// build the handler by struct literal). The map above stays the hot path;
+	// the store is write-through and only read once, at construction.
+	coverStore *repository.CoverCacheRepository
+	cacheMu    sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}
@@ -218,7 +223,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		registry = connectors.NewRegistry()
 	}
 	linkSuggestionRepo := repository.NewLinkSuggestionRepository(db)
-	return &DashboardHandler{
+	handler := &DashboardHandler{
 		trackerRepo:        repository.NewTrackerRepository(db),
 		sourceRepo:         repository.NewSourceRepository(db),
 		profileRepo:        repository.NewProfileRepository(db),
@@ -227,11 +232,40 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,
 		coverCache:         make(map[string]coverCacheEntry),
+		coverStore:         repository.NewCoverCacheRepository(db),
 		coverInFlight:      make(map[string]bool),
 		coverFetchSem:      make(chan struct{}, 8),
 		mangafireCoverSem:  make(chan struct{}, 3),
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 10),
+	}
+	handler.seedCoverCacheFromStore()
+	return handler
+}
+
+// seedCoverCacheFromStore warms the in-memory cover cache from the persisted
+// one. A failure only costs the warm start, so it is logged and swallowed.
+func (h *DashboardHandler) seedCoverCacheFromStore() {
+	if h.coverStore == nil {
+		return
+	}
+	entries, err := h.coverStore.LoadFresh()
+	if err != nil {
+		slog.Warn("cover cache load failed; starting cold", "error", err)
+		return
+	}
+	h.cacheMu.Lock()
+	for _, entry := range entries {
+		h.coverCache[entry.CacheKey] = coverCacheEntry{
+			CoverURL:  entry.CoverURL,
+			Found:     entry.Found,
+			SourceKey: entry.SourceKey,
+			ExpiresAt: entry.ExpiresAt,
+		}
+	}
+	h.cacheMu.Unlock()
+	if len(entries) > 0 {
+		slog.Info("cover cache warmed from store", "entries", len(entries))
 	}
 }

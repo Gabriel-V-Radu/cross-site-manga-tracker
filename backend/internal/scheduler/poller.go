@@ -74,24 +74,26 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 	}
 }
 
+// Start runs poll cycles with the configured interval of rest BETWEEN them,
+// measured from the end of one cycle to the start of the next. A fixed ticker
+// would fire mid-cycle whenever a cycle outgrows the interval — a full
+// library against throttled hosts takes longer than 30 minutes — and the
+// pending tick would start the next cycle immediately, turning the poller
+// into a rest-less loop that keeps every host's pacing queue permanently
+// busy and user-facing requests permanently behind it.
 func (p *Poller) Start(ctx context.Context) {
 	p.logger.Info("poller started", "interval", p.interval.String())
-	ticker := time.NewTicker(p.interval)
 	go func() {
-		defer ticker.Stop()
-		if err := p.RunOnce(ctx); err != nil {
-			p.logger.Warn("poller initial run failed", "error", err)
-		}
 		for {
+			if err := p.RunOnce(ctx); err != nil {
+				p.logger.Warn("poller cycle failed", "error", err)
+			}
 			select {
 			case <-ctx.Done():
 				p.logger.Info("poller stopped")
 				close(p.stopCh)
 				return
-			case <-ticker.C:
-				if err := p.RunOnce(ctx); err != nil {
-					p.logger.Warn("poller cycle failed", "error", err)
-				}
+			case <-time.After(p.interval):
 			}
 		}
 	}()

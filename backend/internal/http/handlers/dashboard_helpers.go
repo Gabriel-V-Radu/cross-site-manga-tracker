@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math"
 	"math/rand/v2"
 	"net/url"
@@ -474,6 +475,11 @@ func (h *DashboardHandler) getCachedCoverWithSource(titleID string) (coverURL st
 		h.cacheMu.Lock()
 		delete(h.coverCache, titleID)
 		h.cacheMu.Unlock()
+		if h.coverStore != nil {
+			if err := h.coverStore.Delete(titleID); err != nil {
+				slog.Debug("cover cache delete failed", "error", err)
+			}
+		}
 		return "", "", false, false
 	}
 
@@ -485,14 +491,29 @@ func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, 
 }
 
 func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey string, found bool, ttl time.Duration) {
-	h.cacheMu.Lock()
-	h.coverCache[titleID] = coverCacheEntry{
+	entry := coverCacheEntry{
 		CoverURL:  coverURL,
 		Found:     found,
 		SourceKey: strings.TrimSpace(sourceKey),
 		ExpiresAt: time.Now().UTC().Add(ttl),
 	}
+	h.cacheMu.Lock()
+	h.coverCache[titleID] = entry
 	h.cacheMu.Unlock()
+
+	// Write-through so the entry survives restarts; best-effort because a
+	// failed persist only costs a re-resolve after the next restart.
+	if h.coverStore != nil {
+		if err := h.coverStore.Upsert(repository.CoverCacheRow{
+			CacheKey:  titleID,
+			CoverURL:  entry.CoverURL,
+			SourceKey: entry.SourceKey,
+			Found:     entry.Found,
+			ExpiresAt: entry.ExpiresAt,
+		}); err != nil {
+			slog.Debug("cover cache persist failed", "error", err)
+		}
+	}
 }
 
 // invalidateLinkLookups drops the chapter-URL cache and every negative cover
@@ -512,6 +533,12 @@ func (h *DashboardHandler) invalidateLinkLookups() {
 		}
 	}
 	h.cacheMu.Unlock()
+
+	if h.coverStore != nil {
+		if err := h.coverStore.DeleteNegatives(); err != nil {
+			slog.Debug("cover cache negative sweep failed", "error", err)
+		}
+	}
 }
 
 // assetURL stamps a static asset's URL with its last-modified time. The static
