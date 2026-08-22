@@ -58,15 +58,21 @@ func TestInferSourceKeyFromURLSupportsFreeWebNovel(t *testing.T) {
 	}
 }
 
-// TestInferSourceKeyFromURLSupportsMangaBuddy pins the gap that shipped with the
-// MangaBuddy connector: sourceHomeURLForKey knew the source but this did not, so
-// a cover fallback could not recognise a MangaBuddy URL as one it could serve.
-// The live host carries a numeral, which is exactly the shape a substring match
-// has to survive.
-func TestInferSourceKeyFromURLSupportsMangaBuddy(t *testing.T) {
-	inferred := inferSourceKeyFromURL("https://mangabuddy1.co.uk/manga/sample-series")
-	if inferred != "mangabuddy" {
-		t.Fatalf("expected inferred source key mangabuddy, got %q", inferred)
+// TestInferSourceKeyFromURLKnowsEveryChapterSource pins a gap that has now
+// shipped twice (MangaBuddy, then ComicK/MangaHub): a connector gets wired
+// everywhere except here, and then a resolved chapter link cannot be
+// attributed to its site — which silently breaks the open-to-read button
+// following the freshest source.
+func TestInferSourceKeyFromURLKnowsEveryChapterSource(t *testing.T) {
+	cases := map[string]string{
+		"https://mangahub.io/manga/sample-series_142": "mangahub",
+		"https://comick.dev/comic/kagura-bachi":       "comick",
+		"https://mangafire.to/title/npozj-akanabe":    "mangafire",
+	}
+	for rawURL, want := range cases {
+		if inferred := inferSourceKeyFromURL(rawURL); inferred != want {
+			t.Fatalf("expected inferred source key %q for %s, got %q", want, rawURL, inferred)
+		}
 	}
 }
 

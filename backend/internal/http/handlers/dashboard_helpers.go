@@ -435,6 +435,10 @@ func inferSourceKeyFromURL(rawURL string) string {
 		return "weebcentral"
 	case strings.Contains(host, "mangaupdates"):
 		return "mangaupdates"
+	case strings.Contains(host, "comick"):
+		return "comick"
+	case strings.Contains(host, "mangahub"):
+		return "mangahub"
 	default:
 		return ""
 	}
