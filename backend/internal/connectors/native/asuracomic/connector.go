@@ -207,7 +207,29 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		seriesID = canonicalSeriesID
 	}
 
+	// Verify against the series page rather than constructing blindly: a
+	// resolved URL is this connector's claim that the site carries the
+	// chapter, and the reader chain ranks sites by that claim. A chapter the
+	// page lists as locked early-access counts as carried — its page exists
+	// and unlocks on its own timer.
+	result, err := c.resolveBySeriesID(ctx, seriesID)
+	if err != nil {
+		return "", err
+	}
+	if canonicalID := strings.TrimSpace(result.SourceItemID); canonicalID != "" {
+		seriesID = canonicalID
+	}
+	if result.LatestChapter == nil {
+		return "", fmt.Errorf("no chapters listed for %s", seriesID)
+	}
 	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
+	if chapter > *result.LatestChapter {
+		return "", fmt.Errorf("chapter %s beyond latest %s: %w",
+			chapterSegment,
+			strconv.FormatFloat(*result.LatestChapter, 'f', -1, 64),
+			connectors.ErrChapterNotFound)
+	}
+
 	return c.absoluteURL("/comics/" + seriesID + "/chapter/" + chapterSegment), nil
 }
 

@@ -268,7 +268,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 
 	match := pickChapterEntry(chapters, chapter)
 	if match == nil {
-		return "", fmt.Errorf("chapter %s not found", strconv.FormatFloat(chapter, 'f', -1, 64))
+		return "", fmt.Errorf("chapter %s: %w", strconv.FormatFloat(chapter, 'f', -1, 64), connectors.ErrChapterNotFound)
 	}
 
 	if slug == "" {

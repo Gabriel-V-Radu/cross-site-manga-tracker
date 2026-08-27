@@ -2,10 +2,13 @@ package asuracomic
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func TestAsuraComicConnectorResolveAndSearch(t *testing.T) {
@@ -375,5 +378,47 @@ func TestAsuraComicConnectorFallsBackFromLegacySeriesURL(t *testing.T) {
 	}
 	if chapterURL != server.URL+"/comics/nano-machine-7f873ca6/chapter/304" {
 		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+}
+
+// TestAsuraComicResolveChapterURLVerifiesAgainstTheSeriesPage pins that a
+// chapter link is a verified claim, not a constructed guess: a chapter the
+// series page lists resolves, one beyond its latest answers the typed
+// not-found verdict so the reader chain can hand the turn to the next site.
+func TestAsuraComicResolveChapterURLVerifiesAgainstTheSeriesPage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/comics/nano-machine-7f873ca6", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Nano Machine - Asura Scans">
+</head>
+<body>
+  <a href="/comics/nano-machine-7f873ca6/chapter/303">Chapter 303</a>
+  <a href="/comics/nano-machine-7f873ca6/chapter/304">Chapter 304</a>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+
+	chapterURL, err := conn.ResolveChapterURL(context.Background(), "https://asuracomic.net/comics/nano-machine-7f873ca6", 303)
+	if err != nil {
+		t.Fatalf("resolve chapter url failed: %v", err)
+	}
+	if chapterURL != server.URL+"/comics/nano-machine-7f873ca6/chapter/303" {
+		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+
+	_, err = conn.ResolveChapterURL(context.Background(), "https://asuracomic.net/comics/nano-machine-7f873ca6", 305)
+	if err == nil {
+		t.Fatalf("expected a chapter beyond the listing to be refused")
+	}
+	if !errors.Is(err, connectors.ErrChapterNotFound) {
+		t.Fatalf("expected the typed not-found verdict, got %v", err)
 	}
 }

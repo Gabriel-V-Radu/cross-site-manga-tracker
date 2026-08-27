@@ -220,7 +220,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("mangahub manga %q not found", slug)
 	}
 	if manga.LatestChapter == nil || chapter > *manga.LatestChapter {
-		return "", fmt.Errorf("chapter %s not found", formatChapter(chapter))
+		return "", fmt.Errorf("chapter %s: %w", formatChapter(chapter), connectors.ErrChapterNotFound)
 	}
 
 	return c.chapterURL(slug, chapter), nil

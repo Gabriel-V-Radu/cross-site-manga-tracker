@@ -303,7 +303,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return c.siteURL + "/comic/" + url.PathEscape(slug) + "/" + entry.HID + "-chapter-" + formatted + "-en", nil
 	}
 
-	return "", fmt.Errorf("chapter %s not found", formatted)
+	return "", fmt.Errorf("chapter %s: %w", formatted, connectors.ErrChapterNotFound)
 }
 
 // latestEnglishChapter reads the newest English chapters and returns the

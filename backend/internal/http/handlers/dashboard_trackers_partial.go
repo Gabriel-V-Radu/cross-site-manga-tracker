@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -620,24 +621,30 @@ func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
 }
 
 // readerCandidateRank orders a tracker's linked sources for chapter-link
-// resolution when no reading pin narrows the choice. MangaHub goes first: it
-// is English-only fresh and, unlike ComicK, a real reader site, so when it
-// carries the requested chapter — its resolver refuses chapters beyond its
-// latest, which is exactly the "is it up to date?" test — reading happens
-// there. ComicK goes last: it always has the chapter page, which makes it
-// the reliable floor, but its reader is the worst of the chain. Everything
-// else (the MangaFire primary included, whose built link claims its turn
-// while the site is challenge-blocked) keeps its relative order in between.
+// resolution when no reading pin narrows the choice. Origin scanlator sites
+// go first: for their own series they are where chapters appear before any
+// aggregator mirrors them, and their readers are the best of the chain. Then
+// MangaHub, English-only fresh, then the remaining reader sites in their
+// incoming order. ComicK ranks last as the info floor: it always has the
+// chapter page, which makes it the reliable fallback, but its reader is the
+// worst of the chain — see fetchChapterURL for how the floor is only reached
+// after every readable site and every offline-built link had its turn.
 func readerCandidateRank(sourceKey string) int {
 	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
-	case "mangahub":
+	case "asuracomic", "flamecomics":
 		return 0
-	case "comick":
-		return 2
-	default:
+	case "mangahub":
 		return 1
+	case "comick":
+		return readerRankInfoFloor
+	default:
+		return 2
 	}
 }
+
+// readerRankInfoFloor marks sources nobody wants to read on: they take part
+// in the chain only after every readable site and offline-built link failed.
+const readerRankInfoFloor = 3
 
 // orderReaderCandidates reorders candidates in place by readerCandidateRank,
 // keeping the incoming order (primary first, then linked alternates) between
@@ -649,12 +656,17 @@ func orderReaderCandidates(candidates []repository.TrackerSourceRef) {
 }
 
 // fetchChapterURL resolves a chapter's reader URL across a tracker's linked
-// sources in reading-priority order (see orderReaderCandidates), so a blocked
-// site does not leave every chapter link pointing nowhere useful. Within one
-// candidate, a verified resolution wins; a candidate that cannot be queried
-// but can construct its reader URL offline (MangaFire behind its challenge)
-// claims its turn with the built link rather than ceding to a lower-priority
-// site — the reader's own browser passes the challenge the server cannot.
+// sources in three tiers, so a blocked site does not leave every chapter link
+// pointing nowhere useful. First, every readable site in reading-priority
+// order (see orderReaderCandidates) gets to verify it carries the chapter —
+// a resolver that answers ErrChapterNotFound has answered, and cedes its
+// turn for this chapter. Second, a site that could not be asked at all but
+// can construct its reader URL offline (MangaFire behind its challenge)
+// serves the built link — the reader's own browser passes the challenge the
+// server cannot, so an unverified link there beats a verified one on the
+// floor. Third, the info-floor sites (ComicK): they always carry the chapter
+// page, but nobody wants to read there, so they only serve when nothing else
+// could.
 func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
@@ -686,45 +698,90 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 	attempted := false
 	var lastErr error
 
+	// Sites whose resolver could not be asked (as opposed to answering "not
+	// carried") and that can build their reader URL offline, in chain order.
+	type blockedLinkable struct {
+		linker connectors.OfflineChapterLinker
+		url    string
+	}
+	blocked := make([]blockedLinkable, 0, 1)
+	infoFloor := make([]repository.TrackerSourceRef, 0, 1)
+
+	resolveCandidate := func(candidateKey, candidateURL string) (string, bool) {
+		connector, ok := h.registry.Get(candidateKey)
+		if !ok {
+			lastErr = fmt.Errorf("connector not found")
+			return "", false
+		}
+
+		resolver, ok := connector.(connectors.ChapterURLResolver)
+		if !ok {
+			lastErr = fmt.Errorf("chapter resolver not supported")
+			return "", false
+		}
+
+		attempted = true
+		chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
+		switch {
+		case err != nil:
+			lastErr = err
+			// The site answered "I do not carry this chapter": its turn is
+			// over, a built link would point at a page known not to exist.
+			// Any other failure means the site never answered, so its
+			// offline-built link may still claim a turn in the second tier.
+			if !errors.Is(err, connectors.ErrChapterNotFound) {
+				if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
+					blocked = append(blocked, blockedLinkable{linker: linker, url: candidateURL})
+				}
+			}
+		case chapterURL == "":
+			lastErr = fmt.Errorf("chapter url empty")
+		default:
+			return chapterURL, true
+		}
+		return "", false
+	}
+
+	// Tier 1: readable sites that verify they carry the chapter.
 	for _, candidate := range candidates {
 		candidateKey := strings.TrimSpace(candidate.SourceKey)
 		candidateURL := strings.TrimSpace(candidate.SourceURL)
 		if candidateKey == "" || candidateURL == "" {
 			continue
 		}
-
-		connector, ok := h.registry.Get(candidateKey)
-		if !ok {
-			lastErr = fmt.Errorf("connector not found")
+		if readerCandidateRank(candidateKey) == readerRankInfoFloor {
+			infoFloor = append(infoFloor, candidate)
 			continue
 		}
 
-		if resolver, ok := connector.(connectors.ChapterURLResolver); ok {
-			attempted = true
-			chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
-			switch {
-			case err != nil:
-				lastErr = err
-			case chapterURL == "":
-				lastErr = fmt.Errorf("chapter url empty")
-			default:
-				h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
-				return chapterURL, nil
-			}
-		} else {
-			lastErr = fmt.Errorf("chapter resolver not supported")
+		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
+			h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
+			return chapterURL, nil
 		}
+	}
 
-		// The candidate could not answer, but a challenge-blocked site's
-		// constructed link claims its turn instead of ceding to the next site
-		// (see OfflineChapterLinker). Cached for the retry span, not the full
-		// 12 hours: once the site answers the server again, a verified
-		// resolution should replace the guess soon rather than a day later.
-		if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
-			if built, buildOK := linker.BuildChapterURL(candidateURL, chapter); buildOK && strings.TrimSpace(built) != "" {
-				h.setCachedChapterURL(cacheKey, built, true, jitteredTTL(lookupRetryTTL))
-				return built, nil
-			}
+	// Tier 2: offline-built links from sites that could not be asked. Cached
+	// for the retry span, not the full 12 hours: once the site answers the
+	// server again, a verified resolution should replace the guess soon
+	// rather than a day later.
+	for _, candidate := range blocked {
+		if built, buildOK := candidate.linker.BuildChapterURL(candidate.url, chapter); buildOK && strings.TrimSpace(built) != "" {
+			h.setCachedChapterURL(cacheKey, built, true, jitteredTTL(lookupRetryTTL))
+			return built, nil
+		}
+	}
+
+	// Tier 3: the info floor — typically the site that reported the chapter
+	// number in the first place, so at least its chapter page exists.
+	for _, candidate := range infoFloor {
+		candidateKey := strings.TrimSpace(candidate.SourceKey)
+		candidateURL := strings.TrimSpace(candidate.SourceURL)
+		if candidateKey == "" || candidateURL == "" {
+			continue
+		}
+		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
+			h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
+			return chapterURL, nil
 		}
 	}
 

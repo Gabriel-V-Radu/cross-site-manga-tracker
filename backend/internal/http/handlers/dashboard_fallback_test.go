@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -571,13 +572,13 @@ func TestFetchChapterURLFallsBackToOfflineGuess(t *testing.T) {
 	}
 }
 
-// TestFetchChapterURLBlockedLinkableClaimsItsTurn pins the reading priority
-// introduced with the MangaHub connector: a challenge-blocked site that can
-// construct its reader URL takes its turn in the chain rather than ceding to
-// a lower-priority site's resolution — the reader's own browser passes the
-// challenge the server cannot. (Before this, any resolved URL beat the
-// guess, which sent every MangaFire reader to whichever mirror answered.)
-func TestFetchChapterURLBlockedLinkableClaimsItsTurn(t *testing.T) {
+// TestFetchChapterURLVerifiedReaderBeatsBlockedGuess pins the tier order: a
+// readable site that verified it carries the chapter beats a blocked site's
+// unverified built link, even when the blocked site is the tracker's primary.
+// (The built link used to win its row-order turn, which badged a
+// challenge-blocked MangaFire — pointing at a chapter nobody confirmed —
+// while a live site carried the chapter one hop away.)
+func TestFetchChapterURLVerifiedReaderBeatsBlockedGuess(t *testing.T) {
 	registry := connectors.NewRegistry()
 	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
 		t.Fatalf("register blocked linkable connector: %v", err)
@@ -593,10 +594,112 @@ func TestFetchChapterURLBlockedLinkableClaimsItsTurn(t *testing.T) {
 
 	chapterURL, err := h.fetchChapterURL("blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
+		t.Fatalf("expected the verified mirror to be served: %v", err)
+	}
+	if chapterURL != "https://mirror.example/series/a.ZD1/chapter-12" {
+		t.Fatalf("expected the verified mirror to beat the blocked primary's guess, got %q", chapterURL)
+	}
+}
+
+// TestFetchChapterURLBlockedGuessBeatsInfoFloor pins the other side of that
+// tier: with every readable site unable to verify, the blocked site's built
+// link still beats the info floor — the reader's own browser passes the
+// challenge the server cannot, and nobody wants to read on ComicK.
+func TestFetchChapterURLBlockedGuessBeatsInfoFloor(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
+		t.Fatalf("register blocked linkable connector: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+		t.Fatalf("register comick stub: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
+	}
+
+	chapterURL, err := h.fetchChapterURL("blockedsource", "https://blocked.example/title/a", 12, alternates)
+	if err != nil {
 		t.Fatalf("expected the built url to be served: %v", err)
 	}
 	if chapterURL != "https://blocked.example/title/a/read/chapter-12" {
-		t.Fatalf("expected the blocked primary's built url to win its turn, got %q", chapterURL)
+		t.Fatalf("expected the blocked site's built url to beat the info floor, got %q", chapterURL)
+	}
+}
+
+// linkableCappedConnector answers its resolver — refusing chapters beyond its
+// latest with the typed verdict — and can also build reader URLs offline, the
+// way the live MangaFire connector behaves when its site answers.
+type linkableCappedConnector struct {
+	cappedResolverConnector
+}
+
+func (l linkableCappedConnector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
+	return rawURL + "/read/chapter-" + strconv.FormatFloat(chapter, 'f', -1, 64), true
+}
+
+// TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess pins the bug that
+// badged MangaFire on cards whose chapter it did not carry: a site whose
+// resolver *answered* "not carried" must cede its turn entirely — its
+// offline-built link is a page known not to exist — leaving the chapter to
+// the next site in the chain.
+func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(linkableCappedConnector{cappedResolverConnector{mirrorConnector{key: "answeredsource"}, 81}}); err != nil {
+		t.Fatalf("register answered connector: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+		t.Fatalf("register comick stub: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
+	}
+
+	chapterURL, err := h.fetchChapterURL("answeredsource", "https://answered.example/title/a", 82, alternates)
+	if err != nil {
+		t.Fatalf("expected the floor to serve the chapter: %v", err)
+	}
+	if chapterURL != "https://comick.example/comic/a/chapter-82" {
+		t.Fatalf("expected the answered refusal to fall through past the guess, got %q", chapterURL)
+	}
+}
+
+// TestFetchChapterURLOriginSiteOutranksAggregators pins the top of the chain:
+// an origin scanlator site that verified it carries the chapter wins over a
+// fresh MangaHub, a linkable MangaFire, and the ComicK floor all at once.
+func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
+	registry := connectors.NewRegistry()
+	if err := registry.Register(mirrorConnector{key: "asuracomic"}); err != nil {
+		t.Fatalf("register asuracomic stub: %v", err)
+	}
+	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub"}, 100}); err != nil {
+		t.Fatalf("register mangahub stub: %v", err)
+	}
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire"}}); err != nil {
+		t.Fatalf("register mangafire stub: %v", err)
+	}
+	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+		t.Fatalf("register comick stub: %v", err)
+	}
+
+	h := newFallbackHandler(t, registry)
+	// Asura deliberately last in row order: its precedence must come from the
+	// ranking, not from where the link scan happened to insert it.
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
+		{SourceKey: "mangahub", SourceURL: "https://mangahub.example/manga/a"},
+		{SourceKey: "asuracomic", SourceURL: "https://asura.example/comics/a"},
+	}
+
+	chapterURL, err := h.fetchChapterURL("mangafire", "https://mangafire.example/title/a", 82, alternates)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if chapterURL != "https://asura.example/comics/a/chapter-82" {
+		t.Fatalf("expected the origin site to win the chain, got %q", chapterURL)
 	}
 }
 
@@ -610,7 +713,7 @@ type cappedResolverConnector struct {
 
 func (c cappedResolverConnector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
 	if chapter > c.latest {
-		return "", errors.New("chapter not found")
+		return "", fmt.Errorf("chapter beyond latest: %w", connectors.ErrChapterNotFound)
 	}
 	return c.mirrorConnector.ResolveChapterURL(ctx, rawURL, chapter)
 }
@@ -685,15 +788,17 @@ func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
 	}
 }
 
-// TestOrderReaderCandidates pins the ranking itself: MangaHub first, ComicK
-// last, everything else keeps its incoming order.
+// TestOrderReaderCandidates pins the ranking itself: origin scanlator sites
+// first, then MangaHub, ComicK last, everything else keeps its incoming order.
 func TestOrderReaderCandidates(t *testing.T) {
 	candidates := []repository.TrackerSourceRef{
 		{SourceKey: "mangafire"},
 		{SourceKey: "mangaupdates"},
 		{SourceKey: "comick"},
+		{SourceKey: "asuracomic"},
 		{SourceKey: "mangadex"},
 		{SourceKey: "mangahub"},
+		{SourceKey: "flamecomics"},
 	}
 	orderReaderCandidates(candidates)
 
@@ -701,7 +806,7 @@ func TestOrderReaderCandidates(t *testing.T) {
 	for _, candidate := range candidates {
 		got = append(got, candidate.SourceKey)
 	}
-	want := []string{"mangahub", "mangafire", "mangaupdates", "mangadex", "comick"}
+	want := []string{"asuracomic", "flamecomics", "mangahub", "mangafire", "mangaupdates", "mangadex", "comick"}
 	for index := range want {
 		if got[index] != want[index] {
 			t.Fatalf("unexpected order %v, want %v", got, want)
