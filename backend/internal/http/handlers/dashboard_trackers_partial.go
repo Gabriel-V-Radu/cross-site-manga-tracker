@@ -300,8 +300,21 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 		}
 		card.HighlightURL = chapterBaseURL
 
+		// The source that reported the stored chapter number, when a poll has
+		// recorded one. It is the card's last resort before the cover source:
+		// with no chapter link resolved anywhere, at least the site that said
+		// "chapter 82 exists" has a page proving it.
+		reporterSourceKey := ""
+		if item.LatestChapterSourceID != nil {
+			if reporter, found := sourceByID[*item.LatestChapterSourceID]; found {
+				reporterSourceKey = strings.ToLower(strings.TrimSpace(reporter.Key))
+			}
+		}
+
+		resolvedLatest := false
 		if item.LatestKnownChapter != nil {
-			latestChapterURL, resolvedLatest, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
+			latestChapterURL, resolved, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
+			resolvedLatest = resolved
 			card.LatestKnownChapterURL = latestChapterURL
 			if resolvedLatest {
 				latestChapterSourceKey = inferSourceKeyFromURL(latestChapterURL)
@@ -309,6 +322,21 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 			}
 			if waitingLatestChapterURL {
 				pendingCovers = true
+			}
+		}
+
+		// With no chapter link resolved anywhere, the latest-chapter link
+		// degrades to a series page. Under auto, prefer the reporter's series
+		// page over the primary's: the number on the card is that site's
+		// claim, so its page is where the chapter can actually be seen.
+		if pinned == nil && !resolvedLatest && reporterSourceKey != "" && item.LatestKnownChapter != nil {
+			for _, alternate := range alternates {
+				if strings.EqualFold(strings.TrimSpace(alternate.SourceKey), reporterSourceKey) &&
+					strings.TrimSpace(alternate.SourceURL) != "" {
+					card.LatestKnownChapterURL = alternate.SourceURL
+					card.LatestKnownChapterSite = chapterSiteLabel(reporterSourceKey, sourceNameByKey)
+					break
+				}
 			}
 		}
 
@@ -342,10 +370,14 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 			pendingCovers = true
 		}
 
-		// Only fall back to the cover's source when no chapter link resolved:
-		// otherwise a card whose primary site is down would still badge that site
-		// while every working link pointed at the mirror.
+		// The badge follows the strongest signal available: the site whose
+		// chapter link resolved, else the site that reported the chapter
+		// number, else whoever supplied the cover art — the weakest signal on
+		// the card, but better than badging a primary that served nothing.
 		servingSourceKey := latestChapterSourceKey
+		if servingSourceKey == "" {
+			servingSourceKey = reporterSourceKey
+		}
 		if servingSourceKey == "" {
 			servingSourceKey = coverSourceKey
 		}

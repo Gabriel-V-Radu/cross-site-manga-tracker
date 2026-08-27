@@ -142,6 +142,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		// the tracker's other linked sources so the chapter count keeps advancing
 		// from whichever mirror is still readable.
 		usedFallback := false
+		reporterSourceID := tracker.SourceID
 		if resolveErr != nil {
 			if fallbackResult, fallbackSource := p.resolveFromAlternates(ctx, tracker); fallbackResult != nil {
 				p.logger.Info("poll fell back to alternate source",
@@ -151,6 +152,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 					"primaryError", resolveErr)
 				result, resolveErr = fallbackResult, nil
 				usedFallback = true
+				reporterSourceID = fallbackSource.SourceID
 			}
 		}
 
@@ -185,6 +187,18 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 				"to", derefChapter(latest),
 				"sourceKey", tracker.SourceKey,
 				"usedFallback", usedFallback)
+		}
+
+		// The source whose report the stored number now reflects. Recorded when
+		// this poll's report IS the stored number — an advance, a correction, a
+		// first fill, or a plain confirmation (which backfills trackers from
+		// before the column existed and keeps the attribution current). A poll
+		// whose report lost the reconciliation — a lagging mirror, a pending
+		// lower — must not claim a number it did not supply.
+		var latestChapterSourceID *int64
+		if reporterSourceID > 0 && latest != nil && result.LatestChapter != nil &&
+			sameChapterNumber(*latest, *result.LatestChapter) {
+			latestChapterSourceID = &reporterSourceID
 		}
 
 		newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
@@ -243,11 +257,12 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			CurrentSourceURL:     currentSourceURL,
 			SourceItemID:         canonicalSourceItemID,
 			SourceURL:            canonicalSourceURL,
-			LatestKnownChapter:   latest,
-			LatestReleaseAt:      latestReleaseAt,
-			ClearLatestReleaseAt: clearLatestReleaseAt,
-			PendingLowerChapter:  outcome.pendingLower,
-			CheckedAt:            now,
+			LatestKnownChapter:    latest,
+			LatestChapterSourceID: latestChapterSourceID,
+			LatestReleaseAt:       latestReleaseAt,
+			ClearLatestReleaseAt:  clearLatestReleaseAt,
+			PendingLowerChapter:   outcome.pendingLower,
+			CheckedAt:             now,
 		}); err != nil {
 			p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
 			continue

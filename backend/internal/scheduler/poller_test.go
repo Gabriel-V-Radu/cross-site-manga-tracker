@@ -16,6 +16,7 @@ type fakeRepo struct {
 	updatedItemID       *string
 	updatedURL          string
 	updatedLatest       *float64
+	updatedLatestSource *int64
 	updatedAt           *time.Time
 	updatedSourceID     int64
 	updatedCurrentURL   string
@@ -32,6 +33,7 @@ func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
 	f.updatedItemID = update.SourceItemID
 	f.updatedURL = update.SourceURL
 	f.updatedLatest = update.LatestKnownChapter
+	f.updatedLatestSource = update.LatestChapterSourceID
 	f.updatedAt = update.LatestReleaseAt
 	f.updatedSourceID = update.SourceID
 	f.updatedCurrentURL = update.CurrentSourceURL
@@ -243,6 +245,11 @@ func TestPollerRunOnce_RecordsPendingLowerChapter(t *testing.T) {
 	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != reported {
 		t.Fatalf("expected the lower report to be recorded as pending, got %#v", repo.updatedPendingLower)
 	}
+	// The mirror's report lost the reconciliation, so it must not claim the
+	// stored number as its own.
+	if repo.updatedLatestSource != nil {
+		t.Fatalf("a lagging report must not be recorded as the reporter, got %#v", repo.updatedLatestSource)
+	}
 }
 
 // TestPollerRunOnce_AppliesConfirmedLowerChapter is the same tracker one window
@@ -331,7 +338,7 @@ func (f fakeConnector) ResolveByURL(context.Context, string) (*connectors.MangaR
 func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	prev := 10.0
 	next := 11.0
-	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceID: 7, SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &prev}}}
 	registry := connectors.NewRegistry()
 	if err := registry.Register(fakeConnector{latest: &next}); err != nil {
 		t.Fatalf("register connector: %v", err)
@@ -347,6 +354,9 @@ func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	}
 	if repo.updatedLatest == nil || *repo.updatedLatest != next {
 		t.Fatalf("expected latest chapter %.2f, got %#v", next, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 7 {
+		t.Fatalf("expected the primary to be recorded as the reporter, got %#v", repo.updatedLatestSource)
 	}
 	if repo.updatedURL != "u" {
 		t.Fatalf("expected canonical source url to be saved, got %q", repo.updatedURL)
@@ -515,6 +525,12 @@ func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
 	}
 	if repo.updatedLatest == nil || *repo.updatedLatest != next {
 		t.Fatalf("expected latest chapter %.2f from the fallback, got %#v", next, repo.updatedLatest)
+	}
+
+	// The mirror's number is the one being stored, so the mirror is recorded
+	// as the source that reported it.
+	if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 9 {
+		t.Fatalf("expected the fallback source to be recorded as the reporter, got %#v", repo.updatedLatestSource)
 	}
 
 	// The primary pointer must survive untouched: writing the mirror's id/URL

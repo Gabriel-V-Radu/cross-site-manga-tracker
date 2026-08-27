@@ -41,7 +41,12 @@ type Tracker struct {
 	// report a chapter number without one, which is what keeps such a tracker
 	// from being ranked by when it was last polled.
 	LatestChapterSeenAt *time.Time `json:"latestChapterSeenAt,omitempty"`
-	LastCheckedAt       *time.Time `json:"lastCheckedAt,omitempty"`
+	// LatestChapterSourceID names the source that reported the stored latest
+	// chapter number, nil until a poll confirms it. When no reading site can
+	// resolve a chapter link, the card attributes the number to this source
+	// rather than to whoever supplied the cover art.
+	LatestChapterSourceID *int64     `json:"latestChapterSourceId,omitempty"`
+	LastCheckedAt         *time.Time `json:"lastCheckedAt,omitempty"`
 	// ReadingSourceID pins the tracker's reading links to one linked source;
 	// nil lets the dashboard pick the best available site.
 	ReadingSourceID *int64 `json:"readingSourceId,omitempty"`

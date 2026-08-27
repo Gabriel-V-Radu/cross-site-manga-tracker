@@ -39,6 +39,10 @@ type PollingTracker struct {
 	// it overwrites the stored chapter.
 	PendingLowerChapter     *float64
 	PendingLowerFirstSeenAt *time.Time
+	// LatestChapterSourceID names the source that reported the stored chapter
+	// number, nil until some poll confirms it. The poller reads it to know
+	// whether a confirming poll should backfill it.
+	LatestChapterSourceID *int64
 	// AlternateSources are the tracker's other linked sources, excluding the
 	// primary one above. The poller falls back to them when the primary source
 	// cannot be read, so a single site going dark does not freeze the tracker.
@@ -75,6 +79,11 @@ type PollingUpdate struct {
 	LatestKnownChapter   *float64
 	LatestReleaseAt      *time.Time
 	ClearLatestReleaseAt bool
+
+	// LatestChapterSourceID records which source reported the chapter number
+	// being stored. Nil leaves whatever is recorded untouched - the right
+	// value for a poll whose report did not decide the stored number.
+	LatestChapterSourceID *int64
 
 	// PendingLowerChapter records a lower chapter number awaiting confirmation.
 	// Nil clears whatever was pending, which is what every poll that agrees with

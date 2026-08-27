@@ -133,3 +133,40 @@ func TestUpdatePollingStateKeepsChapterSeenAtWhenReleaseDateIsKnown(t *testing.T
 		t.Fatalf("expected the first-seen timestamp alongside it, got %v", tracker.LatestChapterSeenAt)
 	}
 }
+
+// TestUpdatePollingStateRecordsAndKeepsChapterReporter covers the reporter
+// column's two writes: a poll that names a reporter records it, and a later
+// poll that names none (its report lost the reconciliation) leaves the
+// recorded one in place rather than erasing the attribution.
+func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 19)
+
+	newChapter := 20.0
+	reporter := int64(3)
+	checkedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
+	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+
+	tracker, err := repo.GetByID(1, trackerID)
+	if err != nil || tracker == nil {
+		t.Fatalf("get tracker: %v", err)
+	}
+	if tracker.LatestChapterSourceID == nil || *tracker.LatestChapterSourceID != reporter {
+		t.Fatalf("expected reporter source %d to be recorded, got %#v", reporter, tracker.LatestChapterSourceID)
+	}
+
+	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
+		t.Fatalf("update polling state again: %v", err)
+	}
+
+	tracker, err = repo.GetByID(1, trackerID)
+	if err != nil || tracker == nil {
+		t.Fatalf("get tracker again: %v", err)
+	}
+	if tracker.LatestChapterSourceID == nil || *tracker.LatestChapterSourceID != reporter {
+		t.Fatalf("expected the recorded reporter to survive a poll that named none, got %#v", tracker.LatestChapterSourceID)
+	}
+}

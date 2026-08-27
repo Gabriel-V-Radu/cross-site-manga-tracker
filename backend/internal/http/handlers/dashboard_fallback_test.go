@@ -237,8 +237,9 @@ func TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource(t *testing.T
 }
 
 // TestBuildTrackerCardsFallsBackToTheCoverSource is the other half: with no
-// resolved chapter link there is nothing better to go on, so the cover's source
-// still decides. Without this the card would badge a primary that served nothing.
+// resolved chapter link and no recorded reporter there is nothing better to go
+// on, so the cover's source still decides. Without this the card would badge a
+// primary that served nothing.
 func TestBuildTrackerCardsFallsBackToTheCoverSource(t *testing.T) {
 	// A negative cache entry: the link degrades to the series page, which names
 	// the primary but proves nothing about who can serve the chapter.
@@ -252,6 +253,67 @@ func TestBuildTrackerCardsFallsBackToTheCoverSource(t *testing.T) {
 	}
 	if card.LatestKnownChapterSite != "" {
 		t.Fatalf("expected no label for an unresolved link, got %q", card.LatestKnownChapterSite)
+	}
+}
+
+// TestBuildTrackerCardsPresentsTheChapterReporter sits between those two: no
+// chapter link resolved, but the poller recorded which source reported the
+// stored number. That source outranks the cover's — the number on the card is
+// its claim, so the badge and the degraded latest-chapter link follow it
+// rather than a site that merely supplied art.
+func TestBuildTrackerCardsPresentsTheChapterReporter(t *testing.T) {
+	const (
+		primaryURL  = "https://mangafire.to/title/npozj-akanabe"
+		reporterURL = "https://comick.dev/comic/akanabe"
+		artURL      = "https://mangahub.example/manga/akanabe"
+	)
+	latest := 65.0
+
+	h := newFallbackHandler(t, connectors.NewRegistry())
+
+	// The cover came from a third site entirely; the chapter number from ComicK.
+	h.setCachedCoverFromSource(buildCoverCacheKey("mangafire", primaryURL, nil),
+		"https://cdn.example/cover.webp", "mangahub", true, time.Hour)
+	h.setCachedChapterURL(buildChapterURLCacheKey("mangafire", primaryURL, latest),
+		"", false, time.Hour)
+
+	reporterID := int64(2)
+	items := []models.Tracker{{
+		ID: 1, Title: "Akanabe", Status: "reading", SourceID: 1,
+		SourceURL:             primaryURL,
+		LatestKnownChapter:    &latest,
+		LatestChapterSourceID: &reporterID,
+	}}
+	sourceByID := map[int64]models.Source{
+		1: {ID: 1, Key: "mangafire", Name: "MangaFire"},
+		2: {ID: 2, Key: "comick", Name: "ComicK"},
+		3: {ID: 3, Key: "mangahub", Name: "MangaHub"},
+	}
+	logos := map[int64]string{1: "/logos/mangafire.png", 2: "/logos/comick.png", 3: "/logos/mangahub.png"}
+	alternates := map[int64][]repository.TrackerSourceRef{
+		1: {
+			{SourceID: 2, SourceKey: "comick", SourceURL: reporterURL},
+			{SourceID: 3, SourceKey: "mangahub", SourceURL: artURL},
+		},
+	}
+
+	cards, _ := h.buildTrackerCards(items, sourceByID, logos, alternates, "")
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	card := cards[0]
+
+	if card.SourceLogoLabel != "ComicK" {
+		t.Fatalf("expected the reporter to outrank the cover source, got %q", card.SourceLogoLabel)
+	}
+	if card.SourceURL != reporterURL {
+		t.Fatalf("expected Open to follow the reporter, got %q", card.SourceURL)
+	}
+	if card.LatestKnownChapterURL != reporterURL {
+		t.Fatalf("expected the degraded latest link to open the reporter's page, got %q", card.LatestKnownChapterURL)
+	}
+	if card.LatestKnownChapterSite != "ComicK" {
+		t.Fatalf("expected the latest link labelled with the reporter, got %q", card.LatestKnownChapterSite)
 	}
 }
 

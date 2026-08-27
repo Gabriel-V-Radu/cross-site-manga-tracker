@@ -49,7 +49,7 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
 			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
-			latest_chapter_seen_at, last_checked_at, reading_source_id,
+			latest_chapter_seen_at, latest_chapter_source_id, last_checked_at, reading_source_id,
 			created_at, updated_at
 		FROM trackers
 		WHERE id = ? AND profile_id = ?
