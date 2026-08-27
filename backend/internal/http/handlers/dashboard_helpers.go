@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -339,19 +340,12 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	for _, key := range tryKeys {
 		coverURL, tried, err := h.resolveCoverFromConnector(parent, key, resolvedURL)
 		attempted = attempted || tried
-		if err != nil {
+		if err != nil || coverURL == "" {
 			continue
 		}
-		// A resolved cover URL is a claim, not a picture: the connector built
-		// it from API metadata, and the image host can be dead while the API
-		// answers (ComicK's CDN outage). A URL that does not load falls
-		// through to the next linked source instead of being cached broken.
-		if coverURL == "" || !h.coverURLLoads(parent, coverURL) {
-			continue
+		if served, ok := h.cacheCoverResult(parent, cacheKey, coverURL, trimmedSourceKey); ok {
+			return served, nil
 		}
-
-		h.setCachedCoverFromSource(cacheKey, coverURL, trimmedSourceKey, true, 12*time.Hour)
-		return coverURL, nil
 	}
 
 	// The primary source could not supply a cover. Fall back to the tracker's
@@ -366,12 +360,12 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 
 		coverURL, tried, err := h.resolveCoverFromConnector(parent, alternateKey, alternateURL)
 		attempted = attempted || tried
-		if err != nil || coverURL == "" || !h.coverURLLoads(parent, coverURL) {
+		if err != nil || coverURL == "" {
 			continue
 		}
-
-		h.setCachedCoverFromSource(cacheKey, coverURL, alternateKey, true, 12*time.Hour)
-		return coverURL, nil
+		if served, ok := h.cacheCoverResult(parent, cacheKey, coverURL, alternateKey); ok {
+			return served, nil
+		}
 	}
 
 	negativeTTL := lookupUnreachableTTL
@@ -382,19 +376,141 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	return "", fmt.Errorf("cover not found")
 }
 
-// coverProbeClient fetches one byte of a candidate cover image. It goes
-// through the shared throttle like everything else; image CDNs are their own
-// hosts, so the pacing does not compete with API traffic.
+// coverProbeClient fetches candidate cover images. It goes through the
+// shared throttle like everything else; image CDNs are their own hosts, so
+// the pacing does not compete with API traffic.
 var coverProbeClient = &http.Client{
-	Timeout:   15 * time.Second,
+	Timeout:   30 * time.Second,
 	Transport: connectors.ThrottleTransport(nil),
 }
 
-func (h *DashboardHandler) coverURLLoads(parent context.Context, coverURL string) bool {
+// coverLocalURLPrefix is where the router serves the files under coverDir.
+const coverLocalURLPrefix = "/covers/"
+
+// coverLocalTTL is the nominal expiry stamped on entries whose image lives on
+// disk. They are exempt from every expiry check — the file is the cache and
+// lives as long as the tracker — so the value only keeps the column non-null.
+const coverLocalTTL = 10 * 365 * 24 * time.Hour
+
+// coverDownloadLimit caps how much of a claimed cover is read. Real covers
+// run tens to a few hundred KB; anything past the cap is not a cover.
+const coverDownloadLimit = 8 << 20
+
+// cacheCoverResult validates a resolved cover URL and caches it, returning
+// the URL the card should serve. With a local store configured the image is
+// downloaded once and served from this host from then on — the download
+// doubles as the "does this URL actually load" probe. Without one (tests
+// inject a checker; the store can fail at startup) it degrades to the old
+// behavior: probe one byte and hotlink the source CDN for the TTL.
+func (h *DashboardHandler) cacheCoverResult(parent context.Context, cacheKey, coverURL, sourceKey string) (string, bool) {
 	if h.coverURLChecker != nil {
-		return h.coverURLChecker(parent, coverURL)
+		if !h.coverURLChecker(parent, coverURL) {
+			return "", false
+		}
+	} else if h.coverDir != "" {
+		localPath, ok := h.storeCoverLocally(parent, coverURL)
+		if !ok {
+			return "", false
+		}
+		h.setCachedCoverLocal(cacheKey, coverURL, localPath, sourceKey)
+		return coverLocalURLPrefix + localPath, true
+	} else if !probeCoverURL(parent, coverURL) {
+		return "", false
 	}
-	return probeCoverURL(parent, coverURL)
+
+	h.setCachedCoverFromSource(cacheKey, coverURL, sourceKey, true, 12*time.Hour)
+	return coverURL, true
+}
+
+// storeCoverLocally downloads a cover image into coverDir and returns the
+// file name it was stored under. The name is the hash of the remote URL, so
+// the same art shared by several trackers is stored once, and the /covers
+// route can serve it as immutable — a source that changes its art publishes
+// a new URL, which becomes a new file.
+func (h *DashboardHandler) storeCoverLocally(parent context.Context, coverURL string) (string, bool) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+
+	res, err := coverProbeClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+		return "", false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, coverDownloadLimit+1))
+	if err != nil || len(body) == 0 || len(body) > coverDownloadLimit {
+		return "", false
+	}
+
+	ext := coverFileExt(res.Header.Get("Content-Type"), body)
+	if ext == "" {
+		// Not recognizably an image — an HTML challenge page, a CDN error
+		// body. Caching it would serve garbage forever.
+		return "", false
+	}
+
+	name := fmt.Sprintf("%x%s", sha1.Sum([]byte(coverURL)), ext)
+	target := filepath.Join(h.coverDir, name)
+	if _, statErr := os.Stat(target); statErr == nil {
+		return name, true
+	}
+
+	// Write-then-rename so a concurrent fetch of the same URL never serves a
+	// half-written file. A rename that loses the race to an identical file is
+	// a success.
+	temp, err := os.CreateTemp(h.coverDir, name+".tmp*")
+	if err != nil {
+		return "", false
+	}
+	tempName := temp.Name()
+	_, writeErr := temp.Write(body)
+	closeErr := temp.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(tempName)
+		return "", false
+	}
+	if err := os.Rename(tempName, target); err != nil {
+		_ = os.Remove(tempName)
+		if _, statErr := os.Stat(target); statErr != nil {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// coverFileExt maps a downloaded cover to the extension the static route
+// serves it under, trusting the declared content type first and the bytes
+// second. An empty result means "not an image we recognize".
+func coverFileExt(contentType string, body []byte) string {
+	declared := strings.ToLower(strings.TrimSpace(contentType))
+	if semicolon := strings.IndexByte(declared, ';'); semicolon >= 0 {
+		declared = strings.TrimSpace(declared[:semicolon])
+	}
+	byType := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/webp": ".webp",
+		"image/gif":  ".gif",
+		"image/avif": ".avif",
+	}
+	if ext, ok := byType[declared]; ok {
+		return ext
+	}
+	if ext, ok := byType[strings.ToLower(http.DetectContentType(body))]; ok {
+		return ext
+	}
+	return ""
 }
 
 // probeCoverURL asks the image host for the first byte of the file. The
@@ -512,6 +628,8 @@ func (h *DashboardHandler) getCachedCover(titleID string) (coverURL string, foun
 }
 
 // getCachedCoverWithSource also reports which source supplied the cached cover.
+// An entry with a local copy never expires, but it is only as good as its file:
+// one whose file vanished is dropped so the next render re-fetches the cover.
 func (h *DashboardHandler) getCachedCoverWithSource(titleID string) (coverURL string, sourceKey string, found bool, ok bool) {
 	h.cacheMu.RLock()
 	entry, exists := h.coverCache[titleID]
@@ -520,19 +638,31 @@ func (h *DashboardHandler) getCachedCoverWithSource(titleID string) (coverURL st
 		return "", "", false, false
 	}
 
-	if time.Now().UTC().After(entry.ExpiresAt) {
-		h.cacheMu.Lock()
-		delete(h.coverCache, titleID)
-		h.cacheMu.Unlock()
-		if h.coverStore != nil {
-			if err := h.coverStore.Delete(titleID); err != nil {
-				slog.Debug("cover cache delete failed", "error", err)
-			}
+	if entry.LocalPath != "" {
+		if _, err := os.Stat(filepath.Join(h.coverDir, entry.LocalPath)); err == nil {
+			return coverLocalURLPrefix + entry.LocalPath, entry.SourceKey, true, true
 		}
+		h.dropCachedCover(titleID)
+		return "", "", false, false
+	}
+
+	if time.Now().UTC().After(entry.ExpiresAt) {
+		h.dropCachedCover(titleID)
 		return "", "", false, false
 	}
 
 	return entry.CoverURL, entry.SourceKey, entry.Found, true
+}
+
+func (h *DashboardHandler) dropCachedCover(titleID string) {
+	h.cacheMu.Lock()
+	delete(h.coverCache, titleID)
+	h.cacheMu.Unlock()
+	if h.coverStore != nil {
+		if err := h.coverStore.Delete(titleID); err != nil {
+			slog.Debug("cover cache delete failed", "error", err)
+		}
+	}
 }
 
 func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, ttl time.Duration) {
@@ -540,12 +670,28 @@ func (h *DashboardHandler) setCachedCover(titleID, coverURL string, found bool, 
 }
 
 func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey string, found bool, ttl time.Duration) {
-	entry := coverCacheEntry{
+	h.putCoverCacheEntry(titleID, coverCacheEntry{
 		CoverURL:  coverURL,
 		Found:     found,
 		SourceKey: strings.TrimSpace(sourceKey),
 		ExpiresAt: time.Now().UTC().Add(ttl),
-	}
+	})
+}
+
+// setCachedCoverLocal records a cover whose image now lives on disk. The
+// remote URL is kept alongside for reference, but the entry serves the local
+// copy and is exempt from expiry.
+func (h *DashboardHandler) setCachedCoverLocal(titleID, coverURL, localPath, sourceKey string) {
+	h.putCoverCacheEntry(titleID, coverCacheEntry{
+		CoverURL:  coverURL,
+		Found:     true,
+		SourceKey: strings.TrimSpace(sourceKey),
+		ExpiresAt: time.Now().UTC().Add(coverLocalTTL),
+		LocalPath: localPath,
+	})
+}
+
+func (h *DashboardHandler) putCoverCacheEntry(titleID string, entry coverCacheEntry) {
 	h.cacheMu.Lock()
 	h.coverCache[titleID] = entry
 	h.cacheMu.Unlock()
@@ -559,6 +705,7 @@ func (h *DashboardHandler) setCachedCoverFromSource(titleID, coverURL, sourceKey
 			SourceKey: entry.SourceKey,
 			Found:     entry.Found,
 			ExpiresAt: entry.ExpiresAt,
+			LocalPath: entry.LocalPath,
 		}); err != nil {
 			slog.Debug("cover cache persist failed", "error", err)
 		}

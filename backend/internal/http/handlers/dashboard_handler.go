@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"html/template"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -34,7 +36,11 @@ type DashboardHandler struct {
 	// CDN is dead (ComicK's meo host, 2026-08), and caching that URL for 12h
 	// leaves a card broken with working alternates one hop away.
 	coverURLChecker func(ctx context.Context, coverURL string) bool
-	cacheMu         sync.RWMutex
+	// coverDir is where resolved covers are downloaded and served from
+	// (/covers). Empty disables the local store and falls back to hotlinking
+	// the source CDNs — the pre-store behavior tests still exercise.
+	coverDir string
+	cacheMu  sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}
@@ -68,6 +74,9 @@ type coverCacheEntry struct {
 	// it so the UI never claims a site that served nothing.
 	SourceKey string
 	ExpiresAt time.Time
+	// LocalPath names the downloaded copy under coverDir. Non-empty entries
+	// serve /covers/{LocalPath} and never expire — the file is the cache.
+	LocalPath string
 }
 
 type chapterURLCacheEntry struct {
@@ -246,6 +255,13 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		chapterURLCache:    make(map[string]chapterURLCacheEntry),
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 10),
+		coverDir:           filepath.Join("data", "covers"),
+	}
+	// A store that cannot be created only costs the local copies: covers
+	// degrade to hotlinking the source CDNs, the pre-store behavior.
+	if err := os.MkdirAll(handler.coverDir, 0o755); err != nil {
+		slog.Warn("cover directory unavailable; serving covers remotely", "dir", handler.coverDir, "error", err)
+		handler.coverDir = ""
 	}
 	handler.seedCoverCacheFromStore()
 	return handler
@@ -269,6 +285,7 @@ func (h *DashboardHandler) seedCoverCacheFromStore() {
 			Found:     entry.Found,
 			SourceKey: entry.SourceKey,
 			ExpiresAt: entry.ExpiresAt,
+			LocalPath: entry.LocalPath,
 		}
 	}
 	h.cacheMu.Unlock()

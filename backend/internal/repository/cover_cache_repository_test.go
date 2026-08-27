@@ -73,6 +73,45 @@ func TestCoverCacheRoundTripAndExpirySweep(t *testing.T) {
 	}
 }
 
+// TestCoverCacheLocalEntriesSurviveTheSweep pins what makes local covers
+// permanent: an entry whose image lives on disk is exempt from the expiry
+// sweep and loads back with its local path, however stale its nominal expiry.
+func TestCoverCacheLocalEntriesSurviveTheSweep(t *testing.T) {
+	repo := repository.NewCoverCacheRepository(openCoverCacheTestDB(t))
+
+	local := repository.CoverCacheRow{
+		CacheKey:  "mangafire|item:local",
+		CoverURL:  "https://cdn.example/cover.webp",
+		SourceKey: "mangafire",
+		Found:     true,
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+		LocalPath: "abc123.webp",
+	}
+	expiredRemote := repository.CoverCacheRow{
+		CacheKey:  "mangafire|item:remote",
+		CoverURL:  "https://cdn.example/other.webp",
+		SourceKey: "mangafire",
+		Found:     true,
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	}
+	for _, entry := range []repository.CoverCacheRow{local, expiredRemote} {
+		if err := repo.Upsert(entry); err != nil {
+			t.Fatalf("upsert %q: %v", entry.CacheKey, err)
+		}
+	}
+
+	entries, err := repo.LoadFresh()
+	if err != nil {
+		t.Fatalf("load fresh: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected only the local entry to survive, got %+v", entries)
+	}
+	if entries[0].CacheKey != local.CacheKey || entries[0].LocalPath != local.LocalPath {
+		t.Fatalf("local entry did not round-trip: %+v", entries[0])
+	}
+}
+
 func TestCoverCacheUpsertReplacesAndDeleteNegatives(t *testing.T) {
 	repo := repository.NewCoverCacheRepository(openCoverCacheTestDB(t))
 

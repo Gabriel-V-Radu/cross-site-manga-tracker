@@ -42,6 +42,15 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	})
 	app.Static("/assets", "./web/assets")
 	app.Static("/uploads", "./data/uploads")
+	// Locally stored cover art. File names hash the remote URL, so a cover
+	// that changes upstream arrives as a new file — the old name never serves
+	// different bytes, which is what makes immutable safe and cover renders
+	// free after the first load.
+	app.Use("/covers", func(c *fiber.Ctx) error {
+		c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
+		return c.Next()
+	})
+	app.Static("/covers", "./data/covers")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
 		return c.SendFile("./web/assets/favicon.svg")
 	})
