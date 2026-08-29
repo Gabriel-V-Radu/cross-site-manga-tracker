@@ -11,6 +11,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
+	"github.com/gabriel/cross-site-tracker/backend/internal/sourcepick"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -21,12 +22,12 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 	}
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
-	sources, err := h.sourceRepo.ListEnabled()
+	sources, err := h.sourceRepo.ListEnabledContext(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
 
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	profileTags, err := h.trackerRepo.ListProfileTagsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
@@ -58,7 +59,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	tracker, err := h.trackerRepo.GetByIDContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker", err)
 	}
@@ -66,12 +67,12 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusNotFound, "Tracker not found", nil)
 	}
 
-	sources, err := h.sourceRepo.ListEnabled()
+	sources, err := h.sourceRepo.ListEnabledContext(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
 
-	linkedSources, err := h.trackerRepo.ListTrackerSources(activeProfile.ID, id)
+	linkedSources, err := h.trackerRepo.ListTrackerSourcesContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sources", err)
 	}
@@ -92,7 +93,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		})
 	}
 
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	profileTags, err := h.trackerRepo.ListProfileTagsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
@@ -142,7 +143,7 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	now := time.Now().UTC()
 	tracker.LastCheckedAt = &now
 
-	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
+	exists, err := h.trackerRepo.SourceExistsContext(c.Context(), tracker.SourceID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
 	}
@@ -150,7 +151,7 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Selected source does not exist", nil)
 	}
 
-	created, err := h.trackerRepo.Create(tracker)
+	created, err := h.trackerRepo.CreateContext(c.Context(), tracker)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to create tracker", err)
 	}
@@ -161,7 +162,7 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	}
 
 	if created != nil {
-		if err := h.trackerRepo.ReplaceTrackerTags(activeProfile.ID, created.ID, tagIDs); err != nil {
+		if err := h.trackerRepo.ReplaceTrackerTagsContext(c.Context(), activeProfile.ID, created.ID, tagIDs); err != nil {
 			return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
 		}
 	}
@@ -201,7 +202,7 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 	// Unlike the mutation handlers, this one must keep failing loudly: the
 	// pinned-card script fetches it and retries on a non-OK response, so a
 	// degraded 200 would end that retry loop with an empty card.
-	card, err := h.loadTrackerCardView(activeProfile.ID, id)
+	card, err := h.loadTrackerCardView(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker card", err)
 	}
@@ -223,7 +224,7 @@ func (h *DashboardHandler) enrichTrackerFromSource(parent context.Context, track
 		return
 	}
 
-	source, err := h.sourceRepo.GetByID(tracker.SourceID)
+	source, err := h.sourceRepo.GetByIDContext(parent, tracker.SourceID)
 	if err != nil || source == nil || !source.Enabled {
 		return
 	}
@@ -298,7 +299,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	existingTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	existingTracker, err := h.trackerRepo.GetByIDContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker", err)
 	}
@@ -332,7 +333,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	}
 
 	for _, source := range uniqueSources {
-		exists, err := h.trackerRepo.SourceExists(source.SourceID)
+		exists, err := h.trackerRepo.SourceExistsContext(c.Context(), source.SourceID)
 		if err != nil {
 			return h.fail(c, fiber.StatusInternalServerError, "Failed to validate linked source", err)
 		}
@@ -341,7 +342,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 	}
 
-	existingSources, err := h.trackerRepo.ListTrackerSources(activeProfile.ID, id)
+	existingSources, err := h.trackerRepo.ListTrackerSourcesContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sources", err)
 	}
@@ -372,7 +373,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 	}
 
-	exists, err := h.trackerRepo.SourceExists(tracker.SourceID)
+	exists, err := h.trackerRepo.SourceExistsContext(c.Context(), tracker.SourceID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
 	}
@@ -380,7 +381,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Selected source does not exist", nil)
 	}
 
-	updated, err := h.trackerRepo.Update(activeProfile.ID, id, tracker)
+	updated, err := h.trackerRepo.UpdateContext(c.Context(), activeProfile.ID, id, tracker)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to update tracker", err)
 	}
@@ -388,7 +389,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusNotFound, "Tracker not found", nil)
 	}
 
-	if err := h.trackerRepo.ReplaceTrackerSources(activeProfile.ID, id, uniqueSources); err != nil {
+	if err := h.trackerRepo.ReplaceTrackerSourcesContext(c.Context(), activeProfile.ID, id, uniqueSources); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked sources", err)
 	}
 
@@ -397,7 +398,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
 
-	if err := h.trackerRepo.ReplaceTrackerTags(activeProfile.ID, id, tagIDs); err != nil {
+	if err := h.trackerRepo.ReplaceTrackerTagsContext(c.Context(), activeProfile.ID, id, tagIDs); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
 	}
 
@@ -413,7 +414,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	if err != nil {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
-	if err := h.trackerRepo.SetReadingSource(activeProfile.ID, id, readingSourceID); err != nil {
+	if err := h.trackerRepo.SetReadingSourceContext(c.Context(), activeProfile.ID, id, readingSourceID); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save reading site", err)
 	}
 
@@ -435,7 +436,7 @@ func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	deleted, err := h.trackerRepo.Delete(activeProfile.ID, id)
+	deleted, err := h.trackerRepo.DeleteContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to delete tracker", err)
 	}
@@ -459,7 +460,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	tracker, err := h.trackerRepo.GetByIDContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker", err)
 	}
@@ -468,7 +469,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	}
 
 	if tracker.LatestKnownChapter != nil {
-		_, err := h.trackerRepo.UpdateLastReadChapter(activeProfile.ID, id, tracker.LatestKnownChapter)
+		_, err := h.trackerRepo.UpdateLastReadChapterContext(c.Context(), activeProfile.ID, id, tracker.LatestKnownChapter)
 		if err != nil {
 			return h.fail(c, fiber.StatusInternalServerError, "Failed to update tracker", err)
 		}
@@ -490,7 +491,7 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	tracker, err := h.trackerRepo.GetByIDContext(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker", err)
 	}
@@ -516,7 +517,7 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
 
-	if _, err := h.trackerRepo.UpdateRating(activeProfile.ID, id, rating); err != nil {
+	if _, err := h.trackerRepo.UpdateRatingContext(c.Context(), activeProfile.ID, id, rating); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to update rating", err)
 	}
 
@@ -528,8 +529,8 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 // a nil error means the tracker is gone (or no longer produces a card), which
 // callers must be able to tell apart from a query that failed: one is a 404,
 // the other a 500.
-func (h *DashboardHandler) loadTrackerCardView(profileID int64, trackerID int64) (*trackerCardView, error) {
-	tracker, err := h.trackerRepo.GetByID(profileID, trackerID)
+func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID int64, trackerID int64) (*trackerCardView, error) {
+	tracker, err := h.trackerRepo.GetByIDContext(ctx, profileID, trackerID)
 	if err != nil {
 		return nil, err
 	}
@@ -537,12 +538,12 @@ func (h *DashboardHandler) loadTrackerCardView(profileID int64, trackerID int64)
 		return nil, nil
 	}
 
-	sourceByID, err := h.listSourcesByID()
+	sourceByID, err := h.listSourcesByID(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(profileID)
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLsContext(ctx, profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +552,7 @@ func (h *DashboardHandler) loadTrackerCardView(profileID int64, trackerID int64)
 		[]models.Tracker{*tracker},
 		sourceByID,
 		sourceLogoBySourceID,
-		h.trackerAlternatesForProfile(profileID),
+		h.trackerAlternatesForProfile(ctx, profileID),
 		"",
 	)
 	if len(cards) == 0 {
@@ -567,7 +568,7 @@ func (h *DashboardHandler) loadTrackerCardView(profileID int64, trackerID int64)
 // browser reloads the list and sees the saved state, rather than being told a
 // save failed that in fact succeeded.
 func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, trackerID int64, viewMode string) error {
-	card, err := h.loadTrackerCardView(profileID, trackerID)
+	card, err := h.loadTrackerCardView(c.Context(), profileID, trackerID)
 	if err != nil || card == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -579,8 +580,8 @@ func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, tr
 	})
 }
 
-func (h *DashboardHandler) listSourcesByID() (map[int64]models.Source, error) {
-	sources, err := h.sourceRepo.ListEnabled()
+func (h *DashboardHandler) listSourcesByID(ctx context.Context) (map[int64]models.Source, error) {
+	sources, err := h.sourceRepo.ListEnabledContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -826,14 +827,25 @@ func sameTrackerSources(existing []models.TrackerSource, incoming []models.Track
 	return true
 }
 
+// selectPrimaryTrackerSource resolves every linked source and picks the one
+// whose reading is best, by the shared rule the poller ranks its fallback
+// sources with (internal/sourcepick) — the two used to be near-copies that
+// disagreed on the equal-chapter tie-break.
+//
+// It also canonicalizes each source it managed to resolve, in place: the
+// caller stores the whole list, so a source that loses the comparison still
+// gets its item id filled in and its URL rewritten to the site's own.
+//
+// The first source stays the primary when nothing resolves, which is what
+// makes an unreachable site (MangaFire behind its challenge) survive a save
+// instead of being demoted by an outage.
 func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time, []string) {
 	if len(sources) == 0 {
 		return models.TrackerSource{}, nil, nil, nil
 	}
 
 	bestIndex := 0
-	var bestChapter *float64
-	var bestReleaseAt *time.Time
+	best := sourcepick.Reading{}
 	var bestRelatedTitles []string
 
 	for idx := range sources {
@@ -855,35 +867,26 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 			bestRelatedTitles = resolvedRelatedTitles
 		}
 
-		if resolved.LatestChapter == nil {
-			continue
+		// Copied out of the connector's result: what is returned here is stored
+		// on the tracker and must not alias a value the connector still owns.
+		candidate := sourcepick.Reading{}
+		if resolved.LatestChapter != nil {
+			resolvedChapter := *resolved.LatestChapter
+			candidate.Chapter = &resolvedChapter
+		}
+		if resolved.LastUpdatedAt != nil {
+			resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
+			candidate.ReleaseAt = &resolvedReleaseAt
 		}
 
-		resolvedChapter := *resolved.LatestChapter
-		if bestChapter == nil || resolvedChapter > *bestChapter {
+		if sourcepick.Better(best, candidate) {
 			bestIndex = idx
-			bestChapter = &resolvedChapter
+			best = candidate
 			bestRelatedTitles = resolvedRelatedTitles
-			if resolved.LastUpdatedAt != nil {
-				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
-				bestReleaseAt = &resolvedReleaseAt
-			} else {
-				bestReleaseAt = nil
-			}
-			continue
-		}
-
-		if resolvedChapter == *bestChapter && resolved.LastUpdatedAt != nil {
-			if bestReleaseAt == nil || resolved.LastUpdatedAt.After(*bestReleaseAt) {
-				bestIndex = idx
-				bestRelatedTitles = resolvedRelatedTitles
-				resolvedReleaseAt := resolved.LastUpdatedAt.UTC()
-				bestReleaseAt = &resolvedReleaseAt
-			}
 		}
 	}
 
-	return sources[bestIndex], bestChapter, bestReleaseAt, bestRelatedTitles
+	return sources[bestIndex], best.Chapter, best.ReleaseAt, bestRelatedTitles
 }
 
 func (h *DashboardHandler) resolveLinkedSource(parent context.Context, sourceID int64, sourceURL string) (*connectors.MangaResult, error) {
@@ -891,7 +894,7 @@ func (h *DashboardHandler) resolveLinkedSource(parent context.Context, sourceID 
 		return nil, fmt.Errorf("source is incomplete")
 	}
 
-	source, err := h.sourceRepo.GetByID(sourceID)
+	source, err := h.sourceRepo.GetByIDContext(parent, sourceID)
 	if err != nil {
 		return nil, err
 	}

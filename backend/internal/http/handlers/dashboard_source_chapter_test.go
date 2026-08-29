@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
@@ -84,7 +83,7 @@ func setupAppForChapterLookup(t *testing.T, connector connectors.Connector) (*fi
 		t.Fatalf("register connector: %v", err)
 	}
 
-	app := apihttp.NewServerWithRegistry(config.Config{AppName: "test"}, db, registry)
+	app := apihttp.NewServerWithRegistry(newTestConfig(t), db, registry)
 	return app, sourceID, func() {
 		_ = db.Close()
 		_ = app.Shutdown()

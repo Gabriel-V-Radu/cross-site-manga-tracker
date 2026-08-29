@@ -64,7 +64,7 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 
-	exists, err := h.repo.SourceExists(tracker.SourceID)
+	exists, err := h.repo.SourceExistsContext(c.Context(), tracker.SourceID)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
@@ -75,7 +75,7 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 
 	tracker.ProfileID = profile.ID
 
-	created, err := h.repo.Create(tracker)
+	created, err := h.repo.CreateContext(c.Context(), tracker)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to create tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to create tracker"})
@@ -104,7 +104,7 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 		Query:     c.Query("q"),
 	}
 
-	trackers, err := h.repo.List(options)
+	trackers, err := h.repo.ListContext(c.Context(), options)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to list trackers", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to list trackers"})
@@ -124,7 +124,7 @@ func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid tracker id"})
 	}
 
-	tracker, err := h.repo.GetByID(profile.ID, id)
+	tracker, err := h.repo.GetByIDContext(c.Context(), profile.ID, id)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to get tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to get tracker"})
@@ -157,7 +157,7 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 
-	exists, err := h.repo.SourceExists(tracker.SourceID)
+	exists, err := h.repo.SourceExistsContext(c.Context(), tracker.SourceID)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
@@ -168,7 +168,7 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 
 	tracker.ProfileID = profile.ID
 
-	updated, err := h.repo.Update(profile.ID, id, tracker)
+	updated, err := h.repo.UpdateContext(c.Context(), profile.ID, id, tracker)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to update tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to update tracker"})
@@ -191,7 +191,7 @@ func (h *TrackersHandler) Delete(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid tracker id"})
 	}
 
-	deleted, err := h.repo.Delete(profile.ID, id)
+	deleted, err := h.repo.DeleteContext(c.Context(), profile.ID, id)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to delete tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to delete tracker"})

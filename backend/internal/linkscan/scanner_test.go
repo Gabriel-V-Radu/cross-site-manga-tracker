@@ -29,18 +29,18 @@ func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
 	}
 }
 
-func (s *stubStore) ListScanTargets(int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
+func (s *stubStore) ListScanTargetsContext(context.Context, int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
 	return s.targets, nil
 }
 
-func (s *stubStore) ReplacePendingSuggestions(trackerID int64, _ int64, suggestions []repository.LinkSuggestion) error {
+func (s *stubStore) ReplacePendingSuggestionsContext(_ context.Context, trackerID int64, _ int64, suggestions []repository.LinkSuggestion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stored[trackerID] = suggestions
 	return nil
 }
 
-func (s *stubStore) MergeRelatedTitles(trackerID int64, titles []string) error {
+func (s *stubStore) MergeRelatedTitlesContext(_ context.Context, trackerID int64, titles []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mergedTitles[trackerID] = append(s.mergedTitles[trackerID], titles...)
@@ -101,6 +101,64 @@ func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid
 			t.Fatal("scan did not finish")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// blockingConnector parks inside SearchByTitle until its context is cancelled,
+// standing in for a scan caught mid-request when the process shuts down.
+type blockingConnector struct {
+	key     string
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingConnector) Key() string                       { return c.key }
+func (c *blockingConnector) Name() string                      { return c.key }
+func (c *blockingConnector) Kind() string                      { return connectors.KindNative }
+func (c *blockingConnector) HealthCheck(context.Context) error { return nil }
+func (c *blockingConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (c *blockingConnector) SearchByTitle(ctx context.Context, _ string, _ int) ([]connectors.MangaResult, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestCloseCancelsARunningScan covers shutdown: the scan goroutine must end,
+// and the tracker it was halfway through must keep whatever candidates it
+// already had rather than being handed the cancelled search's empty result.
+func TestCloseCancelsARunningScan(t *testing.T) {
+	connector := &blockingConnector{key: "weebcentral", entered: make(chan struct{})}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	store := newStubStore(
+		repository.LinkScanTarget{TrackerID: 1, Title: "First"},
+		repository.LinkScanTarget{TrackerID: 2, Title: "Second"},
+	)
+	scanner := NewScanner(store, registry, nil, slog.Default())
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	<-connector.entered
+	scanner.Close()
+
+	if scanner.Snapshot().Running {
+		t.Fatal("the scan goroutine outlived Close")
+	}
+	store.mu.Lock()
+	stored := len(store.stored)
+	store.mu.Unlock()
+	if stored != 0 {
+		t.Fatalf("a cancelled scan wrote %d tracker(s); it must store nothing it did not search", stored)
+	}
+
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err == nil {
+		t.Fatal("a scan started after shutdown")
 	}
 }
 

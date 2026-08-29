@@ -26,6 +26,12 @@ const (
 	perRequestTimeout       = 15 * time.Second
 )
 
+// shutdownGrace is how long Close waits for a running scan to notice the
+// cancelled context and return. It only has to cover unwinding an already
+// aborted request, and the process is on its way out: waiting longer would
+// hold up shutdown for nothing.
+const shutdownGrace = 2 * time.Second
+
 // Progress is a snapshot of the running (or last finished) scan, for the
 // dashboard's polling indicator.
 type Progress struct {
@@ -45,10 +51,14 @@ type Progress struct {
 	Stopped bool
 }
 
+// suggestionStore takes the context-carrying repository methods: a scan writes
+// from a background goroutine against a one-connection pool, so a statement
+// left waiting for that connection while the process shuts down would hang
+// with nothing to report it.
 type suggestionStore interface {
-	ListScanTargets(profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
-	ReplacePendingSuggestions(trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
-	MergeRelatedTitles(trackerID int64, titles []string) error
+	ListScanTargetsContext(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
+	ReplacePendingSuggestionsContext(ctx context.Context, trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
+	MergeRelatedTitlesContext(ctx context.Context, trackerID int64, titles []string) error
 }
 
 // AidLookup is the metadata aggregator consulted per tracker before searching
@@ -65,16 +75,56 @@ type Scanner struct {
 	aid      AidLookup
 	logger   *slog.Logger
 
+	// The scanner's own lifetime, not any request's. Every scan and every
+	// request it makes hangs off this context, so Close cuts the whole scan
+	// loose at once — without it a scan kept issuing requests and writing
+	// rows while the process was already tearing the database down.
+	lifetime context.Context
+	shutdown context.CancelFunc
+
 	mu            sync.Mutex
 	progress      Progress
 	stopRequested bool
+	// done is closed when the current scan's goroutine returns, so Close can
+	// wait for it instead of racing the caller's db.Close().
+	done chan struct{}
 }
 
 func NewScanner(store suggestionStore, registry *connectors.Registry, aid AidLookup, logger *slog.Logger) *Scanner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Scanner{store: store, registry: registry, aid: aid, logger: logger}
+	lifetime, shutdown := context.WithCancel(context.Background())
+	return &Scanner{
+		store:    store,
+		registry: registry,
+		aid:      aid,
+		logger:   logger,
+		lifetime: lifetime,
+		shutdown: shutdown,
+	}
+}
+
+// Close cancels any running scan and waits briefly for its goroutine to
+// return. The app's shutdown hook calls it: a scan is not request-scoped, so
+// nothing else would ever stop it, and the alternative is HTTP requests and
+// database writes continuing against a process that is closing its database.
+// Whatever the scan already stored stands. Idempotent.
+func (s *Scanner) Close() {
+	s.shutdown()
+
+	s.mu.Lock()
+	done := s.done
+	s.mu.Unlock()
+	if done == nil {
+		return
+	}
+
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
+		s.logger.Warn("link scan did not stop within the shutdown grace period")
+	}
 }
 
 // Start launches a scan in the background. Only one scan runs at a time — the
@@ -91,6 +141,11 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 	if s.progress.Running {
 		return fmt.Errorf("a link scan is already running")
 	}
+	if s.lifetime.Err() != nil {
+		// The process is shutting down; a scan launched now would be cancelled
+		// on its first request anyway.
+		return fmt.Errorf("the scanner is shutting down")
+	}
 	s.progress = Progress{
 		Running:    true,
 		SourceID:   sourceID,
@@ -98,8 +153,10 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 		StartedAt:  time.Now().UTC(),
 	}
 	s.stopRequested = false
+	done := make(chan struct{})
+	s.done = done
 
-	go s.run(profileID, sourceID, connector, filter)
+	go s.run(s.lifetime, done, profileID, sourceID, connector, filter)
 	return nil
 }
 
@@ -126,7 +183,7 @@ func (s *Scanner) shouldStop() bool {
 	return s.stopRequested
 }
 
-func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Connector, filter repository.LinkScanFilter) {
+func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, sourceID int64, connector connectors.Connector, filter repository.LinkScanFilter) {
 	defer func() {
 		s.mu.Lock()
 		now := time.Now().UTC()
@@ -134,9 +191,10 @@ func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Conn
 		s.progress.FinishedAt = &now
 		s.progress.Stopped = s.stopRequested
 		s.mu.Unlock()
+		close(done)
 	}()
 
-	targets, err := s.store.ListScanTargets(profileID, sourceID, filter)
+	targets, err := s.store.ListScanTargetsContext(ctx, profileID, sourceID, filter)
 	if err != nil {
 		s.setError(fmt.Sprintf("load scan targets: %v", err))
 		return
@@ -147,13 +205,22 @@ func (s *Scanner) run(profileID int64, sourceID int64, connector connectors.Conn
 	s.mu.Unlock()
 
 	for _, target := range targets {
-		if s.shouldStop() {
+		// The user's stop and the process's shutdown end the walk the same
+		// way: no new work, and what is already stored stays stored.
+		if s.shouldStop() || ctx.Err() != nil {
 			return
 		}
 
-		suggestions := s.findCandidates(connector, target, sourceID)
+		suggestions := s.findCandidates(ctx, connector, target, sourceID)
 
-		if err := s.store.ReplacePendingSuggestions(target.TrackerID, sourceID, suggestions); err != nil {
+		// A cancelled scan comes back from the searches above with nothing to
+		// show for them, and storing that nothing would erase the candidates
+		// this tracker already had. Shutdown must cost a scan, never data.
+		if ctx.Err() != nil {
+			return
+		}
+
+		if err := s.store.ReplacePendingSuggestionsContext(ctx, target.TrackerID, sourceID, suggestions); err != nil {
 			s.logger.Warn("link scan store failed", "trackerId", target.TrackerID, "error", err)
 			s.setError(fmt.Sprintf("store suggestions: %v", err))
 		}
@@ -177,19 +244,19 @@ func (s *Scanner) setError(message string) {
 // back. A metadata-aggregator lookup runs first: a confirmed record widens
 // the title set candidates are scored against, and on MangaUpdates it skips
 // the fuzzy search entirely in favour of the record's exact series id.
-func (s *Scanner) findCandidates(connector connectors.Connector, target repository.LinkScanTarget, sourceID int64) []repository.LinkSuggestion {
+func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64) []repository.LinkSuggestion {
 	wanted := append([]string{target.Title}, target.RelatedTitles...)
 
-	if aid := s.lookupAid(target); aid != nil {
+	if aid := s.lookupAid(ctx, target); aid != nil {
 		wanted = searchutil.UniqueNonEmpty(append(wanted, aid.Titles...))
 		// Names learned from a confirmed record outlive this scan: they make
 		// every future scan and dashboard search match better.
-		if err := s.store.MergeRelatedTitles(target.TrackerID, aid.Titles); err != nil {
+		if err := s.store.MergeRelatedTitlesContext(ctx, target.TrackerID, aid.Titles); err != nil {
 			s.logger.Warn("merge related titles failed", "trackerId", target.TrackerID, "error", err)
 		}
 
 		if connector.Key() == "mangaupdates" {
-			if suggestion := s.directSuggestion(connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
+			if suggestion := s.directSuggestion(ctx, connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
 				return []repository.LinkSuggestion{*suggestion}
 			}
 		}
@@ -215,7 +282,7 @@ func (s *Scanner) findCandidates(connector connectors.Connector, target reposito
 			break
 		}
 
-		results := s.search(connector, query)
+		results := s.search(ctx, connector, query)
 		for _, result := range results {
 			url := strings.TrimSpace(result.URL)
 			if url == "" {
@@ -256,7 +323,7 @@ func (s *Scanner) findCandidates(connector connectors.Connector, target reposito
 	// what settles most ambiguous matches. Only the top one: resolving every
 	// candidate would double or triple a full-library scan.
 	if len(best) > 0 && best[0].CandidateLatestChapter == nil {
-		if resolved := s.resolve(connector, best[0].CandidateURL); resolved != nil {
+		if resolved := s.resolve(ctx, connector, best[0].CandidateURL); resolved != nil {
 			best[0].CandidateLatestChapter = resolved.LatestChapter
 			best[0].CandidateReleaseAt = resolved.LastUpdatedAt
 			if best[0].CandidateCoverURL == nil {
@@ -273,12 +340,12 @@ func (s *Scanner) findCandidates(connector connectors.Connector, target reposito
 // lookupAid asks the aggregator about the tracker and returns its record only
 // on an exact normalized title match — a wrong record would poison both the
 // scoring set and the id link, so near matches are not good enough.
-func (s *Scanner) lookupAid(target repository.LinkScanTarget) *mangabaka.Series {
+func (s *Scanner) lookupAid(parent context.Context, target repository.LinkScanTarget) *mangabaka.Series {
 	if s.aid == nil {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), perRequestTimeout)
+	ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
 	defer cancel()
 
 	results, err := s.aid.Search(ctx, target.Title, 8)
@@ -307,11 +374,11 @@ func (s *Scanner) lookupAid(target repository.LinkScanTarget) *mangabaka.Series 
 // directSuggestion resolves a known series URL on the source and wraps it as
 // the tracker's single, exact suggestion. Returns nil when there is no URL or
 // the source cannot confirm it, letting the caller fall back to searching.
-func (s *Scanner) directSuggestion(connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, url string) *repository.LinkSuggestion {
+func (s *Scanner) directSuggestion(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, url string) *repository.LinkSuggestion {
 	if strings.TrimSpace(url) == "" {
 		return nil
 	}
-	resolved := s.resolve(connector, url)
+	resolved := s.resolve(ctx, connector, url)
 	if resolved == nil {
 		return nil
 	}
@@ -337,8 +404,8 @@ func (s *Scanner) directSuggestion(connector connectors.Connector, target reposi
 	return &suggestion
 }
 
-func (s *Scanner) search(connector connectors.Connector, query string) []connectors.MangaResult {
-	ctx, cancel := context.WithTimeout(context.Background(), perRequestTimeout)
+func (s *Scanner) search(parent context.Context, connector connectors.Connector, query string) []connectors.MangaResult {
+	ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
 	defer cancel()
 
 	results, err := connector.SearchByTitle(ctx, query, 8)
@@ -349,8 +416,8 @@ func (s *Scanner) search(connector connectors.Connector, query string) []connect
 	return results
 }
 
-func (s *Scanner) resolve(connector connectors.Connector, url string) *connectors.MangaResult {
-	ctx, cancel := context.WithTimeout(context.Background(), perRequestTimeout)
+func (s *Scanner) resolve(parent context.Context, connector connectors.Connector, url string) *connectors.MangaResult {
+	ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
 	defer cancel()
 
 	result, err := connector.ResolveByURL(ctx, url)

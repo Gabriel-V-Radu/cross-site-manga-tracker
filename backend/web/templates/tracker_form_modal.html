@@ -170,6 +170,11 @@
             <hr>
             <h3>Tags</h3>
             <p class="search-message">Select existing tags for this manga.</p>
+            <!-- The icon picker is assembled in the browser; rendering key, label
+                 and path from the same Go helpers as the tag chips is what stops
+                 the two from disagreeing about an icon once one is renamed. Each
+                 value goes through toJSON so no value can end this attribute. -->
+            <input type="hidden" id="tag-icon-keys-json" value='[{{range $index, $iconKey := .TagIconKeys}}{{if $index}},{{end}}{"key":{{toJSON $iconKey}},"label":{{toJSON (tagIconLabel $iconKey)}},"path":{{toJSON (tagIconAssetPath $iconKey)}}}{{end}}]'>
             <div class="tracker-tags-list">
                 {{if eq (len .ProfileTags) 0}}
                 <p class="search-message">No tags available. Create tags from the Profile Menu.</p>

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
+	"github.com/gabriel/cross-site-tracker/backend/internal/sourcepick"
 )
 
 // pollResolveTimeout is the per-source budget of one poll resolve, shared
@@ -24,12 +25,17 @@ import (
 // request. The poller is a background loop, so waiting longer costs nothing.
 const pollResolveTimeout = 90 * time.Second
 
+// pollRepository takes the context-carrying repository methods throughout. The
+// pool runs one connection, so a statement can queue behind whoever holds it;
+// the cycle's context is cancelled on shutdown, which turns "wait for the
+// connection forever while the process tears down" into an error that gets
+// logged.
 type pollRepository interface {
-	ListForPolling() ([]repository.PollingTracker, error)
-	// UpdatePollingState reports false when the tracker changed after the
-	// cycle snapshotted it and the write was therefore skipped.
-	UpdatePollingState(update repository.PollingUpdate) (bool, error)
-	MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error
+	ListForPollingContext(ctx context.Context) ([]repository.PollingTracker, error)
+	// UpdatePollingStateContext reports false when the tracker changed after
+	// the cycle snapshotted it and the write was therefore skipped.
+	UpdatePollingStateContext(ctx context.Context, update repository.PollingUpdate) (bool, error)
+	MarkPollCheckedAtContext(ctx context.Context, trackerID int64, checkedAt time.Time) error
 }
 
 type Poller struct {
@@ -147,7 +153,7 @@ type cycleStats struct {
 // Fallback resolves do cross into other shards' hosts; the throttle paces
 // those too, which is why pollResolveTimeout budgets for a full queue.
 func (p *Poller) RunOnce(ctx context.Context) error {
-	trackers, err := p.repo.ListForPolling()
+	trackers, err := p.repo.ListForPollingContext(ctx)
 	if err != nil {
 		return fmt.Errorf("load trackers for polling: %w", err)
 	}
@@ -243,7 +249,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// tracker whose sources are all dark keeps last_checked_at frozen, so
 		// shouldSkipIdle can never defer it and the poller retries it in full
 		// every cycle for as long as the outage lasts.
-		if err := p.repo.MarkPollCheckedAt(tracker.ID, time.Now().UTC()); err != nil {
+		if err := p.repo.MarkPollCheckedAtContext(ctx, tracker.ID, time.Now().UTC()); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
 		return
@@ -339,7 +345,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		currentSourceURL = ""
 	}
 
-	applied, err := p.repo.UpdatePollingState(repository.PollingUpdate{
+	applied, err := p.repo.UpdatePollingStateContext(ctx, repository.PollingUpdate{
 		TrackerID:             tracker.ID,
 		SnapshotSourceID:      tracker.SourceID,
 		SourceID:              sourceID,
@@ -535,23 +541,22 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 }
 
 // betterFallbackResult decides whether candidate should replace current as the
-// fallback answer. A chapter number beats none, a higher one beats a lower
-// one, and between equals a result carrying a release date beats one without —
-// it can fill a stored date the primary never provided.
+// fallback answer. Ranking two answers is the shared best-source rule; "any
+// answer at all beats none" is this caller's own, because a fallback that
+// resolved is also what tells the poll the tracker was reached — even when the
+// site had no chapter number to give.
 func betterFallbackResult(current *connectors.MangaResult, candidate *connectors.MangaResult) bool {
 	if current == nil {
 		return true
 	}
-	if candidate.LatestChapter == nil {
-		return false
+	return sourcepick.Better(readingOf(current), readingOf(candidate))
+}
+
+func readingOf(result *connectors.MangaResult) sourcepick.Reading {
+	if result == nil {
+		return sourcepick.Reading{}
 	}
-	if current.LatestChapter == nil {
-		return true
-	}
-	if *candidate.LatestChapter != *current.LatestChapter {
-		return *candidate.LatestChapter > *current.LatestChapter
-	}
-	return current.LastUpdatedAt == nil && candidate.LastUpdatedAt != nil
+	return sourcepick.Reading{Chapter: result.LatestChapter, ReleaseAt: result.LastUpdatedAt}
 }
 
 // shouldSkipIdle reports whether a non-reading tracker was checked recently

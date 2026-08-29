@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -286,8 +287,8 @@ func countedAgo(count int, unit string) string {
 // re-rendered card resolves its cover and chapter links the same way the list
 // does. A load failure degrades to no fallback rather than failing the render:
 // the card is still useful without cover art.
-func (h *DashboardHandler) trackerAlternatesForProfile(profileID int64) map[int64][]repository.TrackerSourceRef {
-	alternates, err := h.trackerRepo.ListAlternateSourcesByTracker(profileID)
+func (h *DashboardHandler) trackerAlternatesForProfile(ctx context.Context, profileID int64) map[int64][]repository.TrackerSourceRef {
+	alternates, err := h.trackerRepo.ListAlternateSourcesByTrackerContext(ctx, profileID)
 	if err != nil {
 		return nil
 	}
@@ -316,36 +317,44 @@ func (h *DashboardHandler) invalidateLinkLookups() {
 	h.covers.InvalidateNegatives()
 }
 
-// assetURL stamps a static asset's URL with its last-modified time. The static
-// handler sends no Cache-Control and no ETag, only Last-Modified, which leaves
-// browsers free to guess a freshness lifetime from the file's age — so a script
-// that had sat unchanged for months could keep being served from cache for days
-// after a deploy, running old code against a new server. A URL that changes when
-// the file changes is what makes a deploy actually take effect.
-func assetURL(name string) string {
+// assetVersions stamps a static asset's URL with its last-modified time. The
+// static handler sends no Cache-Control and no ETag, only Last-Modified, which
+// leaves browsers free to guess a freshness lifetime from the file's age — so a
+// script that had sat unchanged for months could keep being served from cache
+// for days after a deploy, running old code against a new server. A URL that
+// changes when the file changes is what makes a deploy actually take effect.
+//
+// The mtimes are read once per name and remembered: the files cannot change
+// under a running process, and this is on the path of every page render.
+type assetVersions struct {
+	dir      string
+	mu       sync.Mutex
+	versions map[string]string
+}
+
+func newAssetVersions(dir string) *assetVersions {
+	return &assetVersions{dir: dir, versions: map[string]string{}}
+}
+
+func (a *assetVersions) url(name string) string {
 	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
 
-	assetVersionMu.Lock()
-	defer assetVersionMu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if version, cached := assetVersions[name]; cached {
+	if version, cached := a.versions[name]; cached {
 		return "/assets/" + name + version
 	}
 
 	version := ""
-	if info, err := os.Stat(filepath.Join("web", "assets", filepath.FromSlash(name))); err == nil {
+	if info, err := os.Stat(filepath.Join(a.dir, filepath.FromSlash(name))); err == nil {
 		version = "?v=" + strconv.FormatInt(info.ModTime().Unix(), 10)
 	}
-	assetVersions[name] = version
+	a.versions[name] = version
 	return "/assets/" + name + version
 }
 
-var (
-	assetVersionMu sync.Mutex
-	assetVersions  = map[string]string{}
-)
-
-func parseDashboardTemplates() (*template.Template, error) {
+func parseDashboardTemplates(glob string, assetURL func(string) string) (*template.Template, error) {
 	return template.New("").Funcs(template.FuncMap{
 		"chapterInputValue": chapterInputValue,
 		"textInputValue":    textInputValue,
@@ -357,7 +366,7 @@ func parseDashboardTemplates() (*template.Template, error) {
 		"statusLabel":       statusLabel,
 		"sortLabel":         sortLabel,
 		"assetURL":          assetURL,
-	}).ParseGlob("web/templates/*.html")
+	}).ParseGlob(glob)
 }
 
 // renderBuffers keeps the page-sized buffers below off the allocator. The Pi

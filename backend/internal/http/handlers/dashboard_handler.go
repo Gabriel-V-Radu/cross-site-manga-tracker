@@ -3,7 +3,6 @@ package handlers
 import (
 	"database/sql"
 	"html/template"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -44,6 +43,29 @@ type DashboardHandler struct {
 	lastLinkScanScope map[string]string
 	templates         *template.Template
 	templateErr       error
+	// Where this handler reads its templates and writes its uploads. Held
+	// rather than spelled out at each call site so nothing depends on the
+	// process's working directory.
+	paths  DashboardPaths
+	assets *assetVersions
+}
+
+// DashboardPaths are the filesystem locations the dashboard depends on. They
+// come from the config so a deployment can put them anywhere; the zero value
+// leaves each one to whatever "" resolves to, which is only ever useful to a
+// test that touches none of them.
+type DashboardPaths struct {
+	// TemplatesGlob matches the template files to parse.
+	TemplatesGlob string
+	// AssetsDir is the directory the /assets route serves, read here only to
+	// stamp asset URLs with the file's modification time.
+	AssetsDir string
+	// CoversDir must be the directory the /covers route serves: the cover
+	// resolver stores files there and mints /covers/ hrefs for them.
+	CoversDir string
+	// SourceLogosDir must sit under the directory the /uploads route serves,
+	// for the same reason.
+	SourceLogosDir string
 }
 
 // coverResolver is the cover half of the resolution service (internal/resolve).
@@ -212,7 +234,7 @@ type profileFilterLinkedSitesData struct {
 	SelectedSourceIDs map[int64]bool
 }
 
-func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHandler {
+func NewDashboardHandler(db *sql.DB, registry *connectors.Registry, paths DashboardPaths) *DashboardHandler {
 	if registry == nil {
 		registry = connectors.NewRegistry()
 	}
@@ -227,12 +249,14 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,
 		pageKeys:           pageKeys,
+		paths:              paths,
+		assets:             newAssetVersions(paths.AssetsDir),
 		covers: resolve.NewCoverResolver(resolve.CoverConfig{
 			Registry: registry,
 			Store:    repository.NewCoverCacheRepository(db),
 			// Where the router mounts the static /covers route; the two names
 			// the same directory or the browser is handed hrefs to nothing.
-			Dir:  filepath.Join("data", "covers"),
+			Dir:  paths.CoversDir,
 			Gate: pageKeys,
 		}),
 		chapterLinks: resolve.NewChapterLinkResolver(resolve.ChapterConfig{
@@ -243,7 +267,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 	// Parsed here rather than on the first request: a template that does not
 	// parse is a deploy defect, and the caller turns it into a startup failure
 	// instead of a 500 on every page for as long as the process lives.
-	handler.templates, handler.templateErr = parseDashboardTemplates()
+	handler.templates, handler.templateErr = parseDashboardTemplates(paths.TemplatesGlob, handler.assets.url)
 	return handler
 }
 
@@ -253,10 +277,14 @@ func (h *DashboardHandler) TemplateError() error {
 	return h.templateErr
 }
 
-// Close stops the resolvers' background cache sweeps. The router hangs it off
-// the app's shutdown hook so a shut-down app — every one a test binary builds —
-// does not leave the goroutines behind. Idempotent.
+// Close stops the resolvers' background cache sweeps and cancels any running
+// link scan. The router hangs it off the app's shutdown hook so a shut-down
+// app — every one a test binary builds — does not leave the goroutines behind,
+// and so a scan cannot outlive the process that owns its database. Idempotent.
 func (h *DashboardHandler) Close() {
 	h.covers.Close()
 	h.chapterLinks.Close()
+	if h.linkScanner != nil {
+		h.linkScanner.Close()
+	}
 }

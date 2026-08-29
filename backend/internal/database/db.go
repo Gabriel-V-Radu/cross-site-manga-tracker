@@ -9,6 +9,31 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// TIMESTAMP COLUMNS HOLD TWO DIFFERENT SPELLINGS. Read this before writing a
+// query that does date arithmetic in SQL.
+//
+// The DSN is a bare path, so modernc.org/sqlite binds a time.Time with
+// time.Time.String() — "2026-08-29 14:03:22.123456789 +0000 UTC". SQLite's own
+// CURRENT_TIMESTAMP, which the schema uses for column defaults, writes
+// "2026-08-29 14:03:22". Both land in the same columns (created_at,
+// updated_at, last_checked_at, latest_release_at, ...), and which one a row
+// carries depends only on whether Go or a DEFAULT wrote it.
+//
+// This works today for exactly two reasons: the driver parses both spellings
+// back into time.Time on read, and the first nineteen characters are the same
+// layout, so ORDER BY and text comparison (>=, BETWEEN, MIN/MAX) rank them
+// correctly.
+//
+// What does NOT work is SQLite's date functions. datetime(), strftime(),
+// date() and julianday() return NULL for the driver's spelling — the
+// " +0000 UTC" tail is not a time string SQLite recognizes — so a predicate
+// like `datetime(last_checked_at) < datetime('now','-1 day')` silently drops
+// every Go-written row instead of failing. Nothing calls them today; keep it
+// that way. Compare the columns as text against a value formatted the same
+// way, or read the timestamp into Go and do the arithmetic there.
+//
+// Do not try to normalize the stored data: rewriting live timestamp columns
+// risks far more than the queries it would enable.
 func Open(sqlitePath string) (*sql.DB, error) {
 	dir := filepath.Dir(sqlitePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

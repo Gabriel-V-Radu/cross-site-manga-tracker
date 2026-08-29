@@ -80,8 +80,9 @@ func (t CustomTag) IconPath() string {
 
 // TagIconAssetPath maps a tag icon key to the static file the web layer serves
 // it from. An unknown key resolves to nothing, which renders a chip with no
-// image instead of a broken one. Its twin lives in web/assets/dashboard-tags.js
-// for the tag rows the browser builds; those two must agree.
+// image instead of a broken one. This is the only copy of the mapping: the
+// browser used to carry its own, and now reads these paths from the JSON the
+// tracker form renders, so an icon can be renamed here alone.
 func TagIconAssetPath(iconKey string) string {
 	switch strings.TrimSpace(iconKey) {
 	case "icon_1":

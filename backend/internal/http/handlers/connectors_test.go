@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
@@ -53,7 +52,7 @@ func setupAppForConnectors(t *testing.T) (*sql.DB, *fiber.App, func()) {
 	_ = registry.Register(&fakeConnector{key: "mangadex"})
 	_ = registry.Register(&fakeConnector{key: "mangafire"})
 
-	app := apihttp.NewServerWithRegistry(config.Config{AppName: "test"}, db, registry)
+	app := apihttp.NewServerWithRegistry(newTestConfig(t), db, registry)
 	cleanup := func() {
 		_ = db.Close()
 		_ = app.Shutdown()

@@ -18,18 +18,25 @@ window.readTrackerTagsFromForm = function (form) {
     }).filter(function (item) { return !!item; });
 };
 
-window.getTagIconMeta = function (iconKey) {
-    var key = String(iconKey || '').trim();
-    if (key === 'icon_1') {
-        return { key: key, label: 'Star', path: '/assets/tag-icons/icon-star-gold.svg' };
+// The icon key -> label/path map is the server's, read from #tag-icon-keys-json
+// rather than kept here a second time: a copy in this file could disagree with
+// the chips the server renders after an icon is renamed. An absent or corrupt
+// element leaves the picker with only "None", the same as a profile that has
+// used up every icon.
+window.readTagIconMetas = function (form) {
+    if (!form) {
+        return [];
     }
-    if (key === 'icon_2') {
-        return { key: key, label: 'Heart', path: '/assets/tag-icons/icon-red-heart.svg' };
-    }
-    if (key === 'icon_3') {
-        return { key: key, label: 'Flames', path: '/assets/tag-icons/icon-flames.svg' };
-    }
-    return { key: key, label: key || 'Icon', path: '' };
+    var raw = form.querySelector('#tag-icon-keys-json');
+    return window.parseJSONArray(raw && raw.value).map(function (entry) {
+        return {
+            key: String((entry && entry.key) || '').trim(),
+            label: String((entry && entry.label) || 'Icon'),
+            path: String((entry && entry.path) || '')
+        };
+    }).filter(function (meta) {
+        return meta.key !== '';
+    });
 };
 
 window.selectTrackerTagIcon = function (row, nextIcon) {
@@ -89,8 +96,7 @@ window.refreshTrackerTagRows = function (form) {
     }
 
     var rows = Array.prototype.slice.call(form.querySelectorAll('.tracker-tag-row'));
-    var iconKeysRaw = form.querySelector('#tag-icon-keys-json');
-    var iconKeys = window.parseJSONArray(iconKeysRaw && iconKeysRaw.value);
+    var iconMetas = window.readTagIconMetas(form);
 
     var tagPool = window.collectTrackerTagPool(form);
 
@@ -130,24 +136,29 @@ window.refreshTrackerTagRows = function (form) {
         var selected = String(iconInput.value || iconInput.dataset.selected || '').trim();
         var html = '<button type="button" class="tracker-tag-icon-btn' + (selected === '' ? ' tracker-tag-icon-btn--active' : '') + '" data-tag-icon="1" data-icon-key="" title="No icon">None</button>';
 
-        iconKeys.forEach(function (iconKey) {
-            var isUsedByAnother = usedIcons[iconKey] && selected !== iconKey;
+        iconMetas.forEach(function (meta) {
+            var isUsedByAnother = usedIcons[meta.key] && selected !== meta.key;
             if (isUsedByAnother) {
                 return;
             }
-            var meta = window.getTagIconMeta(iconKey);
-            var activeClass = selected === iconKey ? ' tracker-tag-icon-btn--active' : '';
+            var activeClass = selected === meta.key ? ' tracker-tag-icon-btn--active' : '';
+            // A key the server has no image for is shown as its label instead of
+            // an <img> that would only render broken; the button has to stay,
+            // because dropping it would silently clear a tag already using it.
+            var face = meta.path
+                ? '<img src="' + window.escapeHtml(meta.path) + '" alt="' + window.escapeHtml(meta.label) + '">'
+                : window.escapeHtml(meta.label);
             html += '' +
-                '<button type="button" class="tracker-tag-icon-btn' + activeClass + '" data-tag-icon="1" data-icon-key="' + window.escapeHtml(iconKey) + '" title="' + window.escapeHtml(meta.label) + '">' +
-                '<img src="' + window.escapeHtml(meta.path) + '" alt="' + window.escapeHtml(meta.label) + '">' +
+                '<button type="button" class="tracker-tag-icon-btn' + activeClass + '" data-tag-icon="1" data-icon-key="' + window.escapeHtml(meta.key) + '" title="' + window.escapeHtml(meta.label) + '">' +
+                face +
                 '</button>';
         });
 
         picker.innerHTML = html;
         iconInput.dataset.selected = '';
 
-        var selectedStillAvailable = selected === '' || iconKeys.some(function (key) {
-            return key === selected && (!usedIcons[key] || selected === key);
+        var selectedStillAvailable = selected === '' || iconMetas.some(function (meta) {
+            return meta.key === selected && (!usedIcons[meta.key] || selected === meta.key);
         });
         if (!selectedStillAvailable) {
             iconInput.value = '';

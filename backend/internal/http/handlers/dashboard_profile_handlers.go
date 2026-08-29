@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,8 +17,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// The public prefix is fixed — it is the /uploads route plus the subdirectory
+// — while the disk location behind it comes from the config, so the two are
+// derived from one setting rather than spelled out twice.
 const (
-	sourceLogoUploadDir      = "data/uploads/site-logos"
 	sourceLogoPublicPrefix   = "/uploads/site-logos/"
 	maxSourceLogoUploadBytes = 2 << 20 // 2MB
 	maxSourceLogoUploadLabel = "2MB"
@@ -29,17 +32,17 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
-	profiles, err := h.profileResolver.ListProfiles()
+	profiles, err := h.profileResolver.ListProfiles(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
 
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	profileTags, err := h.trackerRepo.ListProfileTagsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
 
-	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	linkedSites, err := h.listLinkedSites(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
@@ -75,7 +78,7 @@ func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Profile name must be 40 characters or less", nil)
 	}
 
-	if _, err := h.profileRepo.Rename(activeProfile.ID, name); err != nil {
+	if _, err := h.profileRepo.RenameContext(c.Context(), activeProfile.ID, name); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to rename profile", err)
 	}
 
@@ -97,7 +100,7 @@ func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	profileTags, err := h.trackerRepo.ListProfileTagsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
@@ -106,12 +109,13 @@ func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 }
 
 func (h *DashboardHandler) ProfileFilterLinkedSitesPartial(c *fiber.Ctx) error {
-	activeProfile, err := h.profileResolver.Resolve(c)
-	if err != nil {
+	// The list is not per-profile, but resolving still has to happen: it is
+	// what rejects an unknown profile and refreshes the active-profile cookie.
+	if _, err := h.profileResolver.Resolve(c); err != nil {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
-	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	linkedSites, err := h.listLinkedSites(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
@@ -128,7 +132,7 @@ func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Profile is required", nil)
 	}
 
-	profiles, err := h.profileResolver.ListProfiles()
+	profiles, err := h.profileResolver.ListProfiles(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
@@ -164,7 +168,7 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 		iconKey = &rawIcon
 	}
 
-	if _, err := h.trackerRepo.CreateProfileTag(activeProfile.ID, tagName, iconKey); err != nil {
+	if _, err := h.trackerRepo.CreateProfileTagContext(c.Context(), activeProfile.ID, tagName, iconKey); err != nil {
 		lowerErr := strings.ToLower(err.Error())
 		if strings.Contains(lowerErr, "unique") {
 			if iconKey != nil {
@@ -197,7 +201,7 @@ func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Tag name must be 40 characters or less", nil)
 	}
 
-	renamed, err := h.trackerRepo.RenameProfileTag(activeProfile.ID, tagID, tagName)
+	renamed, err := h.trackerRepo.RenameProfileTagContext(c.Context(), activeProfile.ID, tagID, tagName)
 	if err != nil {
 		lowerErr := strings.ToLower(err.Error())
 		if strings.Contains(lowerErr, "unique") {
@@ -223,7 +227,7 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tag", err)
 	}
 
-	deleted, err := h.trackerRepo.DeleteProfileTag(activeProfile.ID, tagID)
+	deleted, err := h.trackerRepo.DeleteProfileTagContext(c.Context(), activeProfile.ID, tagID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to delete tag", err)
 	}
@@ -240,7 +244,7 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
-	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	linkedSites, err := h.listLinkedSites(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
@@ -248,25 +252,27 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 		return h.renderProfileMenu(c, activeProfile, "No sites available to configure", "")
 	}
 
-	existingLogosBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	existingLogosBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
-	logoBySourceID, err := readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
+	logoBySourceID, err := h.readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
 	if err != nil {
 		return h.renderProfileMenu(c, activeProfile, err.Error(), "")
 	}
 
-	if err := h.sourceRepo.UpsertProfileSourceLogoURLs(activeProfile.ID, logoBySourceID); err != nil {
+	if err := h.sourceRepo.UpsertProfileSourceLogoURLsContext(c.Context(), activeProfile.ID, logoBySourceID); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked site logos", err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Linked site logos saved", `{"trackersChanged":true}`)
 }
 
-func (h *DashboardHandler) listLinkedSourcesForProfile(_ int64) ([]models.Source, error) {
-	enabledSources, err := h.sourceRepo.ListEnabled()
+// listLinkedSites is every enabled source. It takes no profile: the sites a
+// profile can link to are not per-profile, only the logos are.
+func (h *DashboardHandler) listLinkedSites(ctx context.Context) ([]models.Source, error) {
+	enabledSources, err := h.sourceRepo.ListEnabledContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list enabled sources: %w", err)
 	}
@@ -274,22 +280,22 @@ func (h *DashboardHandler) listLinkedSourcesForProfile(_ int64) ([]models.Source
 }
 
 func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models.Profile, message string, hxTrigger string) error {
-	profiles, err := h.profileResolver.ListProfiles()
+	profiles, err := h.profileResolver.ListProfiles(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
 
-	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
+	profileTags, err := h.trackerRepo.ListProfileTagsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
 
-	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
+	linkedSites, err := h.listLinkedSites(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
-	sourceLogoURLs, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	sourceLogoURLs, err := h.sourceRepo.ListProfileSourceLogoURLsContext(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
@@ -311,7 +317,7 @@ func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models
 	})
 }
 
-func readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
+func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
 	logoBySourceID := make(map[int64]string, len(linkedSites))
 	for _, linkedSite := range linkedSites {
 		fileField := fmt.Sprintf("source_logo_file_%d", linkedSite.ID)
@@ -328,7 +334,7 @@ func readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.S
 		existingLogoPath := strings.TrimSpace(existingLogosBySourceID[linkedSite.ID])
 		if removeRequested {
 			if existingLogoPath != "" {
-				_ = removeStoredSourceLogoFile(existingLogoPath)
+				_ = h.removeStoredSourceLogoFile(existingLogoPath)
 			}
 			logoBySourceID[linkedSite.ID] = ""
 			continue
@@ -338,13 +344,13 @@ func readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.S
 			continue
 		}
 
-		logoPath, err := saveUploadedSourceLogo(profileID, linkedSite.ID, fileHeader)
+		logoPath, err := h.saveUploadedSourceLogo(profileID, linkedSite.ID, fileHeader)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", linkedSite.Name, err)
 		}
 
 		if existingLogoPath != "" && existingLogoPath != logoPath {
-			_ = removeStoredSourceLogoFile(existingLogoPath)
+			_ = h.removeStoredSourceLogoFile(existingLogoPath)
 		}
 		logoBySourceID[linkedSite.ID] = logoPath
 	}
@@ -352,13 +358,13 @@ func readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.S
 	return logoBySourceID, nil
 }
 
-func saveUploadedSourceLogo(profileID, sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
+func (h *DashboardHandler) saveUploadedSourceLogo(profileID, sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
 	ext, data, err := readValidatedSourceLogo(fileHeader)
 	if err != nil {
 		return "", err
 	}
 
-	if err := os.MkdirAll(sourceLogoUploadDir, 0o755); err != nil {
+	if err := os.MkdirAll(h.paths.SourceLogosDir, 0o755); err != nil {
 		return "", fmt.Errorf("prepare upload directory: %w", err)
 	}
 
@@ -369,7 +375,7 @@ func saveUploadedSourceLogo(profileID, sourceID int64, fileHeader *multipart.Fil
 		time.Now().UTC().UnixNano(),
 		ext,
 	)
-	diskPath := filepath.Join(sourceLogoUploadDir, fileName)
+	diskPath := filepath.Join(h.paths.SourceLogosDir, fileName)
 
 	if err := os.WriteFile(diskPath, data, 0o644); err != nil {
 		return "", fmt.Errorf("save logo file: %w", err)
@@ -472,8 +478,8 @@ func hasWEBPSignature(data []byte) bool {
 	return string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP"
 }
 
-func removeStoredSourceLogoFile(publicPath string) error {
-	diskPath, ok := sourceLogoPublicPathToDiskPath(publicPath)
+func (h *DashboardHandler) removeStoredSourceLogoFile(publicPath string) error {
+	diskPath, ok := h.sourceLogoPublicPathToDiskPath(publicPath)
 	if !ok {
 		return nil
 	}
@@ -483,7 +489,7 @@ func removeStoredSourceLogoFile(publicPath string) error {
 	return nil
 }
 
-func sourceLogoPublicPathToDiskPath(publicPath string) (string, bool) {
+func (h *DashboardHandler) sourceLogoPublicPathToDiskPath(publicPath string) (string, bool) {
 	trimmed := strings.TrimSpace(publicPath)
 	if !strings.HasPrefix(trimmed, sourceLogoPublicPrefix) {
 		return "", false
@@ -495,5 +501,5 @@ func sourceLogoPublicPathToDiskPath(publicPath string) (string, bool) {
 		return "", false
 	}
 
-	return filepath.Join(sourceLogoUploadDir, fileName), true
+	return filepath.Join(h.paths.SourceLogosDir, fileName), true
 }

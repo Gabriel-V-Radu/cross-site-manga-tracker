@@ -33,11 +33,11 @@ type fakeRepo struct {
 	updatedSnapshotSourceID int64
 }
 
-func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
+func (f *fakeRepo) ListForPollingContext(context.Context) ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) (bool, error) {
+func (f *fakeRepo) UpdatePollingStateContext(_ context.Context, update repository.PollingUpdate) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updatedCount++
@@ -54,7 +54,7 @@ func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) (bool, er
 	return true, nil
 }
 
-func (f *fakeRepo) MarkPollCheckedAt(trackerID int64, _ time.Time) error {
+func (f *fakeRepo) MarkPollCheckedAtContext(_ context.Context, trackerID int64, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markedChecked = append(f.markedChecked, trackerID)
@@ -836,6 +836,23 @@ func TestBetterFallbackResult(t *testing.T) {
 	}
 	if betterFallbackResult(withChapterAndDate(10), withChapter(10)) {
 		t.Fatal("on equal chapters, no date must not replace a date")
+	}
+
+	// The shared rule's tie-break, pinned from this caller too: between two
+	// mirrors reporting the same chapter with dates of their own, the one
+	// already chosen stands. A later timestamp on the same chapter number is a
+	// re-upload, not a fresher release.
+	newer := date.Add(48 * time.Hour)
+	newerDated := &connectors.MangaResult{LatestChapter: chapterPtr(10), LastUpdatedAt: &newer}
+	if betterFallbackResult(withChapterAndDate(10), newerDated) {
+		t.Fatal("on equal chapters, a newer date must not unseat the incumbent")
+	}
+	if betterFallbackResult(newerDated, withChapterAndDate(10)) {
+		t.Fatal("on equal chapters, an older date must not unseat the incumbent")
+	}
+	// A real advance still wins, date or no date.
+	if !betterFallbackResult(newerDated, withChapter(11)) {
+		t.Fatal("a higher chapter must win over a dated lower one")
 	}
 }
 

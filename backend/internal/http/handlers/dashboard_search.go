@@ -27,7 +27,7 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 		return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Query: query, Error: "Select a source first", Intent: intent})
 	}
 
-	source, err := h.sourceRepo.GetByID(sourceID)
+	source, err := h.sourceRepo.GetByIDContext(c.Context(), sourceID)
 	if err != nil {
 		// Answered as a rendered results box rather than a status, so the log
 		// is the only place this failure is visible to the operator.
@@ -111,7 +111,7 @@ func (h *DashboardHandler) ResolveSourceChapter(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(sourceChapterResponse{Error: "source_id is required"})
 	}
 
-	source, err := h.sourceRepo.GetByID(sourceID)
+	source, err := h.sourceRepo.GetByIDContext(c.Context(), sourceID)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "Failed to resolve source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(sourceChapterResponse{Error: "Failed to resolve source"})

@@ -30,8 +30,9 @@ var tinyJPEG = []byte{
 }
 
 func TestSaveSourceLogosFromMenuUploadsPNG(t *testing.T) {
-	db, app, cleanup := setupTestApp(t)
-	defer cleanup()
+	env := newTestEnv(t, nil)
+	defer env.cleanup()
+	db, app := env.db, env.app
 
 	sourceID, _ := sourceMetaByKey(t, db, "mangadex")
 
@@ -88,15 +89,18 @@ func TestSaveSourceLogosFromMenuUploadsPNG(t *testing.T) {
 		t.Fatalf("expected saved logo path in uploads directory, got %q", logoPath)
 	}
 
-	diskPath := filepath.Join("data", "uploads", "site-logos", filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
-	if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("cleanup uploaded logo file: %v", err)
+	// The stored path is what the browser asks /uploads for, so the file has to
+	// exist under the directory that route serves.
+	diskPath := filepath.Join(env.cfg.SourceLogosDir(), filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
+	if _, err := os.Stat(diskPath); err != nil {
+		t.Fatalf("uploaded logo missing from the configured uploads directory: %v", err)
 	}
 }
 
 func TestSaveSourceLogosFromMenuUploadsJPG(t *testing.T) {
-	db, app, cleanup := setupTestApp(t)
-	defer cleanup()
+	env := newTestEnv(t, nil)
+	defer env.cleanup()
+	db, app := env.db, env.app
 
 	sourceID, _ := sourceMetaByKey(t, db, "mangadex")
 
@@ -153,9 +157,9 @@ func TestSaveSourceLogosFromMenuUploadsJPG(t *testing.T) {
 		t.Fatalf("expected saved logo path to end in .jpg, got %q", logoPath)
 	}
 
-	diskPath := filepath.Join("data", "uploads", "site-logos", filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
-	if err := os.Remove(diskPath); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("cleanup uploaded logo file: %v", err)
+	diskPath := filepath.Join(env.cfg.SourceLogosDir(), filepath.Base(strings.TrimPrefix(logoPath, "/uploads/site-logos/")))
+	if _, err := os.Stat(diskPath); err != nil {
+		t.Fatalf("uploaded logo missing from the configured uploads directory: %v", err)
 	}
 }
 

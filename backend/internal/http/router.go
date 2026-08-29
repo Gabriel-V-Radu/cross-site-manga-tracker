@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
@@ -55,10 +56,17 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	if connectorRegistry == nil {
 		connectorRegistry = connectordefaults.NewRegistry()
 	}
-	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
-	// The dashboard sweeps its caches on a background ticker; tying it to the
-	// app's life keeps a shut-down app — every one a test binary builds — from
-	// leaving the goroutine behind.
+	dashboard := handlers.NewDashboardHandler(db, connectorRegistry, handlers.DashboardPaths{
+		TemplatesGlob:  cfg.TemplatesGlob(),
+		AssetsDir:      cfg.AssetsDir(),
+		CoversDir:      cfg.CoversDir(),
+		SourceLogosDir: cfg.SourceLogosDir(),
+	})
+	// The dashboard sweeps its caches on a background ticker and can be
+	// running a link scan; tying both to the app's life keeps a shut-down app
+	// — every one a test binary builds — from leaving goroutines behind, and
+	// keeps a scan from issuing requests and writes while the process is
+	// closing the database under it.
 	app.Hooks().OnShutdown(func() error {
 		dashboard.Close()
 		return nil
@@ -75,8 +83,8 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 		c.Set(fiber.HeaderCacheControl, "no-cache")
 		return c.Next()
 	})
-	app.Static("/assets", "./web/assets")
-	app.Static("/uploads", "./data/uploads")
+	app.Static("/assets", cfg.AssetsDir())
+	app.Static("/uploads", cfg.UploadsDir())
 	// Locally stored cover art. File names hash the remote URL, so a cover
 	// that changes upstream arrives as a new file — the old name never serves
 	// different bytes, which is what makes immutable safe and cover renders
@@ -85,9 +93,10 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 		c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
 		return c.Next()
 	})
-	app.Static("/covers", "./data/covers")
+	app.Static("/covers", cfg.CoversDir())
+	faviconPath := filepath.Join(cfg.AssetsDir(), "favicon.svg")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
-		return c.SendFile("./web/assets/favicon.svg")
+		return c.SendFile(faviconPath)
 	})
 	app.Get("/", dashboard.Page)
 	app.Get("/dashboard", dashboard.Page)
