@@ -106,7 +106,7 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 	args := []any{sourceID, sourceID, profileID, sourceID}
 
 	if len(filter.Statuses) > 0 {
-		query += ` AND LOWER(TRIM(t.status)) IN (` + placeholders(len(filter.Statuses)) + `)`
+		query += ` AND LOWER(TRIM(t.status)) IN (` + sqlPlaceholders(len(filter.Statuses)) + `)`
 		for _, status := range filter.Statuses {
 			args = append(args, strings.ToLower(strings.TrimSpace(status)))
 		}
@@ -118,7 +118,7 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 			// silently widening to everything.
 			query += ` AND 1 = 0`
 		} else {
-			query += ` AND t.source_id IN (` + placeholders(len(filter.PrimarySourceIDs)) + `)`
+			query += ` AND t.source_id IN (` + sqlPlaceholders(len(filter.PrimarySourceIDs)) + `)`
 			for _, id := range filter.PrimarySourceIDs {
 				args = append(args, id)
 			}
@@ -134,10 +134,6 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 	}
 
 	return query, args
-}
-
-func placeholders(count int) string {
-	return strings.TrimSuffix(strings.Repeat("?, ", count), ", ")
 }
 
 // ListScanTargets returns the trackers a scan of sourceID should look up.
@@ -395,8 +391,19 @@ func (r *LinkSuggestionRepository) MergeRelatedTitles(trackerID int64, titles []
 		return nil
 	}
 
+	// Read-merge-write in one transaction: a concurrent writer (a scan on
+	// another goroutine, a dashboard edit) slipping between the read and the
+	// write would have its titles overwritten by a merge that never saw them.
+	// With MaxOpenConns(1) the tx holds the pool's only connection, so both
+	// statements must use tx, never r.db.
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin merge related titles tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	var existingRaw sql.NullString
-	if err := r.db.QueryRow(`SELECT related_titles FROM trackers WHERE id = ?`, trackerID).Scan(&existingRaw); err != nil {
+	if err := tx.QueryRow(`SELECT related_titles FROM trackers WHERE id = ?`, trackerID).Scan(&existingRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -413,10 +420,14 @@ func (r *LinkSuggestionRepository) MergeRelatedTitles(trackerID int64, titles []
 	}
 
 	encoded := encodeRelatedTitlesJSON(merged)
-	if _, err := r.db.Exec(`
+	if _, err := tx.Exec(`
 		UPDATE trackers SET related_titles = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
 	`, encoded, trackerID); err != nil {
 		return fmt.Errorf("write related titles: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit merge related titles tx: %w", err)
 	}
 	return nil
 }

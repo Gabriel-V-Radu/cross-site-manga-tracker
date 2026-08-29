@@ -26,7 +26,9 @@ const pollResolveTimeout = 90 * time.Second
 
 type pollRepository interface {
 	ListForPolling() ([]repository.PollingTracker, error)
-	UpdatePollingState(update repository.PollingUpdate) error
+	// UpdatePollingState reports false when the tracker changed after the
+	// cycle snapshotted it and the write was therefore skipped.
+	UpdatePollingState(update repository.PollingUpdate) (bool, error)
 	MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error
 }
 
@@ -38,6 +40,11 @@ type Poller struct {
 	lowerConfirmationDelay time.Duration
 	logger                 *slog.Logger
 	stopCh                 chan struct{}
+	// started records whether Start ever ran. stopCh only closes from the
+	// goroutine Start launches, so a StopWait on a poller that was never
+	// started (polling disabled) would otherwise sit out its whole timeout
+	// waiting for a close that can never come.
+	started atomic.Bool
 }
 
 type PollerConfig struct {
@@ -90,6 +97,7 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 // into a rest-less loop that keeps every host's pacing queue permanently
 // busy and user-facing requests permanently behind it.
 func (p *Poller) Start(ctx context.Context) {
+	p.started.Store(true)
 	p.logger.Info("poller started", "interval", p.interval.String())
 	go func() {
 		for {
@@ -108,6 +116,11 @@ func (p *Poller) Start(ctx context.Context) {
 }
 
 func (p *Poller) StopWait(timeout time.Duration) {
+	if !p.started.Load() {
+		// Start never ran, so there is no goroutine to wait for and nobody to
+		// ever close stopCh; waiting would just burn the whole timeout.
+		return
+	}
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
@@ -326,8 +339,9 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		currentSourceURL = ""
 	}
 
-	if err := p.repo.UpdatePollingState(repository.PollingUpdate{
+	applied, err := p.repo.UpdatePollingState(repository.PollingUpdate{
 		TrackerID:             tracker.ID,
+		SnapshotSourceID:      tracker.SourceID,
 		SourceID:              sourceID,
 		CurrentSourceURL:      currentSourceURL,
 		SourceItemID:          canonicalSourceItemID,
@@ -338,8 +352,11 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		ClearLatestReleaseAt:  clearLatestReleaseAt,
 		PendingLowerChapter:   outcome.pendingLower,
 		CheckedAt:             now,
-	}); err != nil {
+	})
+	if err != nil {
 		p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
+	} else if !applied {
+		p.logger.Debug("poll update skipped: tracker changed mid-cycle", "trackerId", tracker.ID, "snapshotSourceId", tracker.SourceID)
 	}
 }
 

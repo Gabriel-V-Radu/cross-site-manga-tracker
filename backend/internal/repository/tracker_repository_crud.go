@@ -18,7 +18,19 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
-	result, err := r.db.Exec(`
+
+	// The tracker row and its primary source row are one write: committing the
+	// INSERT and then failing to link the source used to leave a tracker with
+	// no tracker_sources rows behind. With MaxOpenConns(1) everything up to
+	// Commit must run on the tx handle — including GetByID staying AFTER the
+	// commit, since it would otherwise wait on the connection this tx holds.
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin create tracker tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(`
 		INSERT INTO trackers (
 			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, latest_chapter_seen_at, last_checked_at, last_read_at
 		)
@@ -33,12 +45,16 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("get tracker last insert id: %w", err)
 	}
 
-	if err := r.ReplaceTrackerSources(tracker.ProfileID, id, []models.TrackerSource{{
+	if err := replaceTrackerSourcesInTx(tx, tracker.ProfileID, id, []models.TrackerSource{{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
 	}}); err != nil {
 		return nil, fmt.Errorf("create tracker sources: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit create tracker tx: %w", err)
 	}
 
 	return r.GetByID(tracker.ProfileID, id)

@@ -77,7 +77,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 
 	newChapter := 20.0
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 	// re-stamping on every cycle is exactly the drift that made a dateless tracker
 	// look freshly updated forever.
 	laterCheck := discoveredAt.Add(6 * time.Hour)
-	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
+	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestUpdatePollingStateKeepsChapterSeenAtWhenReleaseDateIsKnown(t *testing.T
 	newChapter := 20.0
 	releasedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 	newChapter := 20.0
 	reporter := int64(3)
 	checkedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
+	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 		t.Fatalf("expected reporter source %d to be recorded, got %#v", reporter, tracker.LatestChapterSourceID)
 	}
 
-	if err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
+	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -168,5 +168,130 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 	}
 	if tracker.LatestChapterSourceID == nil || *tracker.LatestChapterSourceID != reporter {
 		t.Fatalf("expected the recorded reporter to survive a poll that named none, got %#v", tracker.LatestChapterSourceID)
+	}
+}
+
+// TestUpdatePollingStateSkipsWhenSourceChangedMidCycle covers the optimistic
+// guard: a poll cycle can run for tens of minutes off a snapshot taken at its
+// start, and a user who repoints the tracker's source mid-cycle must not have
+// that edit reverted by the stale write — which could also leave source_id
+// (new) mismatched with source_url (old), a state host validation rejects
+// forever.
+func TestUpdatePollingStateSkipsWhenSourceChangedMidCycle(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 19)
+
+	// The user repoints the tracker at source 2 after the poll snapshotted
+	// source 1.
+	userURL := "https://mangafire.to/manga/repointed"
+	if _, err := db.Exec(`UPDATE trackers SET source_id = 2, source_url = ?, latest_known_chapter = 25 WHERE id = ?`, userURL, trackerID); err != nil {
+		t.Fatalf("simulate user edit: %v", err)
+	}
+
+	staleChapter := 20.0
+	applied, err := repo.UpdatePollingState(repository.PollingUpdate{
+		TrackerID:          trackerID,
+		SnapshotSourceID:   1,
+		SourceID:           1,
+		CurrentSourceURL:   "https://mangadex.org/title/polling",
+		SourceURL:          "https://mangadex.org/title/polling-canonical",
+		LatestKnownChapter: &staleChapter,
+		CheckedAt:          time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+	if applied {
+		t.Fatalf("expected the stale write to be skipped after the mid-cycle edit")
+	}
+
+	var sourceID int64
+	var sourceURL string
+	var latest sql.NullFloat64
+	if err := db.QueryRow(`SELECT source_id, source_url, latest_known_chapter FROM trackers WHERE id = ?`, trackerID).Scan(&sourceID, &sourceURL, &latest); err != nil {
+		t.Fatalf("read tracker after skipped write: %v", err)
+	}
+	if sourceID != 2 || sourceURL != userURL {
+		t.Fatalf("expected the user's repoint to survive, got source_id=%d source_url=%q", sourceID, sourceURL)
+	}
+	if !latest.Valid || latest.Float64 != 25 {
+		t.Fatalf("expected the user's chapter correction to survive, got %#v", latest)
+	}
+
+	// The dependent mirror statements must be skipped along with the UPDATE:
+	// the stale snapshot's canonical URL has no business in tracker_sources.
+	var mirrored int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM tracker_sources WHERE tracker_id = ? AND source_id = 1`, trackerID).Scan(&mirrored); err != nil {
+		t.Fatalf("count mirror rows: %v", err)
+	}
+	if mirrored != 0 {
+		t.Fatalf("expected no mirror row from the skipped write, got %d", mirrored)
+	}
+}
+
+// TestUpdatePollingStateUpsertsMirrorRow proves the tracker_sources mirror
+// still lands now that the whole operation runs in one transaction, including
+// the stale-URL cleanup when the canonical URL moved.
+func TestUpdatePollingStateUpsertsMirrorRow(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 19)
+
+	oldURL := "https://mangadex.org/title/polling"
+	if _, err := db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_url)
+		VALUES (?, 1, ?)
+	`, trackerID, oldURL); err != nil {
+		t.Fatalf("seed stale mirror row: %v", err)
+	}
+
+	newChapter := 20.0
+	itemID := "canonical-item"
+	newURL := "https://mangadex.org/title/polling-canonical"
+	applied, err := repo.UpdatePollingState(repository.PollingUpdate{
+		TrackerID:          trackerID,
+		SnapshotSourceID:   1,
+		SourceID:           1,
+		CurrentSourceURL:   oldURL,
+		SourceItemID:       &itemID,
+		SourceURL:          newURL,
+		LatestKnownChapter: &newChapter,
+		CheckedAt:          time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected the write to apply against an unchanged tracker")
+	}
+
+	rows, err := db.Query(`SELECT source_url, source_item_id FROM tracker_sources WHERE tracker_id = ? AND source_id = 1`, trackerID)
+	if err != nil {
+		t.Fatalf("read mirror rows: %v", err)
+	}
+	defer rows.Close()
+
+	mirrors := map[string]string{}
+	for rows.Next() {
+		var url string
+		var item sql.NullString
+		if err := rows.Scan(&url, &item); err != nil {
+			t.Fatalf("scan mirror row: %v", err)
+		}
+		mirrors[url] = item.String
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate mirror rows: %v", err)
+	}
+
+	if _, stale := mirrors[oldURL]; stale {
+		t.Fatalf("expected the stale mirror row to be deleted, still present: %v", mirrors)
+	}
+	if item, ok := mirrors[newURL]; !ok || item != itemID {
+		t.Fatalf("expected the canonical mirror row with item id %q, got %v", itemID, mirrors)
+	}
+	if len(mirrors) != 1 {
+		t.Fatalf("expected exactly the canonical mirror row, got %v", mirrors)
 	}
 }

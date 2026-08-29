@@ -68,6 +68,14 @@ type TrackerSourceRef struct {
 type PollingUpdate struct {
 	TrackerID int64
 
+	// SnapshotSourceID is the tracker's source_id as it stood when the poll
+	// cycle loaded it. UpdatePollingState refuses to write unless the row
+	// still carries this source: a cycle can run for tens of minutes, and a
+	// write computed from a stale snapshot must not revert a mid-cycle user
+	// edit. Unlike SourceID it is set on fallback polls too — it identifies
+	// the snapshot, not the source being mirrored.
+	SnapshotSourceID int64
+
 	// SourceID and CurrentSourceURL mirror the primary source into
 	// tracker_sources. Both are left zero by a fallback poll, which must not
 	// repoint the tracker at the mirror that answered it.

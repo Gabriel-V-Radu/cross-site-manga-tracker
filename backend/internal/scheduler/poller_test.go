@@ -29,13 +29,15 @@ type fakeRepo struct {
 	clearedReleaseAt    bool
 	updatedPendingLower *float64
 	markedChecked       []int64
+
+	updatedSnapshotSourceID int64
 }
 
 func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
+func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updatedCount++
@@ -48,7 +50,8 @@ func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
 	f.updatedCurrentURL = update.CurrentSourceURL
 	f.clearedReleaseAt = update.ClearLatestReleaseAt
 	f.updatedPendingLower = update.PendingLowerChapter
-	return nil
+	f.updatedSnapshotSourceID = update.SnapshotSourceID
+	return true, nil
 }
 
 func (f *fakeRepo) MarkPollCheckedAt(trackerID int64, _ time.Time) error {
@@ -380,6 +383,10 @@ func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	if repo.updatedItemID == nil || *repo.updatedItemID != "a" {
 		t.Fatalf("expected canonical source item id to be saved, got %#v", repo.updatedItemID)
 	}
+	// The snapshot's source id guards the write against a mid-cycle repoint.
+	if repo.updatedSnapshotSourceID != 7 {
+		t.Fatalf("expected the snapshot source id 7 to guard the write, got %d", repo.updatedSnapshotSourceID)
+	}
 }
 
 func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T) {
@@ -559,6 +566,11 @@ func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
 	}
 	if repo.updatedSourceID != 0 || repo.updatedCurrentURL != "" {
 		t.Fatalf("fallback must not touch tracker_sources, got sourceID=%d url=%q", repo.updatedSourceID, repo.updatedCurrentURL)
+	}
+	// A fallback poll zeroes SourceID, but the optimistic guard still needs
+	// the snapshot's primary source id to know the tracker was not repointed.
+	if repo.updatedSnapshotSourceID != 7 {
+		t.Fatalf("expected the fallback write to carry the snapshot source id 7, got %d", repo.updatedSnapshotSourceID)
 	}
 }
 
@@ -1113,5 +1125,42 @@ func TestPollerRunOnce_LeavesReleaseDateUnsetWhenNewChapterHasNoReleaseDate(t *t
 
 	if repo.updatedAt != nil {
 		t.Fatalf("expected release date to remain unset when source does not provide one")
+	}
+}
+
+// TestPollerStopWait_ReturnsImmediatelyWhenNeverStarted pins the shutdown path
+// with polling disabled: stopCh only ever closes from the goroutine Start
+// launches, so a StopWait on a never-started poller used to sit out its whole
+// timeout waiting for a close that could not come.
+func TestPollerStopWait_ReturnsImmediatelyWhenNeverStarted(t *testing.T) {
+	poller := NewPoller(&fakeRepo{}, connectors.NewRegistry(), PollerConfig{Interval: time.Minute}, nil)
+
+	start := time.Now()
+	poller.StopWait(2 * time.Second)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("expected StopWait without Start to return immediately, took %s", elapsed)
+	}
+}
+
+// TestPollerStopWait_StillWaitsForAStartedPoller guards the other half: once
+// Start has run, StopWait must keep waiting for the goroutine to acknowledge
+// the cancelled context rather than returning while a cycle is mid-write.
+func TestPollerStopWait_StillWaitsForAStartedPoller(t *testing.T) {
+	poller := NewPoller(&fakeRepo{}, connectors.NewRegistry(), PollerConfig{Interval: time.Minute}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	poller.Start(ctx)
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		poller.StopWait(2 * time.Second)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected StopWait to observe the stopped goroutine")
 	}
 }

@@ -382,7 +382,19 @@ func (r *TrackerRepository) MarkPollCheckedAt(trackerID int64, checkedAt time.Ti
 	return nil
 }
 
-func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
+// UpdatePollingState persists one poll's outcome. It returns false when the
+// write was skipped because the tracker no longer matches the snapshot the
+// poll was computed from: a poll cycle can run for tens of minutes, and a user
+// who repoints the tracker's source mid-cycle must not have that edit
+// reverted by a write derived from the old source — worse, an unconditional
+// write could leave source_id (new) mismatched with source_url (old), a state
+// host validation rejects forever. The guard is the snapshot's source_id.
+//
+// The trackers UPDATE, the stale-mirror DELETE, and the mirror upsert run in
+// one transaction: they describe a single poll outcome, and a crash between
+// the DELETE and the INSERT used to drop the primary-source mirror row
+// permanently.
+func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, error) {
 	var latestReleaseValue any
 	if update.LatestReleaseAt != nil {
 		latestReleaseValue = update.LatestReleaseAt.UTC()
@@ -409,6 +421,15 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
 		latestChapterSourceValue = *update.LatestChapterSourceID
 	}
 
+	tx, err := r.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin polling state tx: %w", err)
+	}
+	// With MaxOpenConns(1) the tx holds the pool's only connection, so every
+	// statement below must go through tx, never r.db — a plain r.db call would
+	// wait for the connection this tx holds and deadlock.
+	defer tx.Rollback()
+
 	// Every expression here is evaluated against the row as it stands before the
 	// update, which is what lets latest_chapter_seen_at compare the incoming
 	// chapter number against the stored one without the caller passing a flag —
@@ -416,7 +437,7 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
 	// uses the same trick: it only restarts when the pending number itself
 	// changes, so a value that keeps being reported keeps its original timestamp
 	// and can age into confirmation.
-	_, err := r.db.Exec(`
+	result, err := tx.Exec(`
 		UPDATE trackers
 		SET source_item_id = COALESCE(?, source_item_id),
 			source_url = COALESCE(?, source_url),
@@ -439,29 +460,41 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
 				ELSE latest_release_at
 			END,
 			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
+		WHERE id = ? AND source_id = ?
 	`, sourceItemIDValue, sourceURLValue,
 		latestKnownChapter, latestKnownChapter, checkedAt, checkedAt,
 		latestKnownChapter,
 		latestChapterSourceValue,
 		pendingLower, pendingLower, checkedAt, checkedAt,
 		pendingLower,
-		update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt, update.TrackerID)
+		update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt,
+		update.TrackerID, update.SnapshotSourceID)
 	if err != nil {
-		return fmt.Errorf("update polling state: %w", err)
+		return false, fmt.Errorf("update polling state: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("polling state rows affected: %w", err)
+	}
+	if affected == 0 {
+		// The tracker was repointed (or deleted) after the poll snapshotted it.
+		// Nothing was written, and the mirror statements below are derived from
+		// the same stale snapshot, so they must be skipped too.
+		return false, nil
 	}
 
 	if update.SourceID > 0 && trimmedSourceURL != "" {
 		if trimmedCurrentSourceURL != "" && !strings.EqualFold(trimmedCurrentSourceURL, trimmedSourceURL) {
-			if _, err := r.db.Exec(`
+			if _, err := tx.Exec(`
 				DELETE FROM tracker_sources
 				WHERE tracker_id = ? AND source_id = ? AND LOWER(source_url) = LOWER(?)
 			`, update.TrackerID, update.SourceID, trimmedCurrentSourceURL); err != nil {
-				return fmt.Errorf("delete stale polling tracker source: %w", err)
+				return false, fmt.Errorf("delete stale polling tracker source: %w", err)
 			}
 		}
 
-		if _, err := r.db.Exec(`
+		if _, err := tx.Exec(`
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
 			ON CONFLICT(tracker_id, source_id, source_url)
@@ -469,8 +502,12 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {
 				source_item_id = excluded.source_item_id,
 				updated_at = CURRENT_TIMESTAMP
 		`, update.TrackerID, update.SourceID, update.SourceItemID, trimmedSourceURL); err != nil {
-			return fmt.Errorf("upsert polling tracker source: %w", err)
+			return false, fmt.Errorf("upsert polling tracker source: %w", err)
 		}
 	}
-	return nil
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit polling state tx: %w", err)
+	}
+	return true, nil
 }

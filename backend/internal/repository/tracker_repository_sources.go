@@ -139,13 +139,28 @@ func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int
 	if err != nil {
 		return fmt.Errorf("begin replace tracker sources tx: %w", err)
 	}
+	defer tx.Rollback()
 
+	if err := replaceTrackerSourcesInTx(tx, profileID, trackerID, sources); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace tracker sources tx: %w", err)
+	}
+
+	return nil
+}
+
+// replaceTrackerSourcesInTx is ReplaceTrackerSources' body on a caller-owned
+// transaction, so Create can run the tracker INSERT and its source rows as one
+// atomic write. The caller commits or rolls back.
+func replaceTrackerSourcesInTx(tx *sql.Tx, profileID int64, trackerID int64, sources []models.TrackerSource) error {
 	if _, err := tx.Exec(`
 		DELETE FROM tracker_sources
 		WHERE tracker_id = ?
 		  AND EXISTS (SELECT 1 FROM trackers t WHERE t.id = ? AND t.profile_id = ?)
 	`, trackerID, trackerID, profileID); err != nil {
-		tx.Rollback()
 		return fmt.Errorf("delete tracker sources: %w", err)
 	}
 
@@ -157,13 +172,8 @@ func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
 		`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL)); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("insert tracker source: %w", err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit replace tracker sources tx: %w", err)
 	}
 
 	return nil
