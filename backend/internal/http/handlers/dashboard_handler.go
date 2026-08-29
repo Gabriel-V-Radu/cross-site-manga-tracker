@@ -201,7 +201,6 @@ type trackerFormData struct {
 	ReadingSourceID int64
 	ProfileTags     []models.CustomTag
 	TrackerTags     []models.CustomTag
-	TagIconKeys     []string
 }
 
 type trackerSearchResultsData struct {
@@ -220,7 +219,6 @@ type profileMenuData struct {
 	LinkedSites       []models.Source
 	SourceLogoURLs    map[int64]string
 	ProfileTags       []models.CustomTag
-	TagIconKeys       []string
 	AvailableIconKeys []string
 	Message           string
 }

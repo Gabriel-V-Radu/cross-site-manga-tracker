@@ -39,7 +39,6 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 		LinkedSources: []models.TrackerSource{},
 		ProfileTags:   profileTags,
 		TrackerTags:   []models.CustomTag{},
-		TagIconKeys:   tagIconKeysOrdered,
 	})
 }
 
@@ -122,7 +121,6 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 		ReadingSourceID: readingSourceID,
 		ProfileTags:     profileTags,
 		TrackerTags:     tracker.Tags,
-		TagIconKeys:     tagIconKeysOrdered,
 	})
 }
 

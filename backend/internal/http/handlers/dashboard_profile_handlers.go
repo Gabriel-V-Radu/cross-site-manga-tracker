@@ -311,7 +311,6 @@ func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models
 		LinkedSites:       linkedSites,
 		SourceLogoURLs:    sourceLogoURLs,
 		ProfileTags:       profileTags,
-		TagIconKeys:       tagIconKeysOrdered,
 		AvailableIconKeys: availableTagIconKeys(profileTags),
 		Message:           message,
 	})
