@@ -57,10 +57,10 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 	if mangaURL, ok := extractMangaFireMangaURL(query); source.Key == "mangafire" && ok {
 		resolved, resolveErr := connector.ResolveByURL(ctx, mangaURL)
 		if resolveErr != nil || resolved == nil {
-			message := "Failed to resolve MangaFire URL"
-			if resolveErr != nil {
-				message = "Failed to resolve MangaFire URL: " + resolveErr.Error()
-			}
+			// The connector's own text names the request URL it built and the
+			// host it went to, so it goes to the log rather than onto the page.
+			message := publicRequestMessage(resolveErr, "Failed to resolve MangaFire URL")
+			logHandlerFailure(c, fiber.StatusInternalServerError, message, resolveErr)
 			return h.render(c, "tracker_search_results.html", trackerSearchResultsData{
 				Query:      query,
 				SourceID:   source.ID,
@@ -81,7 +81,9 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 
 	results, err := connector.SearchByTitle(ctx, query, 8)
 	if err != nil {
-		return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Query: query, Error: "Search failed for this source: " + err.Error(), SourceID: source.ID, SourceName: source.Name, Intent: intent})
+		message := publicRequestMessage(err, "Search failed for this source")
+		logHandlerFailure(c, fiber.StatusInternalServerError, message, err)
+		return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Query: query, Error: message, SourceID: source.ID, SourceName: source.Name, Intent: intent})
 	}
 
 	return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Items: results, Query: query, SourceID: source.ID, SourceName: source.Name, Intent: intent})

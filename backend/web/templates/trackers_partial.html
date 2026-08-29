@@ -121,6 +121,12 @@
 
         window.__coverRefreshAttempts[refreshKey] = attempts + 1;
         var delayMs = Math.min(3000, 600 + (attempts * 200));
+        // Yielding to an interaction has to end somewhere. A rating popover or
+        // the connector menu left open would otherwise hold the refresh off for
+        // as long as the page is on screen, and the covers it is waiting for
+        // would never arrive.
+        var maxDeferMs = 15000;
+        var deferUntil = 0;
         var doSilentRefresh = function () {
             window.__pendingTrackersRefreshTimer = null;
             if (window.__freezeTrackersOrder) {
@@ -139,9 +145,17 @@
             // Same courtesy for an open menu, a hovered connector or a focused
             // control: swapping the region out from under the pointer closes
             // what the user opened and flickers what they are pointing at.
+            // Bounded, so an interaction that is simply left open eventually
+            // gives the covers their turn.
             if (window.trackersInteractionInProgress && window.trackersInteractionInProgress()) {
-                window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
-                return;
+                var now = new Date().getTime();
+                if (!deferUntil) {
+                    deferUntil = now + maxDeferMs;
+                }
+                if (now < deferUntil) {
+                    window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
+                    return;
+                }
             }
 
             window.__silentCoverRefresh = true;

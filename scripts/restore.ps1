@@ -68,10 +68,34 @@ if (-not $SkipPreBackup) {
     }
     $preBackupPath = Join-Path $tmpDir "pre-restore-$stamp.sqlite"
     docker cp "$ContainerName`:$DockerDbPath" "$preBackupPath" | Out-Null
+    # The sidecars carry whatever has not been checkpointed yet, so the safety
+    # copy is only a safety copy with them.
+    foreach ($suffix in @("-wal", "-shm")) {
+        docker cp "$ContainerName`:$DockerDbPath$suffix" "$preBackupPath$suffix" 2>$null | Out-Null
+    }
     Write-Host "Pre-restore backup created: $preBackupPath"
 }
 
 docker cp "$BackupFile" "$ContainerName`:$DockerDbPath" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "docker cp of the backup failed; the database was left as it was." }
+
+# A -wal left over from the database being replaced would be replayed on top of
+# the one just restored, mixing two databases together. A clean shutdown
+# checkpoints and removes it, so this normally finds nothing — but a container
+# that was killed rather than stopped leaves one behind. The container is
+# stopped here, so it cannot be deleted through exec; a zero-length file is the
+# equivalent, since SQLite finds no valid WAL header and starts a fresh one.
+$emptyFile = Join-Path $env:TEMP "cross-site-tracker-empty.tmp"
+Set-Content -Path $emptyFile -Value $null -NoNewline
+foreach ($suffix in @("-wal", "-shm")) {
+    if (Test-Path "$BackupFile$suffix") {
+        docker cp "$BackupFile$suffix" "$ContainerName`:$DockerDbPath$suffix" | Out-Null
+    }
+    else {
+        docker cp "$emptyFile" "$ContainerName`:$DockerDbPath$suffix" 2>$null | Out-Null
+    }
+}
+Remove-Item -Path $emptyFile -Force -ErrorAction SilentlyContinue
 Write-Host "Restore copied into container path: $DockerDbPath"
 
 if ($RestartContainer -or -not [string]::IsNullOrWhiteSpace($isRunning)) {

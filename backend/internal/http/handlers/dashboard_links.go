@@ -242,11 +242,16 @@ func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
 // rememberLinkScanScope keeps the raw scope values a scan launched with, and
 // lastLinkScanScopeValues serves them back with defaults filled in.
 func (h *DashboardHandler) rememberLinkScanScope(c *fiber.Ctx, sourceID int64) {
+	// Cloned for the same reason the page gate clones: a form value borrows the
+	// request's body buffer, ToLower returns the input unchanged when it is
+	// already lowercase, and this map is kept on the handler until the next
+	// scan. Without the copy the remembered scope can turn into the bytes of
+	// whatever request reused the buffer.
 	scope := map[string]string{
 		"source":     strconv.FormatInt(sourceID, 10),
-		"status":     strings.ToLower(strings.TrimSpace(c.FormValue("status"))),
-		"primary":    strings.ToLower(strings.TrimSpace(c.FormValue("primary"))),
-		"alternates": strings.ToLower(strings.TrimSpace(c.FormValue("alternates"))),
+		"status":     strings.Clone(strings.ToLower(strings.TrimSpace(c.FormValue("status")))),
+		"primary":    strings.Clone(strings.ToLower(strings.TrimSpace(c.FormValue("primary")))),
+		"alternates": strings.Clone(strings.ToLower(strings.TrimSpace(c.FormValue("alternates")))),
 	}
 	h.lastLinkScanMu.Lock()
 	h.lastLinkScanScope = scope

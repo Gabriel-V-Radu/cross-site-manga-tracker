@@ -57,7 +57,14 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 	listOptions.Limit = pageSize
 	listOptions.Offset = offset
-	refreshKey := c.OriginalURL()
+	// Cloned because fiber hands back a string aliasing fasthttp's request-URI
+	// buffer, which is overwritten by the next request on the same connection.
+	// This key outlives the request twice over — it is held on the page gate for
+	// the process's lifetime and captured by every background fetch queued below
+	// — so without the copy a queued cover would wake up holding the bytes of
+	// some later request, decide the reader had navigated away, and quietly do
+	// nothing.
+	refreshKey := strings.Clone(c.OriginalURL())
 	h.pageKeys.SetActive(refreshKey)
 
 	items, err := h.trackerRepo.ListContext(c.Context(), listOptions)

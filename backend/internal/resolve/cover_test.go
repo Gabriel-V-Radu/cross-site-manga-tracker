@@ -371,6 +371,40 @@ func TestFetchCoverURLStoresLocalCopy(t *testing.T) {
 	}
 }
 
+// TestFetchCoverURLKeepsCoverArtOfAnyShape pins that a cover is judged on being
+// an image, not on its proportions. A version of this resolver refused anything
+// not clearly portrait; measuring the stored library showed the shapes run from
+// 1.00 to 1.58 tall-over-wide and that the squarest files are real title art, so
+// the rule only ever produced cards with no art. The series that surfaced it
+// publishes a 1125x675 cover on its one linked source.
+func TestFetchCoverURLKeepsCoverArtOfAnyShape(t *testing.T) {
+	landscape := encodeJPEG(t, 30, 18)
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(landscape)
+	}))
+	defer imageServer.Close()
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(mirrorConnector{key: "onlysource", cover: imageServer.URL + "/wide.jpg"}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	resolver := newLocalCoverResolver(t, registry)
+
+	served, err := resolver.fetch(context.Background(), "onlysource", "https://only.example/title/a", nil, nil)
+	if err != nil {
+		t.Fatalf("a landscape cover on the only source must still be served: %v", err)
+	}
+	if !strings.HasPrefix(served, coverLocalURLPrefix) {
+		t.Fatalf("expected a local /covers URL, got %q", served)
+	}
+	name := strings.TrimPrefix(served, coverLocalURLPrefix)
+	if _, err := os.Stat(filepath.Join(resolver.dir, name)); err != nil {
+		t.Fatalf("expected the image stored on disk: %v", err)
+	}
+}
+
 // TestFetchCoverURLRejectsNonImageBodies keeps challenge pages and CDN error
 // bodies out of the store: a download that is not recognizably an image falls
 // through to the next source instead of being served as art forever.

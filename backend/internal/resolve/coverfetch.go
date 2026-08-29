@@ -1,16 +1,9 @@
 package resolve
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"fmt"
-	"image"
-	// Registered for imageDimensions: these are the formats whose shape can be
-	// measured before a cover is accepted.
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
 	"log/slog"
 	"net"
@@ -159,6 +152,12 @@ const coverDownloadLimit = 8 << 20
 // URL, so the same art shared by several trackers is stored once, and the
 // /covers route can serve it as immutable — a source that changes its art
 // publishes a new URL, which becomes a new file.
+// A cover is accepted on whether it is an image, not on its shape. An earlier
+// version refused anything not clearly portrait, on the theory that a square on
+// a cover endpoint is a promo banner. Measuring the stored library disproved it:
+// the shapes run from 1.00 to 1.58 tall-over-wide, and the squarest files are
+// the real title art for their series. The guard only ever produced cards with
+// no art at all, which is worse than art of an unusual shape.
 func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
@@ -193,15 +192,6 @@ func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (s
 		return "", false
 	}
 
-	if width, height, measured := imageDimensions(body); measured && !coverShaped(width, height) {
-		// Cover art is portrait. A square image on a cover endpoint is a promo
-		// banner or a site placeholder, and accepting one ends the fallback
-		// chain on something that is not the cover — the caller can still find
-		// the real art on one of the tracker's other linked sources.
-		slog.Debug("cover rejected as not cover-shaped", "url", coverURL, "width", width, "height", height)
-		return "", false
-	}
-
 	name := fmt.Sprintf("%x%s", sha1.Sum([]byte(coverURL)), ext)
 	target := filepath.Join(r.dir, name)
 	if _, statErr := os.Stat(target); statErr == nil {
@@ -229,28 +219,6 @@ func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (s
 		}
 	}
 	return name, true
-}
-
-// coverAspectFloor is how portrait a downloaded image must be to pass as cover
-// art. The library on disk runs from 1.33 to 1.56 tall-over-wide, so the floor
-// clears every real cover with room to spare while still catching the square
-// thumbnails some sites serve from their cover endpoint.
-const coverAspectFloor = 1.2
-
-// imageDimensions reads an image header without decoding the pixels. It
-// reports measured=false for a format the standard library cannot read — webp
-// and avif, which much of the library is stored in — because a shape that
-// cannot be measured must not be judged.
-func imageDimensions(body []byte) (width int, height int, measured bool) {
-	config, _, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil || config.Width <= 0 || config.Height <= 0 {
-		return 0, 0, false
-	}
-	return config.Width, config.Height, true
-}
-
-func coverShaped(width int, height int) bool {
-	return float64(height)/float64(width) >= coverAspectFloor
 }
 
 // coverFileExt maps a downloaded cover to the extension the static route

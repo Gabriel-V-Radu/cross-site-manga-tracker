@@ -109,8 +109,12 @@ func NewPageGate() *PageGate {
 }
 
 func (g *PageGate) SetActive(pageKey string) {
+	// Cloned because this field outlives every request. A caller handing over a
+	// string that borrows a server's request buffer — fiber's c.OriginalURL()
+	// does — would leave the gate comparing against bytes that a later request
+	// has since overwritten, and TrimSpace re-slices rather than copying.
 	g.mu.Lock()
-	g.key = strings.TrimSpace(pageKey)
+	g.key = strings.Clone(strings.TrimSpace(pageKey))
 	g.mu.Unlock()
 }
 

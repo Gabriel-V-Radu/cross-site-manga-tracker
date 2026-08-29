@@ -87,9 +87,15 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
-		slog.Error("failed to apply migrations", "error", err)
-		os.Exit(1)
+	// Only when the run is going to write. Without -apply this command is
+	// documented as a preview, and a preview that advances the schema of the
+	// database it is pointed at is not one — previewing from a newer checkout
+	// than the running image would migrate the live database out from under it.
+	if apply {
+		if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
+			slog.Error("failed to apply migrations", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	activeSourceKeys := buildActiveSourceKeySet()

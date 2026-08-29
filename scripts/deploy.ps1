@@ -5,7 +5,10 @@ param(
     [int]$HealthTimeoutSeconds = 120,
     [switch]$NoPull,
     [switch]$NoCache,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    # Escape hatch for recovery: bringing the app back up must never be blocked
+    # by a red or flaky test, or by a machine without Go on PATH.
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,18 +26,23 @@ Push-Location $repoRoot
 
 try {
     Assert-CommandExists "docker"
-    Assert-CommandExists "go"
 
-    Write-Host "Running backend tests before deploy..."
-    Push-Location (Join-Path $repoRoot "backend")
-    try {
-        go vet ./...
-        if ($LASTEXITCODE -ne 0) { throw "go vet failed; aborting deploy." }
-        go test ./...
-        if ($LASTEXITCODE -ne 0) { throw "Tests failed; aborting deploy." }
+    if ($SkipTests) {
+        Write-Host "Skipping the test gate (-SkipTests)."
     }
-    finally {
-        Pop-Location
+    else {
+        Assert-CommandExists "go"
+        Write-Host "Running backend tests before deploy..."
+        Push-Location (Join-Path $repoRoot "backend")
+        try {
+            go vet ./...
+            if ($LASTEXITCODE -ne 0) { throw "go vet failed; aborting deploy. Re-run with -SkipTests to deploy anyway." }
+            go test ./...
+            if ($LASTEXITCODE -ne 0) { throw "Tests failed; aborting deploy. Re-run with -SkipTests to deploy anyway." }
+        }
+        finally {
+            Pop-Location
+        }
     }
 
     docker info | Out-Null
@@ -48,9 +56,14 @@ try {
         $buildArgs += "--no-cache"
     }
     & docker @buildArgs
+    # ErrorActionPreference does not stop on a native command's exit code, so
+    # without this a failed build carries on and recreates the container from
+    # the previous image — which answers /health and looks like a good deploy.
+    if ($LASTEXITCODE -ne 0) { throw "docker compose build failed; aborting deploy (the running container was left untouched)." }
 
     Write-Host "Starting containers..."
     docker compose up -d --force-recreate --remove-orphans
+    if ($LASTEXITCODE -ne 0) { throw "docker compose up failed; the app may be down. Check 'docker compose ps' and 'docker compose logs api'." }
 
     $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
     $isHealthy = $false

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -80,27 +81,30 @@ func Load() (Config, error) {
 		cfg.PollingIdleMinutes = 720
 	}
 
-	level, err := parseLogLevel(getEnv("LOG_LEVEL", "INFO"))
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.LogLevel = level
+	cfg.LogLevel = parseLogLevel(getEnv("LOG_LEVEL", "INFO"))
 
 	return cfg, nil
 }
 
-func parseLogLevel(raw string) (slog.Level, error) {
-	switch raw {
+// parseLogLevel accepts any casing and never refuses to start. It used to
+// return an error, which main turned into a non-zero exit — and with the
+// compose file's restart policy, LOG_LEVEL=debug instead of DEBUG put the
+// container into a crash loop over nothing. A log level is not worth refusing
+// to run for; every other malformed setting warns and falls back, and this
+// one now matches.
+func parseLogLevel(raw string) slog.Level {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
 	case "DEBUG":
-		return slog.LevelDebug, nil
+		return slog.LevelDebug
 	case "INFO":
-		return slog.LevelInfo, nil
+		return slog.LevelInfo
 	case "WARN":
-		return slog.LevelWarn, nil
+		return slog.LevelWarn
 	case "ERROR":
-		return slog.LevelError, nil
+		return slog.LevelError
 	default:
-		return slog.LevelInfo, fmt.Errorf("invalid LOG_LEVEL %q, expected DEBUG|INFO|WARN|ERROR", raw)
+		warnBadEnv("LOG_LEVEL", raw, "INFO")
+		return slog.LevelInfo
 	}
 }
 

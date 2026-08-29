@@ -295,7 +295,6 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		latestChapterSourceID = &reporterSourceID
 	}
 
-	newChapter := isNewChapter(tracker.LatestKnownChapter, result.LatestChapter)
 	// A correction counts here as much as an advance: when the recorded
 	// chapter changes at all the stored date belongs to the chapter that was
 	// replaced, so it has to be rewritten. Comparing against `latest` rather
@@ -310,7 +309,12 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// anything, which made dates drift toward "just now".
 		latestReleaseAt = nil
 	}
-	clearLatestReleaseAt := latestReleaseAt == nil && newChapter
+	// chapterMoved, not newChapter: a correction downward changes the recorded
+	// chapter just as much as an advance does, and leaves the stored date
+	// describing a chapter that is no longer there. Gating on the advance-only
+	// test left that stale date on the card, next to a number it never belonged
+	// to, and the default ordering sorts by it.
+	clearLatestReleaseAt := latestReleaseAt == nil && chapterMoved
 	if usedFallback {
 		// A fallback source may know nothing about release dates (MangaBuddy
 		// reports none usable), and dropping to one must never destroy what the
@@ -569,16 +573,6 @@ func (p *Poller) shouldSkipIdle(tracker repository.PollingTracker) bool {
 		return false
 	}
 	return time.Since(*tracker.LastCheckedAt) < p.idleInterval
-}
-
-func isNewChapter(previous *float64, current *float64) bool {
-	if current == nil {
-		return false
-	}
-	if previous == nil {
-		return true
-	}
-	return *current > *previous
 }
 
 // sameChapterNumber compares two chapter numbers with a tolerance. The pending

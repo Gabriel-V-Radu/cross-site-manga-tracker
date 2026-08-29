@@ -26,7 +26,10 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 ## One-Click Deploy (Windows)
 - Double-click `deploy.cmd` from the repo root, or run:
    - `./scripts/deploy.ps1`
+- Requires Go on PATH: the deploy runs `go vet` and `go test` first and aborts
+  if either fails, so a broken build never reaches the container.
 - What it does:
+   - Runs the backend test gate (skip with `-SkipTests`)
    - Builds containers with `docker compose build --pull`
    - Starts with `docker compose up -d --force-recreate --remove-orphans`
    - Waits for health check (`/health`)
@@ -42,8 +45,12 @@ Current setup is local-first (single PC) with future-ready architecture for remo
    - `docker compose down --remove-orphans`
 
 ## Access Mode (Current)
-- The app is intentionally exposed only on `localhost` (`127.0.0.1:8080`).
-- This keeps usage single-PC for now.
+- `docker-compose.yml` publishes `8080:8080`, which binds every interface: the
+  dashboard is reachable from any machine on the same network, not just this
+  PC (that is how the Raspberry Pi deployment is used).
+- There is no login — see "Profiles (No Login)" below. Anyone who can reach the
+  port has full read and write access to the library.
+- To make it single-PC, change the mapping to `"127.0.0.1:8080:8080"`.
 
 ## Profiles (No Login)
 - The app now supports two local profiles with separate tracker libraries:
