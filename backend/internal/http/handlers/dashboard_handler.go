@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"html/template"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -39,7 +40,13 @@ type DashboardHandler struct {
 	// coverDir is where resolved covers are downloaded and served from
 	// (/covers). Empty disables the local store and falls back to hotlinking
 	// the source CDNs — the pre-store behavior tests still exercise.
-	coverDir           string
+	coverDir string
+	// coverClient fetches candidate cover images. Cover URLs come from scraped
+	// third-party pages, so the constructor installs the guarded client, which
+	// refuses anything but https to a public address. Nil falls back to the
+	// unguarded client: tests build the handler by struct literal and serve
+	// their fixtures from 127.0.0.1.
+	coverClient        *http.Client
 	cacheMu            sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
@@ -62,8 +69,11 @@ type DashboardHandler struct {
 	lastLinkScanMu    sync.Mutex
 	lastLinkScanScope map[string]string
 	templates         *template.Template
-	templateOnce      sync.Once
 	templateErr       error
+	// cacheSweepStop ends the background expiry sweep; nil on a handler built
+	// by struct literal, which never starts one.
+	cacheSweepStop chan struct{}
+	cacheSweepOnce sync.Once
 }
 
 type coverCacheEntry struct {
@@ -178,10 +188,13 @@ type trackerSiteLinkView struct {
 }
 
 type trackerTagView struct {
-	ID       int64
-	Name     string
-	IconKey  *string
-	IconPath *string
+	ID      int64
+	Name    string
+	IconKey *string
+	// IconPath is resolved from IconKey here rather than carried up from the
+	// repository, which stores keys and knows nothing about /assets. Empty
+	// renders a chip with no image.
+	IconPath string
 }
 
 type trackerTagIconView struct {
@@ -256,6 +269,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		chapterURLInFlight: make(map[string]bool),
 		chapterURLFetchSem: make(chan struct{}, 10),
 		coverDir:           filepath.Join("data", "covers"),
+		coverClient:        guardedCoverClient,
 	}
 	// A store that cannot be created only costs the local copies: covers
 	// degrade to hotlinking the source CDNs, the pre-store behavior.
@@ -263,8 +277,79 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry) *DashboardHa
 		slog.Warn("cover directory unavailable; serving covers remotely", "dir", handler.coverDir, "error", err)
 		handler.coverDir = ""
 	}
+	// Parsed here rather than on the first request: a template that does not
+	// parse is a deploy defect, and the caller turns it into a startup failure
+	// instead of a 500 on every page for as long as the process lives.
+	handler.templates, handler.templateErr = parseDashboardTemplates()
 	handler.seedCoverCacheFromStore()
+	handler.startCacheSweeper()
 	return handler
+}
+
+// TemplateError reports a template set that did not parse. A process that is
+// meant to keep running must refuse to start on it.
+func (h *DashboardHandler) TemplateError() error {
+	return h.templateErr
+}
+
+// cacheSweepInterval paces the sweep below. Nothing it drops is urgent — those
+// entries are already dead, merely unreferenced — so the sweep is paced to stay
+// invisible on the Pi rather than to reclaim promptly.
+const cacheSweepInterval = 15 * time.Minute
+
+// startCacheSweeper drops expired cover and chapter-URL entries in the
+// background. Both caches only ever evict on a read of the same key, and the
+// keys that go cold are exactly the ones nobody reads again — every chapter
+// that ever released, every source URL a tracker was relinked away from — so on
+// a process that runs for months they are only ever added to.
+func (h *DashboardHandler) startCacheSweeper() {
+	h.cacheSweepStop = make(chan struct{})
+	stop := h.cacheSweepStop
+	go func() {
+		ticker := time.NewTicker(cacheSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				h.sweepExpiredCaches()
+			}
+		}
+	}()
+}
+
+// Close stops the background sweep. Idempotent, and a no-op on a handler that
+// never started one.
+func (h *DashboardHandler) Close() {
+	h.cacheSweepOnce.Do(func() {
+		if h.cacheSweepStop != nil {
+			close(h.cacheSweepStop)
+		}
+	})
+}
+
+// sweepExpiredCaches only removes entries that already read as misses, so it
+// cannot change what a cached lookup answers. Covers with a local copy are
+// exempt for the same reason reads are: the file on disk is the cache.
+func (h *DashboardHandler) sweepExpiredCaches() {
+	now := time.Now().UTC()
+
+	h.chapterURLCacheMu.Lock()
+	for key, entry := range h.chapterURLCache {
+		if now.After(entry.ExpiresAt) {
+			delete(h.chapterURLCache, key)
+		}
+	}
+	h.chapterURLCacheMu.Unlock()
+
+	h.cacheMu.Lock()
+	for key, entry := range h.coverCache {
+		if entry.LocalPath == "" && now.After(entry.ExpiresAt) {
+			delete(h.coverCache, key)
+		}
+	}
+	h.cacheMu.Unlock()
 }
 
 // seedCoverCacheFromStore warms the in-memory cover cache from the persisted

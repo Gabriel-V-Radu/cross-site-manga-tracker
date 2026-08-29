@@ -198,32 +198,20 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
-	tracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
+	// Unlike the mutation handlers, this one must keep failing loudly: the
+	// pinned-card script fetches it and retries on a non-OK response, so a
+	// degraded 200 would end that retry loop with an empty card.
+	card, err := h.loadTrackerCardView(activeProfile.ID, id)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker")
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load tracker card")
 	}
-	if tracker == nil {
+	if card == nil {
 		return c.Status(fiber.StatusNotFound).SendString("Tracker not found")
-	}
-
-	sourceByID, err := h.listSourcesByID()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
-	}
-
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
-	}
-
-	cards, _ := h.buildTrackerCards([]models.Tracker{*tracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
-	if len(cards) == 0 {
-		return c.Status(fiber.StatusNotFound).SendString("Tracker card not found")
 	}
 
 	return h.render(c, "tracker_card_fragment.html", trackerCardFragmentData{
 		ViewMode: viewMode,
-		Card:     cards[0],
+		Card:     *card,
 	})
 }
 
@@ -433,34 +421,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	// were computed against.
 	h.invalidateLinkLookups()
 
-	fullTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
-	if err != nil || fullTracker == nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	sourceByID, err := h.listSourcesByID()
-	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
-	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	cards, _ := h.buildTrackerCards([]models.Tracker{*fullTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
-	if len(cards) == 0 {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
-		ViewMode:    viewMode,
-		ReplaceCard: &cards[0],
-	})
+	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
 }
 
 func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
@@ -513,34 +474,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		}
 	}
 
-	updatedTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
-	if err != nil || updatedTracker == nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	sourceByID, err := h.listSourcesByID()
-	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
-	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
-	if len(cards) == 0 {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
-	}
-
-	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
-		ViewMode:    viewMode,
-		ReplaceCard: &cards[0],
-	})
+	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
 }
 
 func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
@@ -586,33 +520,62 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to update rating")
 	}
 
-	updatedTracker, err := h.trackerRepo.GetByID(activeProfile.ID, id)
-	if err != nil || updatedTracker == nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
+	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
+}
+
+// loadTrackerCardView rebuilds one tracker's card the way the list builds it,
+// so a single-card re-render cannot drift from the list render. A nil card with
+// a nil error means the tracker is gone (or no longer produces a card), which
+// callers must be able to tell apart from a query that failed: one is a 404,
+// the other a 500.
+func (h *DashboardHandler) loadTrackerCardView(profileID int64, trackerID int64) (*trackerCardView, error) {
+	tracker, err := h.trackerRepo.GetByID(profileID, trackerID)
+	if err != nil {
+		return nil, err
+	}
+	if tracker == nil {
+		return nil, nil
 	}
 
 	sourceByID, err := h.listSourcesByID()
 	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
+		return nil, err
 	}
 
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(profileID)
 	if err != nil {
-		c.Set("HX-Trigger", `{"trackersChanged":true}`)
-		return h.render(c, "empty_modal.html", nil)
+		return nil, err
 	}
 
-	cards, _ := h.buildTrackerCards([]models.Tracker{*updatedTracker}, sourceByID, sourceLogoBySourceID, h.trackerAlternatesForProfile(activeProfile.ID), "")
+	cards, _ := h.buildTrackerCards(
+		[]models.Tracker{*tracker},
+		sourceByID,
+		sourceLogoBySourceID,
+		h.trackerAlternatesForProfile(profileID),
+		"",
+	)
 	if len(cards) == 0 {
+		return nil, nil
+	}
+
+	return &cards[0], nil
+}
+
+// renderSingleCardOOB answers a mutation by swapping just that tracker's card.
+// The write has already committed when this runs, so a card that cannot be
+// rebuilt degrades to a trackersChanged trigger instead of an error status: the
+// browser reloads the list and sees the saved state, rather than being told a
+// save failed that in fact succeeded.
+func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, trackerID int64, viewMode string) error {
+	card, err := h.loadTrackerCardView(profileID, trackerID)
+	if err != nil || card == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
 
 	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
 		ViewMode:    viewMode,
-		ReplaceCard: &cards[0],
+		ReplaceCard: card,
 	})
 }
 

@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Source struct {
 	ID            int64     `json:"id"`
@@ -60,9 +63,36 @@ type CustomTag struct {
 	ProfileID int64     `json:"profileId"`
 	Name      string    `json:"name"`
 	IconKey   *string   `json:"iconKey,omitempty"`
-	IconPath  *string   `json:"iconPath,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// IconPath is the image a tag chip renders, derived from the stored key rather
+// than stored beside it: the database keeps only the key, so an icon can be
+// renamed or re-pointed without a migration and without the repository knowing
+// which URLs the web server publishes.
+func (t CustomTag) IconPath() string {
+	if t.IconKey == nil {
+		return ""
+	}
+	return TagIconAssetPath(*t.IconKey)
+}
+
+// TagIconAssetPath maps a tag icon key to the static file the web layer serves
+// it from. An unknown key resolves to nothing, which renders a chip with no
+// image instead of a broken one. Its twin lives in web/assets/dashboard-tags.js
+// for the tag rows the browser builds; those two must agree.
+func TagIconAssetPath(iconKey string) string {
+	switch strings.TrimSpace(iconKey) {
+	case "icon_1":
+		return "/assets/tag-icons/icon-star-gold.svg"
+	case "icon_2":
+		return "/assets/tag-icons/icon-red-heart.svg"
+	case "icon_3":
+		return "/assets/tag-icons/icon-flames.svg"
+	default:
+		return ""
+	}
 }
 
 type TrackerSource struct {

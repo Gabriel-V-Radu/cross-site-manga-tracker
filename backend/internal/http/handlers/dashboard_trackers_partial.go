@@ -197,206 +197,326 @@ func (h *DashboardHandler) buildTrackerCards(items []models.Tracker, sourceByID 
 	sourceNameByKey := buildSourceNameByKey(sourceByID)
 	pendingCovers := false
 	for _, item := range items {
-		tagViews := toTrackerTagView(item.Tags)
-		displayTags, hiddenTagCount := prioritizeTrackerTags(tagViews, 3)
-
-		card := trackerCardView{
-			ID:                     item.ID,
-			Title:                  item.Title,
-			Status:                 item.Status,
-			StatusLabel:            statusLabel(item.Status),
-			Tags:                   displayTags,
-			HiddenTagCount:         hiddenTagCount,
-			TagIcons:               toTrackerTagIcons(item.Tags),
-			SourceURL:              item.SourceURL,
-			LatestKnownChapterURL:  item.SourceURL,
-			LastReadChapterURL:     item.SourceURL,
-			SourceItemID:           item.SourceItemID,
-			Rating:                 item.Rating,
-			LatestKnownChapterRaw:  item.LatestKnownChapter,
-			LastReadChapterRaw:     item.LastReadChapter,
-			LatestReleaseAgo:       "—",
-			LatestReleaseFormatted: "—",
-			UpdatedAtFormatted:     item.UpdatedAt.Format("2006-01-02 15:04"),
-			LastReadAgo:            "—",
-		}
-
-		if item.LastReadAt != nil {
-			card.LastReadAgo = relativeTime(*item.LastReadAt)
-		}
-
-		if item.LastCheckedAt != nil {
-			card.LastCheckedFormatted = item.LastCheckedAt.Format("2006-01-02 15:04")
-			card.LastCheckedAgo = relativeTime(*item.LastCheckedAt)
-		} else {
-			card.LastCheckedFormatted = "—"
-			card.LastCheckedAgo = "—"
-		}
-
-		// A source that reports a chapter number without a date used to leave the
-		// card showing "—", which said nothing about how old the chapter was and
-		// left the user no way to tell a finished series from one that updated
-		// today. When no date was ever reported, the card falls back to when this
-		// app first saw the chapter and marks the value as approximate.
-		if item.LatestReleaseAt != nil {
-			card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
-			card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
-		} else if item.LatestChapterSeenAt != nil {
-			card.LatestReleaseFormatted = item.LatestChapterSeenAt.Format("2006-01-02 15:04")
-			card.LatestReleaseAgo = "~" + relativeTime(*item.LatestChapterSeenAt)
-			card.LatestReleaseApproximate = true
-			card.LatestReleaseTitle = "The site reports no release date. First seen here on " +
-				card.LatestReleaseFormatted + " UTC."
-		}
-
-		if item.LatestKnownChapter != nil {
-			card.LatestKnownChapter = formatChapterLabel(*item.LatestKnownChapter)
-		} else {
-			card.LatestKnownChapter = "—"
-		}
-
-		if item.LastReadChapter != nil {
-			card.LastReadChapter = formatChapterLabel(*item.LastReadChapter)
-		} else {
-			card.LastReadChapter = "—"
-		}
-
-		if item.Rating != nil {
-			card.RatingLabel = formatRatingLabel(*item.Rating)
-		}
-
-		source := sourceByID[item.SourceID]
-		sourceKey := strings.TrimSpace(source.Key)
-		sourceName := strings.TrimSpace(source.Name)
-		if sourceName == "" {
-			if sourceKey != "" {
-				sourceName = humanizeValueLabel(sourceKey)
-			} else {
-				sourceName = "Site"
-			}
-		}
-
-		card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[item.SourceID])
-		card.SourceLogoLabel = sourceName
-
-		alternates := alternatesByTracker[item.ID]
-
-		// The site holding the newest chapter is where the user goes to read, so
-		// it decides which source the card presents. The cover used to decide it,
-		// which is the weakest signal on the card: art resolves from a different
-		// endpoint than chapters do, so a card could badge one site while its
-		// chapter links opened another.
-		latestChapterSourceKey := ""
-
-		// A pinned reading source narrows the chapter links to that one site:
-		// its resolved chapter page, its offline-built reader URL, or at worst
-		// its series page — never another site. Auto keeps the full chain.
-		pinned := pinnedReadingRef(item, sourceKey, alternates)
-		chapterKey, chapterBaseURL, chapterAlternates := sourceKey, item.SourceURL, alternates
-		if pinned != nil {
-			chapterKey, chapterBaseURL, chapterAlternates = pinned.SourceKey, pinned.SourceURL, nil
-			card.LatestKnownChapterURL = pinned.SourceURL
-			card.LastReadChapterURL = pinned.SourceURL
-		}
-		card.HighlightURL = chapterBaseURL
-
-		// The source that reported the stored chapter number, when a poll has
-		// recorded one. It is the card's last resort before the cover source:
-		// with no chapter link resolved anywhere, at least the site that said
-		// "chapter 82 exists" has a page proving it.
-		reporterSourceKey := ""
-		if item.LatestChapterSourceID != nil {
-			if reporter, found := sourceByID[*item.LatestChapterSourceID]; found {
-				reporterSourceKey = strings.ToLower(strings.TrimSpace(reporter.Key))
-			}
-		}
-
-		resolvedLatest := false
-		if item.LatestKnownChapter != nil {
-			latestChapterURL, resolved, waitingLatestChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
-			resolvedLatest = resolved
-			card.LatestKnownChapterURL = latestChapterURL
-			if resolvedLatest {
-				latestChapterSourceKey = inferSourceKeyFromURL(latestChapterURL)
-				card.LatestKnownChapterSite = chapterSiteLabel(latestChapterSourceKey, sourceNameByKey)
-			}
-			if waitingLatestChapterURL {
-				pendingCovers = true
-			}
-		}
-
-		// With no chapter link resolved anywhere, the latest-chapter link
-		// degrades to a series page. Under auto, prefer the reporter's series
-		// page over the primary's: the number on the card is that site's
-		// claim, so its page is where the chapter can actually be seen.
-		if pinned == nil && !resolvedLatest && reporterSourceKey != "" && item.LatestKnownChapter != nil {
-			for _, alternate := range alternates {
-				if strings.EqualFold(strings.TrimSpace(alternate.SourceKey), reporterSourceKey) &&
-					strings.TrimSpace(alternate.SourceURL) != "" {
-					card.LatestKnownChapterURL = alternate.SourceURL
-					card.LatestKnownChapterSite = chapterSiteLabel(reporterSourceKey, sourceNameByKey)
-					break
-				}
-			}
-		}
-
-		// Under auto, point the open-to-read button at the same site the
-		// latest-chapter link lands on: a MangaUpdates-primary tracker whose
-		// chapters open on MangaFire should open its series there too.
-		if pinned == nil && latestChapterSourceKey != "" && latestChapterSourceKey != sourceKey {
-			for _, alternate := range alternates {
-				if strings.EqualFold(strings.TrimSpace(alternate.SourceKey), latestChapterSourceKey) &&
-					strings.TrimSpace(alternate.SourceURL) != "" {
-					card.HighlightURL = alternate.SourceURL
-					break
-				}
-			}
-		}
-
-		if item.LastReadChapter != nil {
-			lastReadChapterURL, resolvedLastRead, waitingLastReadChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
-			card.LastReadChapterURL = lastReadChapterURL
-			if resolvedLastRead {
-				card.LastReadChapterSite = chapterSiteLabel(inferSourceKeyFromURL(lastReadChapterURL), sourceNameByKey)
-			}
-			if waitingLastReadChapterURL {
-				pendingCovers = true
-			}
-		}
-
-		coverURL, coverSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
-		card.CoverURL = coverURL
-		if waitingCover {
+		card, waiting := h.buildTrackerCard(item, sourceByID, sourceLogoBySourceID, sourceNameByKey, alternatesByTracker[item.ID], pageKey)
+		if waiting {
 			pendingCovers = true
 		}
-
-		// The badge follows the strongest signal available: the site whose
-		// chapter link resolved, else the site that reported the chapter
-		// number, else whoever supplied the cover art — the weakest signal on
-		// the card, but better than badging a primary that served nothing.
-		servingSourceKey := latestChapterSourceKey
-		if servingSourceKey == "" {
-			servingSourceKey = reporterSourceKey
-		}
-		if servingSourceKey == "" {
-			servingSourceKey = coverSourceKey
-		}
-
-		// When a fallback source served this card, present that source rather than
-		// the primary: a badge naming a site that supplied nothing, next to links
-		// pointing somewhere else, is worse than no badge at all.
-		if serving, ok := findServingSource(servingSourceKey, sourceKey, alternates); ok {
-			card.SourceURL = serving.SourceURL
-			card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[serving.SourceID])
-			if servingSource, found := sourceByID[serving.SourceID]; found {
-				card.SourceLogoLabel = servingSource.Name
-			}
-		}
-
 		cards = append(cards, card)
 	}
 
 	return cards, pendingCovers
+}
+
+// buildTrackerCard maps one tracker onto its card and runs the lookups the card
+// depends on. Where the links and the badge end up pointing is not decided here:
+// that is decideTrackerLinks, kept free of the handler so the precedence can be
+// exercised without a request. The second return says a lookup is still running,
+// which is what keeps the page asking for a corrected render.
+func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[int64]models.Source, sourceLogoBySourceID map[int64]string, sourceNameByKey map[string]string, alternates []repository.TrackerSourceRef, pageKey string) (trackerCardView, bool) {
+	tagViews := toTrackerTagView(item.Tags)
+	displayTags, hiddenTagCount := prioritizeTrackerTags(tagViews, 3)
+
+	card := trackerCardView{
+		ID:                     item.ID,
+		Title:                  item.Title,
+		Status:                 item.Status,
+		StatusLabel:            statusLabel(item.Status),
+		Tags:                   displayTags,
+		HiddenTagCount:         hiddenTagCount,
+		TagIcons:               toTrackerTagIcons(item.Tags),
+		SourceURL:              item.SourceURL,
+		SourceItemID:           item.SourceItemID,
+		Rating:                 item.Rating,
+		LatestKnownChapterRaw:  item.LatestKnownChapter,
+		LastReadChapterRaw:     item.LastReadChapter,
+		LatestReleaseAgo:       "—",
+		LatestReleaseFormatted: "—",
+		UpdatedAtFormatted:     item.UpdatedAt.Format("2006-01-02 15:04"),
+		LastReadAgo:            "—",
+	}
+
+	if item.LastReadAt != nil {
+		card.LastReadAgo = relativeTime(*item.LastReadAt)
+	}
+
+	if item.LastCheckedAt != nil {
+		card.LastCheckedFormatted = item.LastCheckedAt.Format("2006-01-02 15:04")
+		card.LastCheckedAgo = relativeTime(*item.LastCheckedAt)
+	} else {
+		card.LastCheckedFormatted = "—"
+		card.LastCheckedAgo = "—"
+	}
+
+	// A source that reports a chapter number without a date used to leave the
+	// card showing "—", which said nothing about how old the chapter was and
+	// left the user no way to tell a finished series from one that updated
+	// today. When no date was ever reported, the card falls back to when this
+	// app first saw the chapter and marks the value as approximate.
+	if item.LatestReleaseAt != nil {
+		card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
+		card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
+	} else if item.LatestChapterSeenAt != nil {
+		card.LatestReleaseFormatted = item.LatestChapterSeenAt.Format("2006-01-02 15:04")
+		card.LatestReleaseAgo = "~" + relativeTime(*item.LatestChapterSeenAt)
+		card.LatestReleaseApproximate = true
+		card.LatestReleaseTitle = "The site reports no release date. First seen here on " +
+			card.LatestReleaseFormatted + " UTC."
+	}
+
+	if item.LatestKnownChapter != nil {
+		card.LatestKnownChapter = formatChapterLabel(*item.LatestKnownChapter)
+	} else {
+		card.LatestKnownChapter = "—"
+	}
+
+	if item.LastReadChapter != nil {
+		card.LastReadChapter = formatChapterLabel(*item.LastReadChapter)
+	} else {
+		card.LastReadChapter = "—"
+	}
+
+	if item.Rating != nil {
+		card.RatingLabel = formatRatingLabel(*item.Rating)
+	}
+
+	source := sourceByID[item.SourceID]
+	sourceKey := strings.TrimSpace(source.Key)
+	sourceName := strings.TrimSpace(source.Name)
+	if sourceName == "" {
+		if sourceKey != "" {
+			sourceName = humanizeValueLabel(sourceKey)
+		} else {
+			sourceName = "Site"
+		}
+	}
+
+	card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[item.SourceID])
+	card.SourceLogoLabel = sourceName
+
+	waiting := false
+
+	// A pinned reading source narrows the chapter links to that one site:
+	// its resolved chapter page, its offline-built reader URL, or at worst
+	// its series page — never another site. Auto keeps the full chain.
+	pinned := pinnedReadingRef(item, sourceKey, alternates)
+	chapterKey, chapterBaseURL, chapterAlternates := sourceKey, item.SourceURL, alternates
+	if pinned != nil {
+		chapterKey, chapterBaseURL, chapterAlternates = pinned.SourceKey, pinned.SourceURL, nil
+	}
+
+	latestChapter := chapterLinkLookup{Attempted: item.LatestKnownChapter != nil}
+	if latestChapter.Attempted {
+		chapterURL, resolved, waitingChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
+		latestChapter.URL = chapterURL
+		latestChapter.Resolved = resolved
+		if waitingChapterURL {
+			waiting = true
+		}
+	}
+
+	lastReadChapter := chapterLinkLookup{Attempted: item.LastReadChapter != nil}
+	if lastReadChapter.Attempted {
+		chapterURL, resolved, waitingChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
+		lastReadChapter.URL = chapterURL
+		lastReadChapter.Resolved = resolved
+		if waitingChapterURL {
+			waiting = true
+		}
+	}
+
+	// The cover is looked up against the primary source even under a pin: a
+	// pin narrows where the user is sent to read, not which site's art the
+	// card is allowed to show.
+	coverURL, coverSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
+	card.CoverURL = coverURL
+	if waitingCover {
+		waiting = true
+	}
+
+	// The source that reported the stored chapter number, when a poll has
+	// recorded one.
+	reporterSourceKey := ""
+	if item.LatestChapterSourceID != nil {
+		if reporter, found := sourceByID[*item.LatestChapterSourceID]; found {
+			reporterSourceKey = strings.ToLower(strings.TrimSpace(reporter.Key))
+		}
+	}
+
+	decision := decideTrackerLinks(trackerLinkInputs{
+		PrimarySourceKey:  sourceKey,
+		PrimarySourceURL:  item.SourceURL,
+		Pinned:            pinned,
+		Alternates:        alternates,
+		LatestChapter:     latestChapter,
+		LastReadChapter:   lastReadChapter,
+		ReporterSourceKey: reporterSourceKey,
+		CoverSourceKey:    coverSourceKey,
+	})
+
+	card.LatestKnownChapterURL = decision.LatestChapterURL
+	card.LatestKnownChapterSite = chapterSiteLabel(decision.LatestChapterSiteKey, sourceNameByKey)
+	card.LastReadChapterURL = decision.LastReadChapterURL
+	card.LastReadChapterSite = chapterSiteLabel(decision.LastReadChapterSiteKey, sourceNameByKey)
+	card.HighlightURL = decision.HighlightURL
+
+	// When a fallback source served this card, present that source rather than
+	// the primary: a badge naming a site that supplied nothing, next to links
+	// pointing somewhere else, is worse than no badge at all.
+	if decision.ServingSourceFound {
+		card.SourceURL = decision.ServingSource.SourceURL
+		card.SourceLogoURL = strings.TrimSpace(sourceLogoBySourceID[decision.ServingSource.SourceID])
+		if servingSource, found := sourceByID[decision.ServingSource.SourceID]; found {
+			card.SourceLogoLabel = servingSource.Name
+		}
+	}
+
+	return card, waiting
+}
+
+// chapterLinkLookup is what one chapter-link lookup came back with. Attempted
+// separates "the tracker stores no such chapter number" from "a lookup ran and
+// came back with nothing": only a lookup that ran replaces the link the card
+// started with, so a tracker with no read progress keeps its series page rather
+// than being handed an empty href.
+type chapterLinkLookup struct {
+	Attempted bool
+	URL       string
+	// Resolved marks a link the resolver confirmed opens the chapter, as
+	// opposed to the series page it degrades to. Only a confirmed link says
+	// which site is serving this card.
+	Resolved bool
+}
+
+// trackerLinkInputs is everything the arbitration below needs, already resolved
+// by the caller: the tracker's own sources, what the chapter and cover lookups
+// answered, and who reported the stored chapter number.
+type trackerLinkInputs struct {
+	PrimarySourceKey string
+	PrimarySourceURL string
+
+	// Pinned is the source the reading links are pinned to, nil under auto.
+	Pinned     *repository.TrackerSourceRef
+	Alternates []repository.TrackerSourceRef
+
+	LatestChapter   chapterLinkLookup
+	LastReadChapter chapterLinkLookup
+
+	// ReporterSourceKey is the site that reported the stored chapter number and
+	// CoverSourceKey the one that supplied the art; both empty when unknown.
+	ReporterSourceKey string
+	CoverSourceKey    string
+}
+
+// trackerLinkDecision is where one card sends the reader. The site keys are
+// returned rather than display labels so the arbitration stays independent of
+// how the sources happen to be named.
+type trackerLinkDecision struct {
+	LatestChapterURL     string
+	LatestChapterSiteKey string
+
+	LastReadChapterURL     string
+	LastReadChapterSiteKey string
+
+	HighlightURL string
+
+	ServingSourceKey   string
+	ServingSource      repository.TrackerSourceRef
+	ServingSourceFound bool
+}
+
+// decideTrackerLinks arbitrates which site a card sends the reader to. It is
+// deliberately free of the handler, the database and the network: this is the
+// policy, and it is the part worth pinning down in tests.
+//
+// The site holding the newest chapter is where the user goes to read, so it
+// decides which source the card presents. The cover used to decide it, which is
+// the weakest signal on the card: art resolves from a different endpoint than
+// chapters do, so a card could badge one site while its chapter links opened
+// another.
+//
+// The order is:
+//   - Every link starts at the reading base — the pinned source's series page,
+//     or the primary's under auto.
+//   - A chapter lookup that ran replaces its own link, confirmed or not.
+//   - Under auto, a latest-chapter link that resolved nowhere degrades to the
+//     reporter's series page when the tracker carries one: the number on the
+//     card is that site's claim, so its page is where the chapter can actually
+//     be seen.
+//   - Under auto, the open-to-read button follows the site the latest-chapter
+//     link was confirmed on: a MangaUpdates-primary tracker whose chapters open
+//     on MangaFire should open its series there too. A degraded link does not
+//     move it, having confirmed nothing.
+//   - The badge follows the strongest signal available: the site whose chapter
+//     link was confirmed, else the site that reported the chapter number, else
+//     whoever supplied the cover art — the weakest signal on the card, but
+//     better than badging a primary that served nothing.
+func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
+	readingBaseURL := in.PrimarySourceURL
+	if in.Pinned != nil {
+		readingBaseURL = in.Pinned.SourceURL
+	}
+
+	decision := trackerLinkDecision{
+		LatestChapterURL:   readingBaseURL,
+		LastReadChapterURL: readingBaseURL,
+		HighlightURL:       readingBaseURL,
+	}
+
+	confirmedChapterSiteKey := ""
+	if in.LatestChapter.Attempted {
+		decision.LatestChapterURL = in.LatestChapter.URL
+		if in.LatestChapter.Resolved {
+			confirmedChapterSiteKey = inferSourceKeyFromURL(in.LatestChapter.URL)
+			decision.LatestChapterSiteKey = confirmedChapterSiteKey
+		}
+	}
+
+	if in.Pinned == nil && in.LatestChapter.Attempted && !in.LatestChapter.Resolved && in.ReporterSourceKey != "" {
+		if seriesURL, found := linkedAlternateURL(in.Alternates, in.ReporterSourceKey); found {
+			decision.LatestChapterURL = seriesURL
+			decision.LatestChapterSiteKey = in.ReporterSourceKey
+		}
+	}
+
+	if in.Pinned == nil && confirmedChapterSiteKey != "" && confirmedChapterSiteKey != in.PrimarySourceKey {
+		if seriesURL, found := linkedAlternateURL(in.Alternates, confirmedChapterSiteKey); found {
+			decision.HighlightURL = seriesURL
+		}
+	}
+
+	if in.LastReadChapter.Attempted {
+		decision.LastReadChapterURL = in.LastReadChapter.URL
+		if in.LastReadChapter.Resolved {
+			decision.LastReadChapterSiteKey = inferSourceKeyFromURL(in.LastReadChapter.URL)
+		}
+	}
+
+	decision.ServingSourceKey = confirmedChapterSiteKey
+	if decision.ServingSourceKey == "" {
+		decision.ServingSourceKey = in.ReporterSourceKey
+	}
+	if decision.ServingSourceKey == "" {
+		decision.ServingSourceKey = in.CoverSourceKey
+	}
+	decision.ServingSource, decision.ServingSourceFound = findServingSource(decision.ServingSourceKey, in.PrimarySourceKey, in.Alternates)
+
+	return decision
+}
+
+// linkedAlternateURL finds the series page a tracker carries for one source
+// key. An alternate linked without a URL is skipped rather than accepted: it
+// would turn a working link into an empty href.
+func linkedAlternateURL(alternates []repository.TrackerSourceRef, sourceKey string) (string, bool) {
+	for _, alternate := range alternates {
+		if !strings.EqualFold(strings.TrimSpace(alternate.SourceKey), sourceKey) {
+			continue
+		}
+		if strings.TrimSpace(alternate.SourceURL) == "" {
+			continue
+		}
+		return alternate.SourceURL, true
+	}
+	return "", false
 }
 
 // buildSourceNameByKey indexes the enabled sources by their key, so a link whose

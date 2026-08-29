@@ -2,6 +2,8 @@ package http
 
 import (
 	"database/sql"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
@@ -16,7 +18,24 @@ func NewServer(cfg config.Config, db *sql.DB) *fiber.App {
 	return NewServerWithRegistry(cfg, db, nil)
 }
 
+// NewServerWithRegistry builds the app and drops a startup defect it has no way
+// to report. It stays for the test harness, which asserts against handlers
+// rather than against startup; a process that is meant to keep running must use
+// BuildServer instead.
 func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Registry) *fiber.App {
+	app, err := BuildServer(cfg, db, connectorRegistry)
+	if err != nil {
+		slog.Warn("server built with a startup defect", "error", err)
+	}
+	return app
+}
+
+// BuildServer reports the startup failures a long-lived process must not
+// survive — today a template set that does not parse, which would otherwise
+// deploy "successfully" and answer every dashboard page with a 500 until
+// somebody restarts it. The app is returned either way, so a caller that
+// chooses to carry on still has one.
+func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Registry) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		AppName: cfg.AppName,
 		// Without these fasthttp keeps stalled connections forever; on the Pi
@@ -37,6 +56,13 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 		connectorRegistry = connectordefaults.NewRegistry()
 	}
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry)
+	// The dashboard sweeps its caches on a background ticker; tying it to the
+	// app's life keeps a shut-down app — every one a test binary builds — from
+	// leaving the goroutine behind.
+	app.Hooks().OnShutdown(func() error {
+		dashboard.Close()
+		return nil
+	})
 	connectorHandlers := handlers.NewConnectorsHandler(connectorRegistry)
 	// The static handler sends only Last-Modified, which lets a browser invent
 	// its own freshness lifetime from the file's age — long enough that a script
@@ -108,5 +134,9 @@ func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *con
 	v1.Put("/trackers/:id", trackers.Update)
 	v1.Delete("/trackers/:id", trackers.Delete)
 
-	return app
+	if err := dashboard.TemplateError(); err != nil {
+		return app, fmt.Errorf("parse dashboard templates: %w", err)
+	}
+
+	return app, nil
 }

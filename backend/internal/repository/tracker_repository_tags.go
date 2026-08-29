@@ -37,7 +37,6 @@ func (r *TrackerRepository) ListProfileTags(profileID int64) ([]models.CustomTag
 			iconValue := strings.TrimSpace(iconKey.String)
 			if iconValue != "" {
 				item.IconKey = &iconValue
-				item.IconPath = iconPathFromKey(iconValue)
 			}
 		}
 		items = append(items, item)
@@ -92,7 +91,6 @@ func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconK
 		iconValue := strings.TrimSpace(storedIcon.String)
 		if iconValue != "" {
 			tag.IconKey = &iconValue
-			tag.IconPath = iconPathFromKey(iconValue)
 		}
 	}
 
@@ -142,7 +140,6 @@ func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconK
 		iconValue := strings.TrimSpace(storedIcon.String)
 		if iconValue != "" {
 			tag.IconKey = &iconValue
-			tag.IconPath = iconPathFromKey(iconValue)
 		}
 	}
 
@@ -327,7 +324,6 @@ func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []i
 			iconValue := strings.TrimSpace(iconKey.String)
 			if iconValue != "" {
 				tag.IconKey = &iconValue
-				tag.IconPath = iconPathFromKey(iconValue)
 			}
 		}
 		result[trackerID] = append(result[trackerID], tag)
@@ -346,22 +342,6 @@ func trackerIDs(trackers []models.Tracker) []int64 {
 		ids = append(ids, tracker.ID)
 	}
 	return ids
-}
-
-func iconPathFromKey(iconKey string) *string {
-	switch strings.TrimSpace(iconKey) {
-	case "icon_1":
-		path := "/assets/tag-icons/icon-star-gold.svg"
-		return &path
-	case "icon_2":
-		path := "/assets/tag-icons/icon-red-heart.svg"
-		return &path
-	case "icon_3":
-		path := "/assets/tag-icons/icon-flames.svg"
-		return &path
-	default:
-		return nil
-	}
 }
 
 func dedupePositiveInt64(values []int64) []int64 {

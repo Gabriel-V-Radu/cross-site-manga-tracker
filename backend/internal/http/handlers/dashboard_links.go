@@ -500,34 +500,19 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid suggestion id")
 	}
 
-	suggestion, err := h.linkSuggestionRepo.GetPendingSuggestion(profile.ID, suggestionID)
+	// The whole decision — link row, accepted status, sibling rejections —
+	// happens in one repository transaction: a half-applied decision leaves
+	// the queue offering a candidate for a tracker it has already linked.
+	accepted, err := h.linkSuggestionRepo.AcceptSuggestion(profile.ID, suggestionID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
-	if suggestion == nil {
+	if accepted == nil {
 		return c.Status(fiber.StatusNotFound).SendString("suggestion not found")
 	}
-
-	if err := h.acceptSuggestion(profile.ID, *suggestion); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-	}
-
-	return h.renderLinkCardResponse(c, profile.ID, suggestion.SourceID, suggestion.TrackerID, "")
-}
-
-func (h *DashboardHandler) acceptSuggestion(profileID int64, suggestion repository.LinkSuggestion) error {
-	if err := h.trackerRepo.UpsertTrackerSource(profileID, suggestion.TrackerID, models.TrackerSource{
-		SourceID:     suggestion.SourceID,
-		SourceItemID: suggestion.CandidateItemID,
-		SourceURL:    suggestion.CandidateURL,
-	}); err != nil {
-		return err
-	}
-	if err := h.linkSuggestionRepo.DecideSuggestion(profileID, suggestion.ID, repository.LinkSuggestionAccepted); err != nil {
-		return err
-	}
 	h.invalidateLinkLookups()
-	return h.linkSuggestionRepo.RejectPendingSiblings(suggestion.TrackerID, suggestion.SourceID, suggestion.ID)
+
+	return h.renderLinkCardResponse(c, profile.ID, accepted.SourceID, accepted.TrackerID, "")
 }
 
 func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
@@ -603,49 +588,50 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Paste a series URL first.")
 	}
 
-	linkedSource, err := h.attachSourceByURL(c.Context(), profile.ID, trackerID, rawURL)
+	_, link, err := h.resolveSourceLink(c.Context(), rawURL)
 	if err != nil {
 		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, err.Error())
 	}
 
-	// Linking a different site still settles this tracker's review: mark it
-	// dismissed for the source under review so it leaves the queue, and drop
-	// whatever candidates were pending.
-	if linkedSource.ID != source.ID {
-		if err := h.linkSuggestionRepo.DismissTracker(profile.ID, trackerID, source.ID); err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-		}
-	} else {
-		if err := h.linkSuggestionRepo.RejectPendingSiblings(trackerID, source.ID, 0); err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-		}
+	// Linking a different site still settles this tracker's review: the
+	// repository marks it dismissed for the source under review so it leaves
+	// the queue, and drops whatever candidates were pending — in the same
+	// transaction as the link, so the queue can never end up holding a
+	// settled tracker's live candidates.
+	if err := h.linkSuggestionRepo.ApplyManualLink(profile.ID, trackerID, link, source.ID); err != nil {
+		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, err.Error())
 	}
+	h.invalidateLinkLookups()
 
 	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "")
 }
 
-// attachSourceByURL links a pasted series URL to a tracker. The URL's host
-// must map to a registered connector and source; verification through the
-// connector is best-effort, not a gate — the sites most worth linking by hand
-// are exactly the ones this server cannot reach (MangaFire behind its browser
-// challenge) while the reader's own browser can. An unverified URL is linked
-// as pasted and canonicalized whenever the site answers again.
-func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID int64, trackerID int64, rawURL string) (*models.Source, error) {
+// resolveSourceLink turns a pasted series URL into the link to store. The
+// URL's host must map to a registered connector and source; verification
+// through the connector is best-effort, not a gate — the sites most worth
+// linking by hand are exactly the ones this server cannot reach (MangaFire
+// behind its browser challenge) while the reader's own browser can. An
+// unverified URL is linked as pasted and canonicalized whenever the site
+// answers again.
+//
+// It writes nothing: the connector call can take the full timeout, and with a
+// single SQLite connection no transaction may be open across it.
+func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL string) (*models.Source, models.TrackerSource, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
-		return nil, fmt.Errorf("a series URL is required")
+		return nil, models.TrackerSource{}, fmt.Errorf("a series URL is required")
 	}
 
 	connector, ok := h.registry.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("that site has no connector; the poller could not read it")
+		return nil, models.TrackerSource{}, fmt.Errorf("that site has no connector; the poller could not read it")
 	}
 	linkedSource, err := h.sourceRepo.GetByKey(connector.Key())
 	if err != nil {
-		return nil, err
+		return nil, models.TrackerSource{}, err
 	}
 	if linkedSource == nil {
-		return nil, fmt.Errorf("that site is not registered as a source")
+		return nil, models.TrackerSource{}, fmt.Errorf("that site is not registered as a source")
 	}
 
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
@@ -661,11 +647,21 @@ func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID i
 		}
 	}
 
-	if err := h.trackerRepo.UpsertTrackerSource(profileID, trackerID, models.TrackerSource{
+	return linkedSource, models.TrackerSource{
 		SourceID:     linkedSource.ID,
 		SourceItemID: itemID,
 		SourceURL:    canonicalURL,
-	}); err != nil {
+	}, nil
+}
+
+// attachSourceByURL links a pasted series URL to a tracker, outside the Link
+// Review queue (the add and edit forms).
+func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID int64, trackerID int64, rawURL string) (*models.Source, error) {
+	linkedSource, link, err := h.resolveSourceLink(parent, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.trackerRepo.UpsertTrackerSource(profileID, trackerID, link); err != nil {
 		return nil, err
 	}
 
@@ -691,18 +687,27 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 	}
 
+	linked := false
 	for _, item := range queue {
 		if !isBulkAcceptable(item.Suggestions) {
 			continue
 		}
 		for _, suggestion := range item.Suggestions {
 			if suggestion.Score >= exactScoreFloor {
-				if err := h.acceptSuggestion(profile.ID, suggestion); err != nil {
+				// A nil result means the candidate stopped being pending
+				// between listing the queue and deciding it; nothing to undo,
+				// each accept is its own transaction.
+				accepted, err := h.linkSuggestionRepo.AcceptSuggestion(profile.ID, suggestion.ID)
+				if err != nil {
 					return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 				}
+				linked = linked || accepted != nil
 				break
 			}
 		}
+	}
+	if linked {
+		h.invalidateLinkLookups()
 	}
 
 	data, err := h.buildLinkQueue(profile.ID, source, scope)

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
@@ -10,13 +11,16 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -135,7 +139,7 @@ func toTrackerTagView(tags []models.CustomTag) []trackerTagView {
 			ID:       tag.ID,
 			Name:     tag.Name,
 			IconKey:  tag.IconKey,
-			IconPath: tag.IconPath,
+			IconPath: tag.IconPath(),
 		})
 	}
 	return items
@@ -144,10 +148,11 @@ func toTrackerTagView(tags []models.CustomTag) []trackerTagView {
 func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
 	icons := make([]trackerTagIconView, 0, len(tags))
 	for _, tag := range tags {
-		if tag.IconPath == nil {
+		iconPath := tag.IconPath()
+		if iconPath == "" {
 			continue
 		}
-		icons = append(icons, trackerTagIconView{TagName: tag.Name, IconPath: *tag.IconPath})
+		icons = append(icons, trackerTagIconView{TagName: tag.Name, IconPath: iconPath})
 	}
 	return icons
 }
@@ -187,7 +192,7 @@ func prioritizeTrackerTags(tags []trackerTagView, maxVisible int) ([]trackerTagV
 	withIcon := make([]trackerTagView, 0, len(tags))
 	withoutIcon := make([]trackerTagView, 0, len(tags))
 	for _, tag := range tags {
-		if tag.IconPath != nil {
+		if tag.IconPath != "" {
 			withIcon = append(withIcon, tag)
 			continue
 		}
@@ -384,6 +389,132 @@ var coverProbeClient = &http.Client{
 	Transport: connectors.ThrottleTransport(nil),
 }
 
+// guardedCoverClient is the client the running app fetches covers with. A cover
+// URL is scraped from a third-party page and the image it returns is then
+// republished under /covers, so an unrestricted fetch hands whoever controls a
+// source a request into the Pi's own services and the rest of the LAN. Three
+// checks stand between them: the transport refuses anything that is not https
+// to a name resolving entirely to public addresses, the dialer refuses the
+// address the connection is actually being made to, and CheckRedirect refuses a
+// hop before it is issued.
+var guardedCoverClient = &http.Client{
+	Timeout:   30 * time.Second,
+	Transport: &publicHostTransport{base: connectors.ThrottleTransport(publicAddressTransport())},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after %d redirects", len(via))
+		}
+		return checkCoverTarget(req.Context(), req.URL)
+	},
+}
+
+// coverFetchClient is what cover downloads and probes go through. A handler
+// built by struct literal has no client and falls back to the unguarded one,
+// which is what lets the tests serve their fixtures from 127.0.0.1.
+func (h *DashboardHandler) coverFetchClient() *http.Client {
+	if h.coverClient != nil {
+		return h.coverClient
+	}
+	return coverProbeClient
+}
+
+// publicHostTransport refuses a request before the throttle claims a pacing
+// slot for it. It sits outside the throttle so a refused target never delays a
+// real fetch, and it runs on every request the client makes, redirects included.
+type publicHostTransport struct {
+	base http.RoundTripper
+}
+
+func (t *publicHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := checkCoverTarget(req.Context(), req.URL); err != nil {
+		return nil, err
+	}
+	return t.base.RoundTrip(req)
+}
+
+// publicAddressTransport dials public addresses only. Unlike the name-based
+// check this one sees the address the connection is actually being made to, so
+// a name that answers with a public address and then a loopback one is refused
+// on the answer that would have been used.
+func publicAddressTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("cover fetch: unusable dial address %q", address)
+			}
+			addr, err := netip.ParseAddr(host)
+			if err != nil {
+				return fmt.Errorf("cover fetch: unusable dial address %q", address)
+			}
+			if !isPublicAddr(addr) {
+				return fmt.Errorf("cover fetch: refusing to connect to %s", addr)
+			}
+			return nil
+		},
+	}).DialContext
+	return transport
+}
+
+// checkCoverTarget rejects a cover URL that is not https or that names a host
+// with any non-public answer. All answers must be public: a name that resolves
+// to both is a rebind attempt, not a CDN.
+func checkCoverTarget(ctx context.Context, target *url.URL) error {
+	if target == nil || !strings.EqualFold(target.Scheme, "https") {
+		return fmt.Errorf("cover fetch: refusing non-https url")
+	}
+
+	host := target.Hostname()
+	if host == "" {
+		return fmt.Errorf("cover fetch: url without a host")
+	}
+
+	if literal, err := netip.ParseAddr(host); err == nil {
+		if !isPublicAddr(literal) {
+			return fmt.Errorf("cover fetch: refusing address %s", literal)
+		}
+		return nil
+	}
+
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return fmt.Errorf("cover fetch: resolve %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("cover fetch: %s resolves to nothing", host)
+	}
+	for _, addr := range addrs {
+		if !isPublicAddr(addr) {
+			return fmt.Errorf("cover fetch: %s resolves to %s", host, addr)
+		}
+	}
+	return nil
+}
+
+// isPublicAddr reports whether an address is one the public internet routes to.
+// Everything it rejects — loopback, RFC1918 and unique-local, link-local,
+// multicast, unspecified — is this machine or this network.
+func isPublicAddr(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.IsValid() {
+		return false
+	}
+	switch {
+	case addr.IsLoopback(),
+		addr.IsPrivate(),
+		addr.IsUnspecified(),
+		addr.IsLinkLocalUnicast(),
+		addr.IsLinkLocalMulticast(),
+		addr.IsInterfaceLocalMulticast(),
+		addr.IsMulticast():
+		return false
+	}
+	return true
+}
+
 // coverLocalURLPrefix is where the router serves the files under coverDir.
 const coverLocalURLPrefix = "/covers/"
 
@@ -414,7 +545,7 @@ func (h *DashboardHandler) cacheCoverResult(parent context.Context, cacheKey, co
 		}
 		h.setCachedCoverLocal(cacheKey, coverURL, localPath, sourceKey)
 		return coverLocalURLPrefix + localPath, true
-	} else if !probeCoverURL(parent, coverURL) {
+	} else if !h.probeCoverURL(parent, coverURL) {
 		return "", false
 	}
 
@@ -438,8 +569,9 @@ func (h *DashboardHandler) storeCoverLocally(parent context.Context, coverURL st
 	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
 
-	res, err := coverProbeClient.Do(req)
+	res, err := h.coverFetchClient().Do(req)
 	if err != nil {
+		slog.Debug("cover download failed", "url", coverURL, "error", err)
 		return "", false
 	}
 	defer res.Body.Close()
@@ -517,7 +649,7 @@ func coverFileExt(contentType string, body []byte) string {
 // timeout is deliberately short next to the resolve timeout: the failure mode
 // this guards against is a dead CDN that hangs the connection (not a slow
 // answer), and every broken cover on a page pays it serially per host.
-func probeCoverURL(parent context.Context, coverURL string) bool {
+func (h *DashboardHandler) probeCoverURL(parent context.Context, coverURL string) bool {
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 
@@ -529,7 +661,7 @@ func probeCoverURL(parent context.Context, coverURL string) bool {
 	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
 	req.Header.Set("Range", "bytes=0-0")
 
-	res, err := coverProbeClient.Do(req)
+	res, err := h.coverFetchClient().Do(req)
 	if err != nil {
 		return false
 	}
@@ -766,27 +898,57 @@ var (
 	assetVersions  = map[string]string{}
 )
 
-func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) error {
-	h.templateOnce.Do(func() {
-		h.templates, h.templateErr = template.New("").Funcs(template.FuncMap{
-			"chapterInputValue": chapterInputValue,
-			"textInputValue":    textInputValue,
-			"timeInputValue":    timeInputValue,
-			"hasTagID":          hasTagID,
-			"tagIconLabel":      tagIconLabel,
-			"tagIconAssetPath":  tagIconAssetPath,
-			"toJSON":            toJSON,
-			"statusLabel":       statusLabel,
-			"sortLabel":         sortLabel,
-			"assetURL":          assetURL,
-		}).ParseGlob("web/templates/*.html")
-	})
+func parseDashboardTemplates() (*template.Template, error) {
+	return template.New("").Funcs(template.FuncMap{
+		"chapterInputValue": chapterInputValue,
+		"textInputValue":    textInputValue,
+		"timeInputValue":    timeInputValue,
+		"hasTagID":          hasTagID,
+		"tagIconLabel":      tagIconLabel,
+		"tagIconAssetPath":  tagIconAssetPath,
+		"toJSON":            toJSON,
+		"statusLabel":       statusLabel,
+		"sortLabel":         sortLabel,
+		"assetURL":          assetURL,
+	}).ParseGlob("web/templates/*.html")
+}
 
-	if h.templateErr != nil || h.templates == nil {
+// renderBuffers keeps the page-sized buffers below off the allocator. The Pi
+// renders the same handful of templates over and over, so the buffers are worth
+// reusing; an unusually large one is dropped instead of being held forever by
+// the pool.
+var renderBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+const renderBufferKeepLimit = 1 << 20
+
+// render executes into a buffer and copies to the response only once the whole
+// page is built. Writing straight into the response body could not be taken
+// back: a template that failed halfway left a truncated page already sent with
+// status 200, and the error the handler returned changed nothing the reader saw.
+func (h *DashboardHandler) render(c *fiber.Ctx, templateName string, data any) error {
+	if h.templates == nil {
+		slog.Error("dashboard templates unavailable", "template", templateName, "error", h.templateErr)
 		return c.Status(fiber.StatusInternalServerError).SendString("Template load error")
 	}
+
+	buffer := renderBuffers.Get().(*bytes.Buffer)
+	buffer.Reset()
+	defer func() {
+		if buffer.Cap() <= renderBufferKeepLimit {
+			renderBuffers.Put(buffer)
+		}
+	}()
+
+	if err := h.templates.ExecuteTemplate(buffer, templateName, data); err != nil {
+		slog.Error("template render failed", "template", templateName, "error", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("Template render error")
+	}
+
 	c.Type("html", "utf-8")
-	return h.templates.ExecuteTemplate(c.Response().BodyWriter(), templateName, data)
+	// Write appends a copy; Send would hand fasthttp the pooled buffer itself,
+	// which is reused as soon as this returns.
+	_, err := c.Write(buffer.Bytes())
+	return err
 }
 
 func statusLabel(value string) string {
@@ -889,15 +1051,8 @@ func tagIconLabel(iconKey string) string {
 	}
 }
 
+// tagIconAssetPath is the templates' name for the one key-to-path map, which
+// lives with the model because the tag chips read the path off the tag itself.
 func tagIconAssetPath(iconKey string) string {
-	switch strings.TrimSpace(iconKey) {
-	case "icon_1":
-		return "/assets/tag-icons/icon-star-gold.svg"
-	case "icon_2":
-		return "/assets/tag-icons/icon-red-heart.svg"
-	case "icon_3":
-		return "/assets/tag-icons/icon-flames.svg"
-	default:
-		return ""
-	}
+	return models.TagIconAssetPath(iconKey)
 }

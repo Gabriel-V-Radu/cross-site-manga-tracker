@@ -48,7 +48,14 @@ func main() {
 
 	connectorRegistry := connectordefaults.NewRegistry()
 
-	app := apihttp.NewServerWithRegistry(cfg, db, connectorRegistry)
+	// A template that does not parse must stop the deploy here: the container
+	// restarts on a non-zero exit, and the alternative is a process that comes
+	// up healthy and answers every page with a 500 until someone notices.
+	app, err := apihttp.BuildServer(cfg, db, connectorRegistry)
+	if err != nil {
+		slog.Error("failed to build http server", "error", err)
+		os.Exit(1)
+	}
 
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
 	poller := scheduler.NewPoller(

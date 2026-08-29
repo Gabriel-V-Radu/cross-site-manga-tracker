@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
@@ -328,19 +329,21 @@ func scanLinkSuggestion(row rowScanner) (LinkSuggestion, error) {
 	return suggestion, nil
 }
 
+// pendingSuggestionByIDSQL loads one pending candidate by id, verifying
+// through the tracker that it belongs to the profile.
+const pendingSuggestionByIDSQL = `
+	SELECT s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
+	       s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
+	       s.candidate_release_at, s.score, s.status, s.created_at
+	FROM source_link_suggestions s
+	INNER JOIN trackers t ON t.id = s.tracker_id
+	WHERE s.id = ? AND s.status = 'pending' AND t.profile_id = ?
+`
+
 // GetPendingSuggestion loads one pending suggestion, verifying through the
 // tracker that it belongs to the profile.
 func (r *LinkSuggestionRepository) GetPendingSuggestion(profileID int64, suggestionID int64) (*LinkSuggestion, error) {
-	row := r.db.QueryRow(`
-		SELECT s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
-		       s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
-		       s.candidate_release_at, s.score, s.status, s.created_at
-		FROM source_link_suggestions s
-		INNER JOIN trackers t ON t.id = s.tracker_id
-		WHERE s.id = ? AND s.status = 'pending' AND t.profile_id = ?
-	`, suggestionID, profileID)
-
-	suggestion, err := scanLinkSuggestion(row)
+	suggestion, err := scanLinkSuggestion(r.db.QueryRow(pendingSuggestionByIDSQL, suggestionID, profileID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -370,13 +373,166 @@ func (r *LinkSuggestionRepository) DecideSuggestion(profileID int64, suggestionI
 // RejectPendingSiblings rejects a tracker's other pending candidates once one
 // of them was accepted: a tracker links a source once.
 func (r *LinkSuggestionRepository) RejectPendingSiblings(trackerID int64, sourceID int64, exceptID int64) error {
-	_, err := r.db.Exec(`
-		UPDATE source_link_suggestions
-		SET status = 'rejected', decided_at = CURRENT_TIMESTAMP
-		WHERE tracker_id = ? AND source_id = ? AND status = 'pending' AND id != ?
-	`, trackerID, sourceID, exceptID)
-	if err != nil {
+	if _, err := r.db.Exec(rejectPendingSuggestionsSQL, trackerID, sourceID, exceptID); err != nil {
 		return fmt.Errorf("reject pending siblings: %w", err)
+	}
+	return nil
+}
+
+// AcceptSuggestion applies a whole accept decision: the tracker's link to the
+// source, the accepted status, and the rejection of that tracker's other
+// pending candidates on the same source. It returns the accepted suggestion,
+// or nil when the id is not (or is no longer) a pending candidate of the
+// profile.
+//
+// The three writes are one transaction because every partial outcome is a
+// contradiction the Link Review cannot recover from on its own: a suggestion
+// marked accepted with no link row, or a link whose siblings stayed pending
+// and which the queue therefore keeps offering.
+//
+// With MaxOpenConns(1) the transaction holds the pool's only connection, so
+// every statement below has to go through tx. A repository call that reaches
+// for r.db while this tx is open waits forever for the connection only this tx
+// can release.
+func (r *LinkSuggestionRepository) AcceptSuggestion(profileID int64, suggestionID int64) (*LinkSuggestion, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin accept suggestion tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	suggestion, err := scanLinkSuggestion(tx.QueryRow(pendingSuggestionByIDSQL, suggestionID, profileID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if err := upsertTrackerSourceTx(tx, suggestion.TrackerID, models.TrackerSource{
+		SourceID:     suggestion.SourceID,
+		SourceItemID: suggestion.CandidateItemID,
+		SourceURL:    suggestion.CandidateURL,
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`
+		UPDATE source_link_suggestions
+		SET status = 'accepted', decided_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, suggestion.ID); err != nil {
+		return nil, fmt.Errorf("mark suggestion accepted: %w", err)
+	}
+	if err := rejectPendingSuggestionsTx(tx, suggestion.TrackerID, suggestion.SourceID, suggestion.ID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit accept suggestion tx: %w", err)
+	}
+
+	suggestion.Status = LinkSuggestionAccepted
+	return &suggestion, nil
+}
+
+// ApplyManualLink stores a hand-pasted link and settles the tracker's review
+// on the source the queue is showing. The pasted URL often belongs to another
+// site — that is the point of the fallback — and then the tracker is marked
+// dismissed for the reviewed source so it leaves the queue; when it is the
+// reviewed source, the candidates the user bypassed are rejected instead.
+//
+// One transaction for the same reason as AcceptSuggestion: a link stored
+// without its review settled leaves the tracker in the queue offering
+// candidates for a series that is already linked. Every statement goes through
+// tx — see the connection note there.
+func (r *LinkSuggestionRepository) ApplyManualLink(profileID int64, trackerID int64, link models.TrackerSource, reviewSourceID int64) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin manual link tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	owned, err := trackerOwnedByProfileTx(tx, trackerID, profileID)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return nil
+	}
+
+	if err := upsertTrackerSourceTx(tx, trackerID, link); err != nil {
+		return err
+	}
+	if err := rejectPendingSuggestionsTx(tx, trackerID, reviewSourceID, 0); err != nil {
+		return err
+	}
+	if link.SourceID != reviewSourceID {
+		if err := markTrackerDismissedTx(tx, trackerID, reviewSourceID); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit manual link tx: %w", err)
+	}
+	return nil
+}
+
+const rejectPendingSuggestionsSQL = `
+	UPDATE source_link_suggestions
+	SET status = 'rejected', decided_at = CURRENT_TIMESTAMP
+	WHERE tracker_id = ? AND source_id = ? AND status = 'pending' AND id != ?
+`
+
+// rejectPendingSuggestionsTx rejects a tracker's pending candidates on one
+// source. exceptID spares the candidate that was just accepted; 0 spares none.
+func rejectPendingSuggestionsTx(tx *sql.Tx, trackerID int64, sourceID int64, exceptID int64) error {
+	if _, err := tx.Exec(rejectPendingSuggestionsSQL, trackerID, sourceID, exceptID); err != nil {
+		return fmt.Errorf("reject pending suggestions: %w", err)
+	}
+	return nil
+}
+
+// markTrackerDismissedTx writes the marker row that keeps a reviewed tracker
+// out of that source's future scans.
+func markTrackerDismissedTx(tx *sql.Tx, trackerID int64, sourceID int64) error {
+	if _, err := tx.Exec(`
+		INSERT INTO source_link_suggestions (tracker_id, source_id, candidate_url, status, decided_at)
+		VALUES (?, ?, '', 'dismissed', CURRENT_TIMESTAMP)
+		ON CONFLICT(tracker_id, source_id, candidate_url)
+		DO UPDATE SET status = 'dismissed', decided_at = CURRENT_TIMESTAMP
+	`, trackerID, sourceID); err != nil {
+		return fmt.Errorf("insert dismissal marker: %w", err)
+	}
+	return nil
+}
+
+func trackerOwnedByProfileTx(tx *sql.Tx, trackerID int64, profileID int64) (bool, error) {
+	var owned int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&owned); err != nil {
+		return false, fmt.Errorf("check tracker ownership: %w", err)
+	}
+	return owned > 0, nil
+}
+
+// upsertTrackerSourceTx links a tracker to a source through the transaction
+// handle. TrackerRepository.UpsertTrackerSource runs the same statement, but
+// on the *sql.DB: with MaxOpenConns(1), calling it while a transaction is open
+// would wait forever for the connection that transaction holds.
+func upsertTrackerSourceTx(tx *sql.Tx, trackerID int64, source models.TrackerSource) error {
+	sourceURL := strings.TrimSpace(source.SourceURL)
+	if source.SourceID <= 0 || sourceURL == "" {
+		return fmt.Errorf("link tracker source: a source and a url are required")
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(tracker_id, source_id, source_url)
+		DO UPDATE SET
+			source_item_id = excluded.source_item_id,
+			updated_at = CURRENT_TIMESTAMP
+	`, trackerID, source.SourceID, source.SourceItemID, sourceURL); err != nil {
+		return fmt.Errorf("upsert tracker source: %w", err)
 	}
 	return nil
 }
@@ -435,35 +591,30 @@ func (r *LinkSuggestionRepository) MergeRelatedTitles(trackerID int64, titles []
 // DismissTracker records that the tracker has no match on the source: pending
 // candidates are rejected and a marker row keeps it out of future scans.
 func (r *LinkSuggestionRepository) DismissTracker(profileID int64, trackerID int64, sourceID int64) error {
-	var owned int
-	if err := r.db.QueryRow(`SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&owned); err != nil {
-		return fmt.Errorf("check tracker ownership: %w", err)
-	}
-	if owned == 0 {
-		return nil
-	}
-
 	tx, err := r.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin dismiss tracker tx: %w", err)
 	}
-	if _, err := tx.Exec(`
-		UPDATE source_link_suggestions
-		SET status = 'rejected', decided_at = CURRENT_TIMESTAMP
-		WHERE tracker_id = ? AND source_id = ? AND status = 'pending'
-	`, trackerID, sourceID); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("reject pending on dismiss: %w", err)
+	defer tx.Rollback()
+
+	// Ownership is read inside the transaction: a check on r.db beforehand
+	// would be a separate snapshot, and with MaxOpenConns(1) it could not run
+	// at all once the transaction below holds the connection.
+	owned, err := trackerOwnedByProfileTx(tx, trackerID, profileID)
+	if err != nil {
+		return err
 	}
-	if _, err := tx.Exec(`
-		INSERT INTO source_link_suggestions (tracker_id, source_id, candidate_url, status, decided_at)
-		VALUES (?, ?, '', 'dismissed', CURRENT_TIMESTAMP)
-		ON CONFLICT(tracker_id, source_id, candidate_url)
-		DO UPDATE SET status = 'dismissed', decided_at = CURRENT_TIMESTAMP
-	`, trackerID, sourceID); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("insert dismissal marker: %w", err)
+	if !owned {
+		return nil
 	}
+
+	if err := rejectPendingSuggestionsTx(tx, trackerID, sourceID, 0); err != nil {
+		return err
+	}
+	if err := markTrackerDismissedTx(tx, trackerID, sourceID); err != nil {
+		return err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit dismiss tracker tx: %w", err)
 	}
