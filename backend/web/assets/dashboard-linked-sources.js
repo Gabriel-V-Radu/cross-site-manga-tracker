@@ -9,21 +9,16 @@ window.renderLinkedSources = function (form) {
         return;
     }
 
-    var items = [];
-    try {
-        items = JSON.parse(hidden.value || '[]');
-    } catch (_) {
-        items = [];
-    }
+    var items = window.parseJSONArray(hidden.value);
 
-    if (!Array.isArray(items) || items.length === 0) {
+    if (items.length === 0) {
         list.innerHTML = '<p class="search-message">No linked sites yet.</p>';
         return;
     }
 
     var html = items.map(function (item, index) {
         var sourceName = window.escapeHtml(item.sourceName || ('Source #' + item.sourceId));
-        var sourceUrl = window.escapeHtml(item.sourceUrl || '');
+        var sourceUrl = window.escapeHtml(window.safeHttpUrl(item.sourceUrl));
         return '' +
             '<div class="linked-source-row">' +
             '<span class="linked-source-name">' + sourceName + '</span>' +
@@ -66,25 +61,8 @@ window.syncLinkedSourceSelect = function (form) {
         return;
     }
 
-    var linkedItems = [];
-    try {
-        linkedItems = JSON.parse(hidden.value || '[]');
-    } catch (_) {
-        linkedItems = [];
-    }
-    if (!Array.isArray(linkedItems)) {
-        linkedItems = [];
-    }
-
-    var allSources = [];
-    try {
-        allSources = JSON.parse(allSourcesHidden.value || '[]');
-    } catch (_) {
-        allSources = [];
-    }
-    if (!Array.isArray(allSources)) {
-        allSources = [];
-    }
+    var linkedItems = window.parseJSONArray(hidden.value);
+    var allSources = window.parseJSONArray(allSourcesHidden.value);
 
     var linkedSourceIDs = {};
     linkedItems.forEach(function (item) {
@@ -117,7 +95,7 @@ window.syncLinkedSourceSelect = function (form) {
 };
 
 window.removeTrackerLinkedSource = function (index, button) {
-    var form = button && (button.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form'));
+    var form = window.findTrackerForm(button);
     if (!form) {
         return;
     }
@@ -127,15 +105,7 @@ window.removeTrackerLinkedSource = function (index, button) {
         return;
     }
 
-    var items = [];
-    try {
-        items = JSON.parse(hidden.value || '[]');
-    } catch (_) {
-        items = [];
-    }
-    if (!Array.isArray(items)) {
-        items = [];
-    }
+    var items = window.parseJSONArray(hidden.value);
 
     items.splice(index, 1);
     hidden.value = JSON.stringify(items);
@@ -148,7 +118,7 @@ window.addTrackerLinkedSource = function (button) {
         return;
     }
 
-    var form = button.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form');
+    var form = window.findTrackerForm(button);
     if (!form) {
         return;
     }
@@ -164,15 +134,7 @@ window.addTrackerLinkedSource = function (button) {
         return;
     }
 
-    var items = [];
-    try {
-        items = JSON.parse(hidden.value || '[]');
-    } catch (_) {
-        items = [];
-    }
-    if (!Array.isArray(items)) {
-        items = [];
-    }
+    var items = window.parseJSONArray(hidden.value);
 
     var alreadyExists = items.some(function (item) {
         return Number(item.sourceId) === sourceId && String(item.sourceUrl || '').toLowerCase() === sourceUrl.toLowerCase();
@@ -207,17 +169,10 @@ window.addTrackerLinkedSource = function (button) {
             return;
         }
 
+        // allowEmpty: an empty source_item_id must still overwrite whatever the
+        // previous primary source left behind.
         var setField = function (selector, value) {
-            if (value === undefined || value === null) {
-                return;
-            }
-            var field = form.querySelector(selector);
-            if (!field) {
-                return;
-            }
-            field.value = value;
-            field.dispatchEvent(new Event('input', { bubbles: true }));
-            field.dispatchEvent(new Event('change', { bubbles: true }));
+            window.setTrackerFormField(form, selector, value, true);
         };
 
         setField('select[name="source_id"]', String(sourceId));
@@ -360,22 +315,15 @@ window.applyTrackerSearchResult = function (button) {
         return;
     }
 
-    var form = button.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form');
+    var form = window.findTrackerForm(button);
     if (!form) {
         return;
     }
 
+    // No allowEmpty here: a search result missing a field must not blank out
+    // what the user already has in the form.
     var setField = function (selector, value) {
-        if (value === undefined || value === null || value === '') {
-            return;
-        }
-        var field = form.querySelector(selector);
-        if (!field) {
-            return;
-        }
-        field.value = value;
-        field.dispatchEvent(new Event('input', { bubbles: true }));
-        field.dispatchEvent(new Event('change', { bubbles: true }));
+        window.setTrackerFormField(form, selector, value, false);
     };
 
     setField('input[name="title"]', button.dataset.title || '');

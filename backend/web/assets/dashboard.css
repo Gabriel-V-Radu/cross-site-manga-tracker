@@ -5,6 +5,8 @@
     --accent: #c73030;
     --accent-soft: #ff7b74;
     --line: #2d3a50;
+    --line-strong: var(--line-strong);
+    --field: #111a29;
     --card: #151f2f;
     --shadow: 0 30px 46px -28px rgba(0, 0, 0, 0.92);
 }
@@ -151,7 +153,7 @@ h1 {
     list-style: none;
     width: 100%;
     border: 1px solid #3a4b64;
-    background: #111a29;
+    background: var(--field);
     color: var(--ink);
     font: inherit;
     font-size: 14px;
@@ -182,7 +184,7 @@ h1 {
     right: 0;
     margin-top: 4px;
     border: 1px solid #3a4b64;
-    background: #111a29;
+    background: var(--field);
     max-height: 180px;
     overflow: auto;
     padding: 6px;
@@ -211,7 +213,7 @@ h1 {
 }
 
 .filter-multi-select__option:hover {
-    border-color: #425876;
+    border-color: var(--line-strong);
     background: rgba(16, 26, 41, 0.8);
 }
 
@@ -240,7 +242,7 @@ label {
 input, select {
     width: 100%;
     border: 1px solid #3a4b64;
-    background: #111a29;
+    background: var(--field);
     color: var(--ink);
     font: inherit;
     font-size: 14px;
@@ -354,6 +356,9 @@ input:focus, select:focus {
     cursor: pointer;
     transition: transform 130ms ease, box-shadow 130ms ease;
     white-space: nowrap;
+    /* Some action buttons are anchors (dashboard/links cross-links). */
+    text-decoration: none;
+    display: inline-block;
 }
 
 .action-btn:hover {
@@ -524,12 +529,6 @@ input:focus, select:focus {
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.14em;
-}
-
-.trackers-loading__grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 14px;
 }
 
 .tracker-card--skeleton {
@@ -919,7 +918,7 @@ input:focus, select:focus {
     left: 0;
     bottom: calc(100% + 8px);
     width: 248px;
-    border: 1px solid #425876;
+    border: 1px solid var(--line-strong);
     border-radius: 10px;
     background: rgba(9, 16, 27, 0.96);
     box-shadow: 0 20px 28px -20px rgba(0, 0, 0, 0.95);
@@ -969,7 +968,7 @@ input:focus, select:focus {
     align-items: center;
     cursor: pointer;
     user-select: none;
-    border: 1px solid #425876;
+    border: 1px solid var(--line-strong);
     border-radius: 8px;
     padding: 5px 8px;
     background: rgba(16, 26, 41, 0.82);
@@ -1031,7 +1030,7 @@ input:focus, select:focus {
     flex: 1 1 0;
     min-width: 0;
     max-width: calc((100% - 12px) / 3);
-    border: 1px solid #425876;
+    border: 1px solid var(--line-strong);
     background: rgba(16, 26, 41, 0.9);
     color: #d4ddf4;
     font-size: 9px;
@@ -1102,19 +1101,6 @@ input:focus, select:focus {
     cursor: help;
 }
 
-.url {
-    margin: 12px 0 0;
-    color: #90a0bf;
-    overflow-wrap: anywhere;
-    font-size: 12px;
-}
-
-.meta {
-    margin: 0;
-    font-size: 12px;
-    color: var(--ink-soft);
-}
-
 .card-actions {
     margin-top: 12px;
     display: flex;
@@ -1126,7 +1112,7 @@ input:focus, select:focus {
 }
 
 .mini-btn {
-    border: 1px solid #425876;
+    border: 1px solid var(--line-strong);
     background: transparent;
     color: #d4ddf4;
     font-size: 11px;
@@ -1183,12 +1169,6 @@ input:focus, select:focus {
     padding: 20px;
     max-height: calc(100vh - 48px);
     overflow-y: auto;
-}
-
-@media (max-width: 900px) {
-    .modal-card {
-        width: min(680px, 100%);
-    }
 }
 
 .modal-card header {
@@ -1668,7 +1648,7 @@ input.is-loading::placeholder {
 .profile-source-logo-preview-thumb {
     width: 70px;
     height: 26px;
-    border: 1px solid #425876;
+    border: 1px solid var(--line-strong);
     border-radius: 6px;
     background: rgba(16, 26, 41, 0.85);
     display: inline-flex;
@@ -1741,8 +1721,8 @@ input.is-loading::placeholder {
 }
 
 .tracker-tag-icon-btn {
-    border: 1px solid #425876;
-    background: #101a29;
+    border: 1px solid var(--line-strong);
+    background: var(--field);
     color: #c7d8ff;
     width: 36px;
     height: 36px;
@@ -1763,8 +1743,8 @@ input.is-loading::placeholder {
 }
 
 .tracker-tag-icon-picker button {
-    border: 1px solid #425876;
-    background: #101a29;
+    border: 1px solid var(--line-strong);
+    background: var(--field);
     color: #c7d8ff;
     width: 36px;
     height: 36px;
@@ -1815,8 +1795,8 @@ input.is-loading::placeholder {
 }
 
 .linked-btn {
-    border: 1px solid #425876;
-    background: #101a29;
+    border: 1px solid var(--line-strong);
+    background: var(--field);
     color: #c7d8ff;
     font-size: 10px;
     letter-spacing: 0.08em;
@@ -1940,6 +1920,10 @@ input.is-loading::placeholder {
 }
 
 @media (max-width: 900px) {
+    .modal-card {
+        width: min(680px, 100%);
+    }
+
     .tracker-row {
         grid-template-columns: minmax(0, 1fr) auto auto;
         row-gap: 10px;
@@ -2133,8 +2117,6 @@ input.is-loading::placeholder {
     padding: 6px 10px;
     font-size: 11px;
 }
-
-.action-btn { text-decoration: none; display: inline-block; }
 
 .link-scan-status {
     font-size: 13px;

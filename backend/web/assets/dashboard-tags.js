@@ -36,7 +36,7 @@ window.selectTrackerTagIcon = function (row, nextIcon) {
     if (!row) {
         return;
     }
-    var form = row.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form');
+    var form = window.findTrackerForm(row);
     if (!form) {
         return;
     }
@@ -71,14 +71,9 @@ window.collectTrackerTagPool = function (form) {
 
     var profileTagsRaw = form.querySelector('#profile-tags-json');
     if (profileTagsRaw) {
-        try {
-            var profileTags = JSON.parse(profileTagsRaw.value || '[]');
-            if (Array.isArray(profileTags)) {
-                profileTags.forEach(function (item) {
-                    register(item && item.name);
-                });
-            }
-        } catch (_) { }
+        window.parseJSONArray(profileTagsRaw.value).forEach(function (item) {
+            register(item && item.name);
+        });
     }
 
     window.readTrackerTagsFromForm(form).forEach(function (item) {
@@ -95,15 +90,7 @@ window.refreshTrackerTagRows = function (form) {
 
     var rows = Array.prototype.slice.call(form.querySelectorAll('.tracker-tag-row'));
     var iconKeysRaw = form.querySelector('#tag-icon-keys-json');
-    var iconKeys = [];
-    try {
-        iconKeys = JSON.parse((iconKeysRaw && iconKeysRaw.value) || '[]');
-    } catch (_) {
-        iconKeys = [];
-    }
-    if (!Array.isArray(iconKeys)) {
-        iconKeys = [];
-    }
+    var iconKeys = window.parseJSONArray(iconKeysRaw && iconKeysRaw.value);
 
     var tagPool = window.collectTrackerTagPool(form);
 
@@ -174,7 +161,7 @@ window.refreshTrackerTagRows = function (form) {
 };
 
 window.addTrackerTagRow = function (button) {
-    var form = button && (button.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form'));
+    var form = window.findTrackerForm(button);
     if (!form) {
         return;
     }
@@ -205,7 +192,7 @@ window.addTrackerTagRow = function (button) {
 
 window.removeTrackerTagRow = function (button) {
     var row = button && button.closest('.tracker-tag-row');
-    var form = button && (button.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form'));
+    var form = window.findTrackerForm(button);
     if (row) {
         row.remove();
     }
@@ -225,15 +212,7 @@ window.renderTrackerTagRows = function (form) {
         return;
     }
 
-    var items = [];
-    try {
-        items = JSON.parse(hidden.value || '[]');
-    } catch (_) {
-        items = [];
-    }
-    if (!Array.isArray(items)) {
-        items = [];
-    }
+    var items = window.parseJSONArray(hidden.value);
 
     if (items.length === 0) {
         items = [{ name: '', iconKey: null }];

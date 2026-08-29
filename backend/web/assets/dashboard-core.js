@@ -7,6 +7,69 @@ window.escapeHtml = function (value) {
         .replace(/'/g, '&#39;');
 };
 
+// JSON.parse for the hidden-input payloads: anything that is not a JSON array
+// (empty value, corrupt JSON, a bare object) comes back as an empty array.
+window.parseJSONArray = function (raw) {
+    if (!raw) {
+        return [];
+    }
+    var parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (_) {
+        return [];
+    }
+    return Array.isArray(parsed) ? parsed : [];
+};
+
+// The tracker form usually wraps the element that triggered the action, but a
+// button rendered outside it (search results, modal chrome) still means the
+// one open in the modal.
+window.findTrackerForm = function (el) {
+    if (!el || !el.closest) {
+        return null;
+    }
+    return el.closest('.tracker-form') || document.querySelector('#modal-zone .tracker-form');
+};
+
+// Writes a form field and fires the events htmx/listeners expect. null and
+// undefined never overwrite; pass allowEmpty to let '' clear a field —
+// otherwise '' is treated as "nothing to write" and the field keeps its value.
+window.setTrackerFormField = function (form, selector, value, allowEmpty) {
+    if (!form || value === undefined || value === null) {
+        return;
+    }
+    if (value === '' && !allowEmpty) {
+        return;
+    }
+    var field = form.querySelector(selector);
+    if (!field) {
+        return;
+    }
+    field.value = value;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+};
+
+// Guard for hrefs assembled in JS: only absolute http(s) URLs pass, anything
+// else (javascript:, data:, relative fragments, garbage) becomes ''.
+window.safeHttpUrl = function (value) {
+    var raw = String(value || '').trim();
+    if (!raw) {
+        return '';
+    }
+    var parsed;
+    try {
+        parsed = new URL(raw);
+    } catch (_) {
+        return '';
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return '';
+    }
+    return raw;
+};
+
 window.syncTrackerCardHoverState = function (clientX, clientY) {
     if (!document) {
         return;

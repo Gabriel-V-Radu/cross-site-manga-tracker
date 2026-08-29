@@ -1,3 +1,48 @@
+// Fetches one tracker's card fragment and resolves with the parsed card
+// element. Rejects on network failure, an empty body, or markup whose first
+// element carries no id — the id is what the insert logic keys on.
+var fetchTrackerCardFragment = function (requestURL) {
+    return fetch(requestURL, {
+        credentials: 'same-origin',
+        headers: { 'HX-Request': 'true' }
+    })
+        .then(function (response) {
+            if (!response.ok) {
+                throw new Error('card fragment request failed');
+            }
+            return response.text();
+        })
+        .then(function (html) {
+            var markup = String(html || '').trim();
+            if (!markup) {
+                throw new Error('empty card fragment');
+            }
+
+            var buffer = document.createElement('div');
+            buffer.innerHTML = markup;
+            var card = buffer.firstElementChild;
+            if (!card || !card.id) {
+                throw new Error('invalid card fragment');
+            }
+            return card;
+        });
+};
+
+// Puts a freshly fetched card at the top of the container, replacing any older
+// render of the same tracker, and lets htmx wire up its attributes.
+var placeTrackerCardAtTop = function (container, card) {
+    var existing = container.querySelector('#' + card.id);
+    if (existing && existing !== card) {
+        existing.remove();
+    }
+
+    container.insertBefore(card, container.firstElementChild);
+    card.style.order = '-9999';
+    if (window.htmx && typeof window.htmx.process === 'function') {
+        window.htmx.process(card);
+    }
+};
+
 document.body.addEventListener('trackerCreated', function (event) {
     var detail = event && event.detail ? event.detail : {};
     var payload = detail;
@@ -25,41 +70,11 @@ document.body.addEventListener('trackerCreated', function (event) {
         requestURL += '&profile=' + encodeURIComponent(profileKey);
     }
 
-    fetch(requestURL, {
-        credentials: 'same-origin',
-        headers: { 'HX-Request': 'true' }
-    })
-        .then(function (response) {
-            if (!response.ok) {
-                throw new Error('card fragment request failed');
-            }
-            return response.text();
-        })
-        .then(function (html) {
-            var markup = String(html || '').trim();
-            if (!markup) {
-                throw new Error('empty card fragment');
-            }
-
-            var buffer = document.createElement('div');
-            buffer.innerHTML = markup;
-            var card = buffer.firstElementChild;
-            if (!card || !card.id) {
-                throw new Error('invalid card fragment');
-            }
-
-            var existing = activeContainer.querySelector('#' + card.id);
-            if (existing) {
-                existing.remove();
-            }
-
-            activeContainer.insertBefore(card, activeContainer.firstElementChild);
-            card.style.order = '-9999';
+    fetchTrackerCardFragment(requestURL)
+        .then(function (card) {
+            placeTrackerCardAtTop(activeContainer, card);
             window.__freezeTrackersOrder = true;
             window.__pinnedTrackerID = card.id;
-            if (window.htmx && typeof window.htmx.process === 'function') {
-                window.htmx.process(card);
-            }
 
             var shouldRetryCover = (viewMode === 'grid');
             if (!shouldRetryCover) {
@@ -78,41 +93,13 @@ document.body.addEventListener('trackerCreated', function (event) {
                 }
                 retryCount += 1;
 
-                fetch(requestURL, {
-                    credentials: 'same-origin',
-                    headers: { 'HX-Request': 'true' }
-                })
-                    .then(function (retryResponse) {
-                        if (!retryResponse.ok) {
-                            throw new Error('card refresh request failed');
-                        }
-                        return retryResponse.text();
-                    })
-                    .then(function (retryHTML) {
-                        var retryMarkup = String(retryHTML || '').trim();
-                        if (!retryMarkup) {
-                            throw new Error('empty card refresh fragment');
-                        }
-
-                        var retryBuffer = document.createElement('div');
-                        retryBuffer.innerHTML = retryMarkup;
-                        var refreshedCard = retryBuffer.firstElementChild;
-                        if (!refreshedCard || refreshedCard.id !== card.id) {
+                fetchTrackerCardFragment(requestURL)
+                    .then(function (refreshedCard) {
+                        if (refreshedCard.id !== card.id) {
                             throw new Error('invalid refreshed card fragment');
                         }
 
-                        var currentCard = activeContainer.querySelector('#' + card.id);
-                        if (currentCard) {
-                            currentCard.replaceWith(refreshedCard);
-                        } else {
-                            activeContainer.insertBefore(refreshedCard, activeContainer.firstElementChild);
-                        }
-
-                        refreshedCard.style.order = '-9999';
-                        activeContainer.insertBefore(refreshedCard, activeContainer.firstElementChild);
-                        if (window.htmx && typeof window.htmx.process === 'function') {
-                            window.htmx.process(refreshedCard);
-                        }
+                        placeTrackerCardAtTop(activeContainer, refreshedCard);
 
                         var hasCoverImage = !!refreshedCard.querySelector('.tracker-card__cover img');
                         if (!hasCoverImage && retryCount < maxRetries) {
@@ -702,6 +689,20 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
 
     if (target.id !== 'trackers-zone') {
         return;
+    }
+
+    // A tracker created moments ago is pinned to the top of the container, and
+    // that pin has to survive every re-render of the list (this used to be an
+    // inline script inside the trackers partial, run on each swap).
+    if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
+        var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
+        var pinnedCard = document.getElementById(window.__pinnedTrackerID);
+        if (pinnedContainer && pinnedCard) {
+            if (pinnedContainer.firstElementChild !== pinnedCard) {
+                pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
+            }
+            pinnedCard.style.order = '-9999';
+        }
     }
 
     if (window.__scrollTrackersToTop) {

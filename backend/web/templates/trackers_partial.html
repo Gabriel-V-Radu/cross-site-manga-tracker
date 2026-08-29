@@ -11,6 +11,36 @@
     {{end}}
 </a>
 {{end}}
+{{define "pagination_controls"}}
+<div class="pagination__group" role="navigation" aria-label="Pagination">
+    <button type="button"
+            class="pagination-btn js-page-btn"
+            data-page-value="{{.PrevPage}}"
+            {{if not .HasPrevPage}}disabled{{end}}>
+        &#8249;
+    </button>
+
+    {{range .PageNumbers}}
+    {{if eq . 0}}
+    <span class="pagination-ellipsis" aria-hidden="true">&hellip;</span>
+    {{else}}
+    <button type="button"
+            class="pagination-btn {{if eq . $.Page}}pagination-btn--active {{end}}js-page-btn"
+            data-page-value="{{.}}"
+            {{if eq . $.Page}}aria-current="page"{{end}}>
+        {{.}}
+    </button>
+    {{end}}
+    {{end}}
+
+    <button type="button"
+            class="pagination-btn js-page-btn"
+            data-page-value="{{.NextPage}}"
+            {{if not .HasNextPage}}disabled{{end}}>
+        &#8250;
+    </button>
+</div>
+{{end}}
 {{if eq (len .Trackers) 0}}
 <div class="empty-state">
     <h2>No trackers found</h2>
@@ -20,34 +50,7 @@
 {{if gt .TotalPages 1}}
 <div class="pagination pagination--top">
     <p class="pagination-results">{{.TotalResults}} result{{if ne .TotalResults 1}}s{{end}}</p>
-    <div class="pagination__group" role="navigation" aria-label="Pagination">
-        <button type="button"
-                class="pagination-btn js-page-btn"
-                data-page-value="{{.PrevPage}}"
-                {{if not .HasPrevPage}}disabled{{end}}>
-            &#8249;
-        </button>
-
-        {{range .PageNumbers}}
-        {{if eq . 0}}
-        <span class="pagination-ellipsis" aria-hidden="true">&hellip;</span>
-        {{else}}
-        <button type="button"
-                class="pagination-btn {{if eq . $.Page}}pagination-btn--active {{end}}js-page-btn"
-                data-page-value="{{.}}"
-                {{if eq . $.Page}}aria-current="page"{{end}}>
-            {{.}}
-        </button>
-        {{end}}
-        {{end}}
-
-        <button type="button"
-                class="pagination-btn js-page-btn"
-                data-page-value="{{.NextPage}}"
-                {{if not .HasNextPage}}disabled{{end}}>
-            &#8250;
-        </button>
-    </div>
+    {{template "pagination_controls" .}}
     <div class="pagination-site-links" aria-label="Connector websites">
         {{range .SiteLinks}}
         {{template "pagination_site_link" .}}
@@ -83,52 +86,16 @@
 
 {{if gt .TotalPages 1}}
 <div class="pagination pagination--bottom">
-    <div class="pagination__group" role="navigation" aria-label="Pagination">
-        <button type="button"
-                class="pagination-btn js-page-btn"
-                data-page-value="{{.PrevPage}}"
-                {{if not .HasPrevPage}}disabled{{end}}>
-            &#8249;
-        </button>
-
-        {{range .PageNumbers}}
-        {{if eq . 0}}
-        <span class="pagination-ellipsis" aria-hidden="true">&hellip;</span>
-        {{else}}
-        <button type="button"
-                class="pagination-btn {{if eq . $.Page}}pagination-btn--active {{end}}js-page-btn"
-                data-page-value="{{.}}"
-                {{if eq . $.Page}}aria-current="page"{{end}}>
-            {{.}}
-        </button>
-        {{end}}
-        {{end}}
-
-        <button type="button"
-                class="pagination-btn js-page-btn"
-                data-page-value="{{.NextPage}}"
-                {{if not .HasNextPage}}disabled{{end}}>
-            &#8250;
-        </button>
-    </div>
+    {{template "pagination_controls" .}}
 </div>
 {{end}}
 {{end}}
 
+{{/* Re-pinning a just-created card after each swap lives in
+     dashboard-trackers.js (htmx:afterSwap on #trackers-zone). */}}
 {{if .PendingCovers}}
 <script>
     (function () {
-        if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
-            var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
-            var pinnedCard = document.getElementById(window.__pinnedTrackerID);
-            if (pinnedContainer && pinnedCard) {
-                if (pinnedContainer.firstElementChild !== pinnedCard) {
-                    pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
-                }
-                pinnedCard.style.order = '-9999';
-            }
-        }
-
         var refreshKey = "{{.RefreshKey}}";
         if (!refreshKey || !document || !document.body) {
             return;
@@ -178,17 +145,6 @@
 {{else}}
 <script>
     (function () {
-        if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
-            var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
-            var pinnedCard = document.getElementById(window.__pinnedTrackerID);
-            if (pinnedContainer && pinnedCard) {
-                if (pinnedContainer.firstElementChild !== pinnedCard) {
-                    pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
-                }
-                pinnedCard.style.order = '-9999';
-            }
-        }
-
         if (window.__pendingTrackersRefreshTimer) {
             window.clearTimeout(window.__pendingTrackersRefreshTimer);
             window.__pendingTrackersRefreshTimer = null;
