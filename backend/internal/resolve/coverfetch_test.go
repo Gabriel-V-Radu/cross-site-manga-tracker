@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
-	"image/png"
 	"testing"
 )
 
@@ -19,17 +18,6 @@ func encodeJPEG(t *testing.T, width int, height int) []byte {
 	var buffer bytes.Buffer
 	if err := jpeg.Encode(&buffer, img, nil); err != nil {
 		t.Fatalf("encode jpeg: %v", err)
-	}
-	return buffer.Bytes()
-}
-
-func encodePNG(t *testing.T, width int, height int) []byte {
-	t.Helper()
-
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	var buffer bytes.Buffer
-	if err := png.Encode(&buffer, img); err != nil {
-		t.Fatalf("encode png: %v", err)
 	}
 	return buffer.Bytes()
 }

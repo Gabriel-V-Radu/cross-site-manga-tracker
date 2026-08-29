@@ -32,24 +32,25 @@ jobs:
       - name: Test (race detector)
         run: go test -race ./...
 
-  # Advisory until it is seen passing: the linter set in backend/.golangci.yml
-  # is deliberately small, and each linter added to it should arrive with its
-  # backlog already cleared, so a red lint job means this change broke
-  # something. The blocking gate is the test job above.
-  #
-  # The action major version has to match the golangci-lint major version:
-  # action v6 drives v1 and fails with exit code 3 (invalid arguments) against
-  # a v2 binary, which is what "latest" resolves to now.
+  # Installed with go install rather than through golangci-lint-action. The
+  # action failed here with "exit code 3" before ever linting a line, and its
+  # logs are not readable without signing in, which makes it the wrong thing to
+  # depend on: the two commands below can be run locally and give the same
+  # answer. The linter set in backend/.golangci.yml is deliberately small and
+  # its findings are cleared, so this is a real gate — a red lint job means
+  # this change broke something, not that the repo has a backlog.
   lint:
     runs-on: ubuntu-latest
-    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.1.6
-          working-directory: backend
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+      - name: Lint
+        run: golangci-lint run ./...

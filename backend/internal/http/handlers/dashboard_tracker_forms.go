@@ -593,19 +593,24 @@ func (h *DashboardHandler) listSourcesByID(ctx context.Context) (map[int64]model
 }
 
 func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
+	// These three are written for the reader and are shown verbatim in the
+	// form, so they keep their sentence capitalisation. fiber.Error carries a
+	// message meant for a response — its Error() returns exactly the text
+	// below — which is what publicRequestMessage looks for when deciding
+	// whether an error is safe to display.
 	title := strings.TrimSpace(c.FormValue("title"))
 	if title == "" {
-		return nil, fmt.Errorf("Title is required")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Title is required")
 	}
 
 	sourceID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("source_id")), 10, 64)
 	if err != nil || sourceID <= 0 {
-		return nil, fmt.Errorf("Valid source is required")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Valid source is required")
 	}
 
 	sourceURL := strings.TrimSpace(c.FormValue("source_url"))
 	if sourceURL == "" {
-		return nil, fmt.Errorf("Source URL is required")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Source URL is required")
 	}
 
 	status := strings.TrimSpace(c.FormValue("status"))
@@ -620,20 +625,20 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 
 	lastRead, err := parseOptionalFloat(c.FormValue("last_read_chapter"))
 	if err != nil {
-		return nil, fmt.Errorf("Invalid last read chapter")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid last read chapter")
 	}
 	latestKnown, err := parseOptionalFloat(c.FormValue("latest_known_chapter"))
 	if err != nil {
-		return nil, fmt.Errorf("Invalid latest known chapter")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid latest known chapter")
 	}
 
 	latestReleaseAt, err := parseOptionalRFC3339Time(c.FormValue("latest_release_at"))
 	if err != nil {
-		return nil, fmt.Errorf("Invalid latest release date")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid latest release date")
 	}
 	relatedTitles, err := parseRelatedTitlesFromForm(c.FormValue("related_titles_json"))
 	if err != nil {
-		return nil, fmt.Errorf("Invalid related titles")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid related titles")
 	}
 
 	return &models.Tracker{
@@ -658,7 +663,7 @@ func parseReadingSourceFromForm(c *fiber.Ctx) (*int64, error) {
 	}
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {
-		return nil, fmt.Errorf("Invalid reading site")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid reading site")
 	}
 	return &id, nil
 }
@@ -717,7 +722,7 @@ func parseTagIDsFromForm(c *fiber.Ctx) ([]int64, error) {
 		}
 		id, err := strconv.ParseInt(trimmed, 10, 64)
 		if err != nil || id <= 0 {
-			return nil, fmt.Errorf("Invalid tag selection")
+			return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid tag selection")
 		}
 		if seen[id] {
 			continue
@@ -743,7 +748,7 @@ func parseLinkedSourcesFromForm(c *fiber.Ctx) ([]models.TrackerSource, error) {
 
 	var payload []linkedSourcePayload
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, fmt.Errorf("Invalid linked sources payload")
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid linked sources payload")
 	}
 
 	items := make([]models.TrackerSource, 0, len(payload))

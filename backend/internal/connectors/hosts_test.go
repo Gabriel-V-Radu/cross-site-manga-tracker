@@ -102,9 +102,9 @@ func TestHostAllowed(t *testing.T) {
 // lower is better, and the info floor must stay last so a source nobody wants
 // to read on never wins over a real reader.
 func TestReaderRankOrdering(t *testing.T) {
-	if !(ReaderRankOrigin < ReaderRankFreshAggregator &&
-		ReaderRankFreshAggregator < ReaderRankDefault &&
-		ReaderRankDefault < ReaderRankInfoFloor) {
+	if ReaderRankOrigin >= ReaderRankFreshAggregator ||
+		ReaderRankFreshAggregator >= ReaderRankDefault ||
+		ReaderRankDefault >= ReaderRankInfoFloor {
 		t.Fatalf("reader ranks are out of order: origin=%d fresh=%d default=%d floor=%d",
 			ReaderRankOrigin, ReaderRankFreshAggregator, ReaderRankDefault, ReaderRankInfoFloor)
 	}

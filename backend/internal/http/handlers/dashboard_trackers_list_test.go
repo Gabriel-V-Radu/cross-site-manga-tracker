@@ -231,7 +231,7 @@ func TestDashboardSortByRating(t *testing.T) {
 	if highIndex < 0 || lowIndex < 0 || noneIndex < 0 {
 		t.Fatalf("expected all seeded trackers in response")
 	}
-	if !(highIndex < lowIndex && lowIndex < noneIndex) {
+	if highIndex >= lowIndex || lowIndex >= noneIndex {
 		t.Fatalf("expected rating desc order High -> Low -> None")
 	}
 }
