@@ -32,10 +32,14 @@ jobs:
       - name: Test (race detector)
         run: go test -race ./...
 
-  # Advisory for now: golangci-lint has never run against this codebase, so its
-  # first pass will report a backlog that has nothing to do with the change
-  # being reviewed. Read it, clear the findings, then delete continue-on-error
-  # to make it a real gate. The blocking gate is the test job above.
+  # Advisory until it is seen passing: the linter set in backend/.golangci.yml
+  # is deliberately small, and each linter added to it should arrive with its
+  # backlog already cleared, so a red lint job means this change broke
+  # something. The blocking gate is the test job above.
+  #
+  # The action major version has to match the golangci-lint major version:
+  # action v6 drives v1 and fails with exit code 3 (invalid arguments) against
+  # a v2 binary, which is what "latest" resolves to now.
   lint:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -45,6 +49,7 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
+          version: v2.1.6
           working-directory: backend

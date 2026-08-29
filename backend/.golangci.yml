@@ -1,0 +1,17 @@
+version: "2"
+
+# Deliberately a small set. This codebase had never been linted, so the point
+# of the first configuration is a job that runs and passes; each linter added
+# after this one should be added with its backlog already cleared, so a red
+# lint job always means "this change broke something" rather than "this repo
+# has never been tidy".
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+run:
+  timeout: 5m
