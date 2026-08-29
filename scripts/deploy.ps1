@@ -23,6 +23,19 @@ Push-Location $repoRoot
 
 try {
     Assert-CommandExists "docker"
+    Assert-CommandExists "go"
+
+    Write-Host "Running backend tests before deploy..."
+    Push-Location (Join-Path $repoRoot "backend")
+    try {
+        go vet ./...
+        if ($LASTEXITCODE -ne 0) { throw "go vet failed; aborting deploy." }
+        go test ./...
+        if ($LASTEXITCODE -ne 0) { throw "Tests failed; aborting deploy." }
+    }
+    finally {
+        Pop-Location
+    }
 
     docker info | Out-Null
 
