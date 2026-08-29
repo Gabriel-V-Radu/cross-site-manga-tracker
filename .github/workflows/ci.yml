@@ -24,8 +24,13 @@ jobs:
       - name: Test (race detector)
         run: go test -race ./...
 
+  # Advisory for now: golangci-lint has never run against this codebase, so its
+  # first pass will report a backlog that has nothing to do with the change
+  # being reviewed. Read it, clear the findings, then delete continue-on-error
+  # to make it a real gate. The blocking gate is the test job above.
   lint:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
