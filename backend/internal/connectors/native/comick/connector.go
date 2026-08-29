@@ -21,11 +21,7 @@ package comick
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -42,6 +38,18 @@ const (
 	canonicalSiteURL = "https://comick.dev"
 	canonicalAPIURL  = "https://api.comick.dev"
 	coverCDNURL      = "https://meo.comick.pictures"
+)
+
+// Cloudflare 403 streaks recur site-wide (see the package comment): when one
+// starts, every request is doomed until it lifts, so the connector keeps an
+// escalating breaker with the same relapse semantics as MangaFire's. The base
+// is shorter than MangaFire's challenge cooldown because ComicK's streaks have
+// been temporary IP-level blocks that lift within minutes to hours, not
+// site-wide configuration changes.
+const (
+	cooldownBase          = 10 * time.Minute
+	cooldownRelapseWindow = 90 * time.Minute
+	maxCooldown           = 6 * time.Hour
 )
 
 // chapterProbeLimit is how many newest chapters a resolve reads: the top entry
@@ -67,10 +75,15 @@ type comicRecord struct {
 }
 
 type Connector struct {
+	// siteURL is the origin returned/stored URLs are built on. Unlike the
+	// scraping connectors it is configurable rather than hardcoded because the
+	// API host (apiURL) and the reader host are distinct; production uses the
+	// canonical constants for both.
 	siteURL     string
 	apiURL      string
 	allowedHost []string
 	httpClient  *http.Client
+	breaker     *connectors.EscalatingBreaker
 
 	mu     sync.Mutex
 	comics map[string]comicRecord
@@ -81,7 +94,8 @@ func NewConnector() *Connector {
 		siteURL:     canonicalSiteURL,
 		apiURL:      canonicalAPIURL,
 		allowedHost: []string{"comick.dev", "comick.io", "comick.fun"},
-		httpClient:  connectors.NewThrottledClient(20 * time.Second),
+		httpClient:  connectors.NewThrottledClient(),
+		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 		comics:      map[string]comicRecord{},
 	}
 }
@@ -98,8 +112,15 @@ func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string
 		apiURL:      strings.TrimRight(strings.TrimSpace(apiURL), "/"),
 		allowedHost: allowedHost,
 		httpClient:  client,
+		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 		comics:      map[string]comicRecord{},
 	}
+}
+
+// CooldownRemaining implements connectors.CooldownReporter, so the poller
+// skips ComicK outright while a Cloudflare 403 streak has the breaker open.
+func (c *Connector) CooldownRemaining() (time.Duration, string) {
+	return c.breaker.Remaining()
 }
 
 func (c *Connector) Key() string {
@@ -165,7 +186,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	// English-scoped on purpose: the series-level last_chapter counts every
 	// language, which is exactly the inflation this app avoids.
 	latest, publishedAt, err := c.latestEnglishChapter(ctx, record.hid)
-	if isNotFound(err) {
+	if connectors.IsNotFound(err) {
 		// A stale cached hid (the comic moved or was merged) answers 404 here;
 		// refetching the record self-heals it.
 		c.forgetComic(slug)
@@ -224,22 +245,12 @@ func (c *Connector) forgetComic(slug string) {
 	c.mu.Unlock()
 }
 
-func isNotFound(err error) bool {
-	var statusErr *httpStatusError
-	return errors.As(err, &statusErr) && statusErr.StatusCode == 404
-}
-
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
 	query := strings.TrimSpace(title)
 	if query == "" {
 		return nil, fmt.Errorf("title is required")
 	}
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	params := url.Values{}
 	params.Set("q", query)
@@ -272,7 +283,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -286,7 +297,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	formatted := formatChapter(chapter)
+	formatted := connectors.FormatChapter(chapter)
 	params := url.Values{}
 	params.Set("lang", "en")
 	params.Set("chap", formatted)
@@ -324,7 +335,7 @@ func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*floa
 	)
 	for _, entry := range response.Chapters {
 		number, err := strconv.ParseFloat(strings.TrimSpace(entry.Chap), 64)
-		if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number <= 0 {
+		if err != nil || !connectors.ValidChapter(number) {
 			continue
 		}
 		if best != nil && number <= *best {
@@ -339,13 +350,8 @@ func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*floa
 
 func parseChapterTime(values ...string) *time.Time {
 	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-			utc := parsed.UTC()
-			return &utc
+		if parsed := connectors.ParseFirstTime(value, time.RFC3339); parsed != nil {
+			return parsed
 		}
 	}
 	return nil
@@ -422,57 +428,48 @@ func (c *Connector) parseSeriesURL(rawURL string) (string, error) {
 }
 
 func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {
+	if remaining, reason := c.breaker.Remaining(); remaining > 0 {
+		return fmt.Errorf("comick %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint})
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Referer", canonicalSiteURL+"/")
 
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+	if err := connectors.DoJSON(c.httpClient, req, target, 0); err != nil {
+		// A 403 here is a Cloudflare streak, not a per-request verdict (the
+		// package comment documents the recurring pattern): open the breaker
+		// so the rest of the streak fails fast, escalating on relapse.
+		if connectors.IsHTTPStatus(err, http.StatusForbidden) {
+			c.breaker.Trip(cooldownBase, "Cloudflare refused us (403 streak)")
+		}
+		return err
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return &httpStatusError{StatusCode: res.StatusCode}
-	}
-
-	// The comic payload carries reviews and recommendations and runs to some
-	// tens of KB; the cap is a generous safety bound, not a size estimate.
-	body, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-	if err := json.Unmarshal(body, target); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
+	c.breaker.NoteSuccess()
 	return nil
 }
 
-type httpStatusError struct {
-	StatusCode int
-}
-
-func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("unexpected status: %d", e.StatusCode)
-}
-
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
 }
 
-func formatChapter(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
+// Hosts implements connectors.SiteInfo. The API host is a subdomain of the
+// primary domain, so listing the site domains covers it.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.siteURL
+}
+
+// ReaderRank implements connectors.SiteInfo: ComicK is the info floor — it
+// always has the chapter page, which makes it the reliable fallback, but its
+// reader is the worst of the chain.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankInfoFloor
 }

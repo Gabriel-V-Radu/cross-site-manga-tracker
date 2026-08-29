@@ -1,6 +1,8 @@
 package connectors
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -49,6 +51,10 @@ const (
 var hostGapOverrides = map[string]time.Duration{
 	"api.mangabaka.org": 2500 * time.Millisecond,
 	"api.comick.dev":    3500 * time.Millisecond,
+	// Cloudflare on mangafire.to blocks IPs that burst requests; this widened
+	// gap is the connector's old private pacing loop moved into the shared
+	// throttle so nothing double-paces on top of it.
+	"mangafire.to": 1500 * time.Millisecond,
 }
 
 // SourceCoolingDownError is returned without touching the network while a
@@ -179,8 +185,13 @@ func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error
 // isThrottleFailure classifies an outcome for the circuit breaker. A 404 is a
 // valid answer (the series is gone), not a failing site; what opens the
 // circuit is the site being unreachable, refusing us, or dying server-side.
+// A caller giving up (its context cancelled or timed out) says nothing about
+// the host, so it must not count toward opening the circuit.
 func isThrottleFailure(res *http.Response, err error) bool {
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
 		return true
 	}
 	switch {
@@ -205,15 +216,42 @@ func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
 
 // NewThrottledClient is the client every connector's default constructor uses.
 // Tests keep injecting plain clients through the WithOptions constructors and
-// stay unpaced. The requested timeout is floored at minClientTimeout: with
-// pacing in the transport, the client timeout would otherwise cut down
-// requests that are merely waiting for their slot behind a burst.
-func NewThrottledClient(timeout time.Duration) *http.Client {
-	if timeout < minClientTimeout {
-		timeout = minClientTimeout
-	}
+// stay unpaced. The client timeout is minClientTimeout for everyone: with
+// pacing in the transport, a shorter timeout would cut down requests that are
+// merely waiting for their slot behind a burst; actual request deadlines are
+// the callers' per-request contexts, which every call path sets.
+func NewThrottledClient() *http.Client {
 	return &http.Client{
-		Timeout:   timeout,
+		Timeout:   minClientTimeout,
 		Transport: ThrottleTransport(nil),
 	}
+}
+
+// NoteHostRateLimited opens the shared circuit for host for the standard
+// cooldown. It exists for rate limits the transport cannot see: MangaHub
+// answers them as HTTP 200 with a GraphQL errors array, so the throttle's
+// own status classification never fires. Counting it as one more consecutive
+// failure would not work either — the transport already recorded the 200 as
+// a success, resetting the streak — so an explicit rate-limit statement from
+// the server opens the circuit outright.
+func NoteHostRateLimited(host string) {
+	defaultThrottler.block(host, time.Now())
+}
+
+// block opens the circuit for host immediately, without waiting for the
+// failure threshold.
+func (t *throttler) block(host string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, ok := t.hosts[host]
+	if !ok {
+		state = &hostState{}
+		t.hosts[host] = state
+	}
+
+	if until := now.Add(t.cooldown); until.After(state.blockedUntil) {
+		state.blockedUntil = until
+	}
+	state.consecutiveFailures = 0
 }

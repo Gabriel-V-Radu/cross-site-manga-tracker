@@ -39,8 +39,8 @@ type DashboardHandler struct {
 	// coverDir is where resolved covers are downloaded and served from
 	// (/covers). Empty disables the local store and falls back to hotlinking
 	// the source CDNs — the pre-store behavior tests still exercise.
-	coverDir string
-	cacheMu  sync.RWMutex
+	coverDir           string
+	cacheMu            sync.RWMutex
 	coverFetchMu       sync.Mutex
 	coverInFlight      map[string]bool
 	coverFetchSem      chan struct{}
@@ -61,9 +61,9 @@ type DashboardHandler struct {
 	// page shows the slice that scan covered instead of everything unlinked.
 	lastLinkScanMu    sync.Mutex
 	lastLinkScanScope map[string]string
-	templates          *template.Template
-	templateOnce       sync.Once
-	templateErr        error
+	templates         *template.Template
+	templateOnce      sync.Once
+	templateErr       error
 }
 
 type coverCacheEntry struct {

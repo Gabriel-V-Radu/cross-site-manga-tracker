@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -41,8 +40,6 @@ var (
 	chapterTokenPattern      = regexp.MustCompile(`\d+(?:-\d+)?`)
 	relativeUnitPattern      = regexp.MustCompile(`(?i)(\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)`)
 	allChaptersSuffixPattern = regexp.MustCompile(`(?i)\s*\[all\s+chapters?\]\s*$`)
-	htmlTagPattern           = regexp.MustCompile(`(?is)<[^>]+>`)
-	whitespacePattern        = regexp.MustCompile(`\s+`)
 )
 
 type Connector struct {
@@ -69,7 +66,7 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: []string{"mgeko.cc"},
-		httpClient:  connectors.NewThrottledClient(12 * time.Second),
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -137,12 +134,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	body, err := c.fetchPage(ctx, c.baseURL+"/search/?search="+url.QueryEscape(query))
 	if err != nil {
@@ -187,7 +179,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -215,12 +207,12 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	}
 
 	for _, entry := range entries {
-		if math.Abs(entry.Chapter-chapter) <= 1e-9 {
+		if connectors.SameChapter(entry.Chapter, chapter) {
 			return entry.URL, nil
 		}
 	}
 
-	return "", fmt.Errorf("chapter %.3f not found", chapter)
+	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 }
 
 func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
@@ -232,9 +224,9 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	title := extractTitle(body, slug)
 	relatedTitles := extractRelatedTitles(body, title)
 
-	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(ogImagePattern, body)))
+	coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body)))
 	if coverImageURL == "" {
-		coverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(coverDataSrcPattern, body)))
+		coverImageURL = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(coverDataSrcPattern, body)))
 	}
 	coverImageURL = c.absoluteURL(coverImageURL)
 
@@ -307,35 +299,35 @@ func parseSearchEntries(body string, now time.Time) []searchEntry {
 		}
 
 		block := match[1]
-		mangaPath := strings.TrimSpace(html.UnescapeString(firstSubmatch(mangaHrefPattern, block)))
+		mangaPath := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(mangaHrefPattern, block)))
 		slug := extractMangaSlugFromPath(mangaPath)
 		if slug == "" {
 			continue
 		}
 
-		title := cleanText(firstSubmatch(novelTitlePattern, block))
+		title := connectors.CleanText(connectors.FirstSubmatch(novelTitlePattern, block))
 		if title == "" {
-			title = cleanText(firstSubmatch(anchorTitleAttrPattern, block))
+			title = connectors.CleanText(connectors.FirstSubmatch(anchorTitleAttrPattern, block))
 		}
 		if title == "" {
-			title = prettifySlug(slug)
+			title = connectors.PrettifySlug(slug)
 		}
 
-		coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(imgDataSrcPattern, block)))
+		coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(imgDataSrcPattern, block)))
 		if coverImageURL == "" {
-			coverImageURL = strings.TrimSpace(html.UnescapeString(firstSubmatch(imgSrcPattern, block)))
+			coverImageURL = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(imgSrcPattern, block)))
 		}
 		if strings.Contains(strings.ToLower(coverImageURL), "loading.gif") {
 			coverImageURL = ""
 		}
 
 		var latestChapter *float64
-		if chapterRaw := strings.TrimSpace(firstSubmatch(searchChapterPattern, block)); chapterRaw != "" {
+		if chapterRaw := strings.TrimSpace(connectors.FirstSubmatch(searchChapterPattern, block)); chapterRaw != "" {
 			latestChapter = parseMgekoChapterToken(chapterRaw)
 		}
 
 		var lastUpdatedAt *time.Time
-		if updatedRaw := cleanText(firstSubmatch(searchUpdatedPattern, block)); updatedRaw != "" {
+		if updatedRaw := connectors.CleanText(connectors.FirstSubmatch(searchUpdatedPattern, block)); updatedRaw != "" {
 			lastUpdatedAt = parseRelativeTime(updatedRaw, now)
 		}
 
@@ -363,7 +355,7 @@ func parseSearchEntries(body string, now time.Time) []searchEntry {
 	entries := make([]searchEntry, 0, len(entriesBySlug))
 	for _, entry := range entriesBySlug {
 		if entry.Title == "" {
-			entry.Title = prettifySlug(entry.Slug)
+			entry.Title = connectors.PrettifySlug(entry.Slug)
 		}
 		entries = append(entries, entry)
 	}
@@ -404,10 +396,10 @@ func parseChapterEntries(body string, now time.Time) []chapterEntry {
 		seenByURL[chapterURL] = struct{}{}
 
 		innerHTML := match[3]
-		datetimeRaw := strings.TrimSpace(html.UnescapeString(firstSubmatch(chapterDatetimePattern, innerHTML)))
+		datetimeRaw := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(chapterDatetimePattern, innerHTML)))
 		updatedAt := parseMgekoDatetime(datetimeRaw)
 		if updatedAt == nil {
-			statsRaw := cleanText(firstSubmatch(chapterStatsPattern, innerHTML))
+			statsRaw := connectors.CleanText(connectors.FirstSubmatch(chapterStatsPattern, innerHTML))
 			updatedAt = parseRelativeTime(statsRaw, now)
 		}
 
@@ -443,7 +435,7 @@ func selectLatestChapter(entries []chapterEntry) (*float64, *time.Time) {
 			continue
 		}
 
-		if latestChapter != nil && math.Abs(entry.Chapter-*latestChapter) <= 1e-9 && entry.UpdatedAt != nil {
+		if latestChapter != nil && connectors.SameChapter(entry.Chapter, *latestChapter) && entry.UpdatedAt != nil {
 			if latestUpdatedAt == nil || entry.UpdatedAt.After(*latestUpdatedAt) {
 				updatedAtValue := *entry.UpdatedAt
 				latestUpdatedAt = &updatedAtValue
@@ -455,25 +447,25 @@ func selectLatestChapter(entries []chapterEntry) (*float64, *time.Time) {
 }
 
 func extractTitle(body string, slug string) string {
-	title := cleanText(firstSubmatch(titleHeadingPattern, body))
+	title := connectors.CleanText(connectors.FirstSubmatch(titleHeadingPattern, body))
 	if title != "" {
 		return title
 	}
 
-	title = strings.TrimSpace(html.UnescapeString(firstSubmatch(metaTitlePattern, body)))
+	title = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaTitlePattern, body)))
 	title = allChaptersSuffixPattern.ReplaceAllString(title, "")
 	title = strings.TrimSpace(title)
 	if title != "" {
 		return title
 	}
 
-	return prettifySlug(slug)
+	return connectors.PrettifySlug(slug)
 }
 
 func extractRelatedTitles(body string, primaryTitle string) []string {
 	candidates := make([]string, 0, 16)
 
-	altRaw := cleanText(firstSubmatch(altTitleHeadingPattern, body))
+	altRaw := connectors.CleanText(connectors.FirstSubmatch(altTitleHeadingPattern, body))
 	if altRaw != "" {
 		parts := strings.Split(altRaw, ",")
 		for _, part := range parts {
@@ -507,31 +499,7 @@ func extractRelatedTitles(body string, primaryTitle string) []string {
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	rawBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
-	}
-
-	return string(rawBody), nil
+	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
 }
 
 func parseMgekoChapterToken(raw string) *float64 {
@@ -543,7 +511,7 @@ func parseMgekoChapterToken(raw string) *float64 {
 	parts := strings.Split(token, "-")
 	if len(parts) == 1 {
 		value, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-		if err != nil {
+		if err != nil || !connectors.ValidChapter(value) {
 			return nil
 		}
 		return &value
@@ -568,6 +536,9 @@ func parseMgekoChapterToken(raw string) *float64 {
 	}
 
 	value := wholeValue + float64(fractionValue)/math.Pow10(len(fractionPart))
+	if !connectors.ValidChapter(value) {
+		return nil
+	}
 	return &value
 }
 
@@ -700,47 +671,33 @@ func extractMangaSlugFromPath(rawPath string) string {
 	return slug
 }
 
-func prettifySlug(slug string) string {
-	trimmed := strings.TrimSpace(slug)
-	if trimmed == "" {
-		return "Untitled"
-	}
-
-	trimmed = strings.ReplaceAll(trimmed, "-", " ")
-	parts := strings.Fields(trimmed)
-	for index := range parts {
-		if len(parts[index]) == 0 {
-			continue
-		}
-		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
-	}
-	return strings.Join(parts, " ")
-}
-
-func cleanText(raw string) string {
-	text := htmlTagPattern.ReplaceAllString(raw, " ")
-	text = html.UnescapeString(text)
-	text = whitespacePattern.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
-}
-
-func firstSubmatch(pattern *regexp.Regexp, raw string) string {
-	matches := pattern.FindStringSubmatch(raw)
-	if len(matches) < 2 {
-		return ""
-	}
-	return matches[1]
-}
-
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: Mgeko is a readable aggregator in
+// the default tier.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankDefault
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on. It
+// is deliberately the production host rather than c.baseURL: c.baseURL is
+// where requests go (a test server in tests), while the URLs handed back are
+// stored in trackers and opened by the reader's browser, so they must always
+// point at the real site.
+func (c *Connector) canonicalBaseURL() string {
+	return canonicalBaseURL
 }
 
 func (c *Connector) absoluteURL(raw string) string {
@@ -755,18 +712,11 @@ func (c *Connector) absoluteURL(raw string) string {
 		return "https:" + trimmed
 	}
 	if strings.HasPrefix(trimmed, "/") {
-		return canonicalBaseURL + trimmed
+		return c.canonicalBaseURL() + trimmed
 	}
-	return canonicalBaseURL + "/" + trimmed
+	return c.canonicalBaseURL() + "/" + trimmed
 }
 
 func (c *Connector) mangaURL(slug string) string {
-	return canonicalBaseURL + "/manga/" + slug + "/"
-}
-
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return c.canonicalBaseURL() + "/manga/" + slug + "/"
 }

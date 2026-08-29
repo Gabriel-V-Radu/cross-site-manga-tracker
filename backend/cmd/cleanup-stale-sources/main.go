@@ -48,6 +48,13 @@ type stalePrimaryTracker struct {
 	SourceKey string
 }
 
+// stalePrimaryRow is one tracker whose primary source is being retired, read
+// before any replacement lookup runs.
+type stalePrimaryRow struct {
+	TrackerID     int64
+	StaleSourceID int64
+}
+
 type cleanupOutcome struct {
 	PromotedTrackers   int64
 	DeletedTrackers    int64
@@ -250,47 +257,33 @@ func planTrackerPrimarySourcePromotions(db *sql.DB, staleSourceIDs map[int64]str
 		return []trackerPromotion{}, []stalePrimaryTracker{}, nil
 	}
 
-	query := fmt.Sprintf(`
-		SELECT id, source_id
-		FROM trackers
-		WHERE source_id IN (%s)
-		ORDER BY id ASC
-	`, placeholders(len(ids)))
-
-	rows, err := db.Query(query, int64SliceToAny(ids)...)
+	staleRows, err := listTrackersWithStalePrimarySource(db, ids)
 	if err != nil {
-		return nil, nil, fmt.Errorf("query trackers with stale primary source: %w", err)
+		return nil, nil, err
 	}
-	defer rows.Close()
 
 	promotions := make([]trackerPromotion, 0)
 	orphaned := make([]stalePrimaryTracker, 0)
 
-	for rows.Next() {
-		var trackerID int64
-		var staleSourceID int64
-		if err := rows.Scan(&trackerID, &staleSourceID); err != nil {
-			return nil, nil, fmt.Errorf("scan tracker stale primary row: %w", err)
-		}
-
-		candidate, err := firstActiveLinkedSource(db, trackerID, staleSourceIDs)
+	for _, row := range staleRows {
+		candidate, err := firstActiveLinkedSource(db, row.TrackerID, staleSourceIDs)
 		if err != nil {
-			return nil, nil, fmt.Errorf("find linked source for tracker %d: %w", trackerID, err)
+			return nil, nil, fmt.Errorf("find linked source for tracker %d: %w", row.TrackerID, err)
 		}
 
 		if candidate == nil {
 			orphaned = append(orphaned, stalePrimaryTracker{
-				TrackerID: trackerID,
-				SourceID:  staleSourceID,
-				SourceKey: staleSourceKeyByID[staleSourceID],
+				TrackerID: row.TrackerID,
+				SourceID:  row.StaleSourceID,
+				SourceKey: staleSourceKeyByID[row.StaleSourceID],
 			})
 			continue
 		}
 
 		promotions = append(promotions, trackerPromotion{
-			TrackerID:       trackerID,
-			OldSourceID:     staleSourceID,
-			OldSourceKey:    staleSourceKeyByID[staleSourceID],
+			TrackerID:       row.TrackerID,
+			OldSourceID:     row.StaleSourceID,
+			OldSourceKey:    staleSourceKeyByID[row.StaleSourceID],
 			NewSourceID:     candidate.SourceID,
 			NewSourceKey:    candidate.SourceKey,
 			NewSourceURL:    candidate.SourceURL,
@@ -298,11 +291,45 @@ func planTrackerPrimarySourcePromotions(db *sql.DB, staleSourceIDs map[int64]str
 		})
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate tracker stale primary rows: %w", err)
+	return promotions, orphaned, nil
+}
+
+// listTrackersWithStalePrimarySource reads the whole result set and closes it
+// before returning. The caller looks up a replacement source per tracker, and
+// those lookups must not run while these rows are still streaming: the app
+// holds a single database connection (see database.Open), so a second query
+// issued mid-iteration waits for a connection only these rows can release. The
+// result is a silent, permanent hang — and one that strikes precisely when
+// there is cleanup work to do, since with no stale trackers the loop never
+// runs a second query.
+func listTrackersWithStalePrimarySource(db *sql.DB, staleSourceIDs []int64) ([]stalePrimaryRow, error) {
+	query := fmt.Sprintf(`
+		SELECT id, source_id
+		FROM trackers
+		WHERE source_id IN (%s)
+		ORDER BY id ASC
+	`, placeholders(len(staleSourceIDs)))
+
+	rows, err := db.Query(query, int64SliceToAny(staleSourceIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("query trackers with stale primary source: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]stalePrimaryRow, 0)
+	for rows.Next() {
+		var item stalePrimaryRow
+		if err := rows.Scan(&item.TrackerID, &item.StaleSourceID); err != nil {
+			return nil, fmt.Errorf("scan tracker stale primary row: %w", err)
+		}
+		items = append(items, item)
 	}
 
-	return promotions, orphaned, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tracker stale primary rows: %w", err)
+	}
+
+	return items, nil
 }
 
 func firstActiveLinkedSource(db *sql.DB, trackerID int64, staleSourceIDs map[int64]struct{}) (*linkedSourceCandidate, error) {

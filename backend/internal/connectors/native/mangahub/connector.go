@@ -11,7 +11,9 @@
 // gated ("API rate limit excessed"), which is why the reader URL is built
 // from the verified scheme /chapter/{slug}/chapter-{number} instead of being
 // resolved. Rate-limit and schema errors come back as HTTP 200 with a GraphQL
-// errors array, so both layers are checked.
+// errors array, so both layers are checked, and a rate limit found in that
+// array is reported to the shared throttle by hand: with no failing status
+// code, nothing else in the stack can see it.
 //
 // Queries used (x:m01 selects the mangahub.io catalog variant):
 //   - {search(x:m01,q:"...",limit:N){rows{...}}}   → title search
@@ -23,8 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -46,9 +46,27 @@ const (
 	variantCode = "m01"
 )
 
-// maxPlausibleChapter mirrors the MangaBuddy/WeebCentral guard: a number
-// beyond this is data noise, not a release, and must not inflate a tracker.
-const maxPlausibleChapter = 10000
+// maxResponseBytes bounds a GraphQL answer. The payloads here are a search
+// page or a single manga record — kilobytes — so this is a safety bound
+// against a hostile or runaway response, not a size estimate.
+const maxResponseBytes = 4 << 20
+
+// defaultAllowedHosts gates which URLs parseSeriesURL will read a slug out of.
+// Only the site domain qualifies: the API (api.mghcdn.com) and cover CDN
+// (thumb.mghcdn.com) hosts serve no series pages, so a URL on them is not a
+// MangaHub series URL. The SiteInfo claim (Hosts) is deliberately wider — see
+// apiClaimHost.
+var defaultAllowedHosts = []string{"mangahub.io"}
+
+// apiClaimHost is the API origin, claimed for registry routing only. It sits
+// on a different registrable domain from the site, so HostAllowed's subdomain
+// rule does not cover it the way it covers api.comick.dev or
+// api.mangaupdates.com. The registry used to map it to this connector through
+// a hand-maintained switch and now maps hosts solely through SiteInfo, so
+// leaving it out of the claim would silently stop "api.mghcdn.com" spellings
+// from resolving to MangaHub. Claiming it does not widen parseSeriesURL: that
+// still gates on c.allowedHost.
+const apiClaimHost = "api.mghcdn.com"
 
 // Search rows are MangaListItem, a slimmer type than Manga: querying
 // alternativeTitle on them is a schema error, so only the manga query asks
@@ -59,6 +77,10 @@ const (
 )
 
 type Connector struct {
+	// siteURL is the origin returned/stored URLs are built on. Unlike the
+	// scraping connectors it is configurable rather than hardcoded because the
+	// API host (apiURL) and the reader host are distinct; production uses the
+	// canonical constants for both.
 	siteURL     string
 	apiURL      string
 	allowedHost []string
@@ -69,8 +91,8 @@ func NewConnector() *Connector {
 	return &Connector{
 		siteURL:     canonicalSiteURL,
 		apiURL:      canonicalAPIURL,
-		allowedHost: []string{"mangahub.io"},
-		httpClient:  connectors.NewThrottledClient(20 * time.Second),
+		allowedHost: defaultAllowedHosts,
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -79,7 +101,7 @@ func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"mangahub.io"}
+		allowedHost = defaultAllowedHosts
 	}
 	return &Connector{
 		siteURL:     strings.TrimRight(strings.TrimSpace(siteURL), "/"),
@@ -159,12 +181,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	if query == "" {
 		return nil, fmt.Errorf("title is required")
 	}
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	rows, err := c.search(ctx, query, limit)
 	if err != nil {
@@ -201,7 +218,7 @@ func (c *Connector) search(ctx context.Context, title string, limit int) ([]apiM
 // per-chapter GraphQL query cannot be used for this: it is gated behind the
 // site's reading quota and answers "API rate limit excessed" to API clients.
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if !isPlausibleChapter(chapter) {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -220,7 +237,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("mangahub manga %q not found", slug)
 	}
 	if manga.LatestChapter == nil || chapter > *manga.LatestChapter {
-		return "", fmt.Errorf("chapter %s: %w", formatChapter(chapter), connectors.ErrChapterNotFound)
+		return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 	}
 
 	return c.chapterURL(slug, chapter), nil
@@ -232,7 +249,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 // its own range check refused must fall through to the next site instead of
 // becoming a link to a page that does not exist.
 func (c *Connector) chapterURL(slug string, chapter float64) string {
-	return c.siteURL + "/chapter/" + url.PathEscape(slug) + "/chapter-" + formatChapter(chapter)
+	return c.canonicalBaseURL() + "/chapter/" + url.PathEscape(slug) + "/chapter-" + connectors.FormatChapter(chapter)
 }
 
 func (c *Connector) resultFromManga(manga apiManga) connectors.MangaResult {
@@ -253,31 +270,19 @@ func (c *Connector) resultFromManga(manga apiManga) connectors.MangaResult {
 		SourceItemID:  strings.TrimSpace(manga.ID.String()),
 		Title:         title,
 		RelatedTitles: related,
-		URL:           c.siteURL + "/manga/" + url.PathEscape(slug),
+		URL:           c.canonicalBaseURL() + "/manga/" + url.PathEscape(slug),
 	}
 	if image := strings.TrimSpace(manga.Image); image != "" {
 		result.CoverImageURL = coverCDNURL + "/" + strings.TrimLeft(image, "/")
 	}
-	if manga.LatestChapter != nil && isPlausibleChapter(*manga.LatestChapter) {
+	if manga.LatestChapter != nil && connectors.ValidChapter(*manga.LatestChapter) {
 		value := *manga.LatestChapter
 		result.LatestChapter = &value
-		if parsed := parseUpdatedDate(manga.UpdatedDate); parsed != nil {
+		if parsed := connectors.ParseFirstTime(manga.UpdatedDate, time.RFC3339); parsed != nil {
 			result.LastUpdatedAt = parsed
 		}
 	}
 	return result
-}
-
-func parseUpdatedDate(value string) *time.Time {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
-	}
-	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-		utc := parsed.UTC()
-		return &utc
-	}
-	return nil
 }
 
 // parseSeriesURL extracts the series slug from a manga or chapter URL
@@ -318,54 +323,87 @@ func (c *Connector) queryGraphQL(ctx context.Context, query string) (*apiRespons
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	// The API refuses anonymous origins; presenting the site's own is what
 	// stands in for the access key the browser bundle carries.
 	req.Header.Set("Origin", canonicalSiteURL)
 
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
 	var response apiResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if err := connectors.DoJSON(c.httpClient, req, &response, maxResponseBytes); err != nil {
+		return nil, err
 	}
 	if len(response.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", strings.TrimSpace(response.Errors[0].Message))
+		message := strings.TrimSpace(response.Errors[0].Message)
+		if isRateLimitMessage(message) {
+			// The site reports a rate limit as HTTP 200 with this errors array,
+			// so the shared throttle — which classifies by status code — books
+			// the response as a success and the poller hammers straight through
+			// the episode. Stating it outright is the only way the host's
+			// circuit opens; the typed 429 lets callers up the chain classify
+			// this like any other rate limit.
+			if host := c.apiHost(); host != "" {
+				connectors.NoteHostRateLimited(host)
+			}
+			return nil, fmt.Errorf("graphql error: %s: %w", message, &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: c.apiURL})
+		}
+		return nil, fmt.Errorf("graphql error: %s", message)
 	}
 	return &response, nil
 }
 
-func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
+// isRateLimitMessage matches the wording the API uses when it refuses a query
+// for quota reasons ("API rate limit excessed" on the reading query), kept
+// loose because the same episode has also come back phrased as a plain rate
+// limit message.
+func isRateLimitMessage(message string) bool {
+	lowered := strings.ToLower(message)
+	return strings.Contains(lowered, "rate limit") || strings.Contains(lowered, "excessed")
+}
+
+// apiHost is the host the shared throttle keys its pacing and circuit state on
+// (the request URL's hostname), so a rate limit has to be reported against the
+// API URL actually in use rather than the canonical constant.
+func (c *Connector) apiHost() string {
+	parsed, err := url.Parse(c.apiURL)
+	if err != nil {
+		return ""
 	}
-	return false
+	return parsed.Hostname()
 }
 
-func isPlausibleChapter(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) && value > 0 && value < maxPlausibleChapter
+func (c *Connector) isAllowedHost(host string) bool {
+	return connectors.HostAllowed(host, c.allowedHost)
 }
 
-func formatChapter(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
+// Hosts implements connectors.SiteInfo: the site domain plus the API origin,
+// which the registry must keep routing here (apiClaimHost). Wider than
+// c.allowedHost on purpose — routing a URL to this connector and accepting it
+// as a series URL are different questions — and returned as a copy so a caller
+// cannot reach back into the shared default slice.
+func (c *Connector) Hosts() []string {
+	hosts := make([]string, 0, len(c.allowedHost)+1)
+	hosts = append(hosts, c.allowedHost...)
+	if !connectors.HostAllowed(apiClaimHost, hosts) {
+		hosts = append(hosts, apiClaimHost)
+	}
+	return hosts
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: MangaHub is a fresh aggregator —
+// English-only and same-day on most series — so it outranks the default tier
+// without displacing the origin scanlators.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankFreshAggregator
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on.
+// Requests never go here — they go to the API host (c.apiURL) — so this is
+// purely the reader/site origin the dashboard opens and the tracker stores.
+func (c *Connector) canonicalBaseURL() string {
+	return c.siteURL
 }

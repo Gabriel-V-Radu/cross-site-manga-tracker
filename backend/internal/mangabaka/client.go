@@ -11,9 +11,7 @@ package mangabaka
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -55,7 +53,7 @@ type Client struct {
 func NewClient() *Client {
 	return &Client{
 		baseURL:    canonicalBaseURL,
-		httpClient: connectors.NewThrottledClient(15 * time.Second),
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
@@ -103,26 +101,11 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]Series,
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Accept", "application/json")
 
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	raw, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
 	var response apiSearchResponse
-	if err := json.Unmarshal(raw, &response); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if err := connectors.DoJSON(c.httpClient, req, &response, 0); err != nil {
+		return nil, err
 	}
 
 	series := make([]Series, 0, len(response.Data))

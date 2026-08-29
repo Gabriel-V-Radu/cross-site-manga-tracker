@@ -45,11 +45,11 @@ func main() {
 
 	type link struct{ Key, URL string }
 	type tracker struct {
-		ID      int64
-		Title   string
-		Stored  sql.NullFloat64
-		Read    sql.NullFloat64
-		Links   []link
+		ID     int64
+		Title  string
+		Stored sql.NullFloat64
+		Read   sql.NullFloat64
+		Links  []link
 	}
 	trackers := map[int64]*tracker{}
 
@@ -74,6 +74,14 @@ func main() {
 		t.Links = append(t.Links, link{key, url})
 		trackers[t.ID] = t
 	}
+	// Without this an error mid-stream ends the loop exactly like a clean EOF,
+	// and the tool prints a partial link set — the worst possible outcome for
+	// a command whose whole job is to be the evidence behind a repair.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	rows.Close()
 
 	altRows, err := db.Query(`
@@ -94,6 +102,11 @@ func main() {
 		if t, ok := trackers[id]; ok {
 			t.Links = append(t.Links, link{key, url})
 		}
+	}
+	if err := altRows.Err(); err != nil {
+		altRows.Close()
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	altRows.Close()
 

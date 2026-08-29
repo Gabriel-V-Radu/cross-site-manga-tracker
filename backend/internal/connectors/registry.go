@@ -53,6 +53,11 @@ func (r *Registry) Register(connector Connector) error {
 	return nil
 }
 
+// Get resolves a connector from a key, which callers spell loosely: the
+// registered key in any casing, a bare hostname, or a full URL. Host-shaped
+// keys are matched against the Hosts() each registered connector publishes
+// through SiteInfo, so a new connector's domains map without touching the
+// registry.
 func (r *Registry) Get(key string) (Connector, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -71,8 +76,13 @@ func (r *Registry) Get(key string) (Connector, bool) {
 		return connector, true
 	}
 
-	if normalized := normalizeConnectorKey(lower); normalized != "" {
-		if connector, ok := r.connectors[normalized]; ok {
+	if host := hostFromKey(lower); host != "" {
+		if connector, ok := r.findByHostLocked(host); ok {
+			return connector, true
+		}
+		// A key spelled as a URL of the connector's own key ("https://mykey/")
+		// still resolves even without SiteInfo metadata.
+		if connector, ok := r.connectors[host]; ok {
 			return connector, true
 		}
 	}
@@ -80,7 +90,42 @@ func (r *Registry) Get(key string) (Connector, bool) {
 	return nil, false
 }
 
-func normalizeConnectorKey(raw string) string {
+// GetByURL resolves the connector responsible for rawURL via the Hosts() the
+// registered connectors publish.
+func (r *Registry) GetByURL(rawURL string) (Connector, bool) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil, false
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Hostname() == "" {
+		return nil, false
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.findByHostLocked(strings.ToLower(parsed.Hostname()))
+}
+
+// findByHostLocked scans the registered connectors' SiteInfo host claims.
+// Callers hold r.mu.
+func (r *Registry) findByHostLocked(host string) (Connector, bool) {
+	for _, connector := range r.connectors {
+		info, ok := connector.(SiteInfo)
+		if !ok {
+			continue
+		}
+		if HostAllowed(host, info.Hosts()) {
+			return connector, true
+		}
+	}
+	return nil, false
+}
+
+// hostFromKey extracts a hostname from a loosely spelled key: a full URL, a
+// scheme-less "host/path" string, or a bare host, with any leading "www."
+// stripped (subdomain matching in HostAllowed covers it anyway).
+func hostFromKey(raw string) string {
 	key := strings.TrimSpace(strings.ToLower(raw))
 	if key == "" {
 		return ""
@@ -105,32 +150,7 @@ func normalizeConnectorKey(raw string) string {
 		}
 	}
 
-	key = strings.TrimPrefix(key, "www.")
-
-	switch key {
-	case "mangadex.org":
-		return "mangadex"
-	case "mangafire.to":
-		return "mangafire"
-	case "asuracomic.net", "asurascans.com":
-		return "asuracomic"
-	case "flamecomics.xyz":
-		return "flamecomics"
-	case "mgeko.cc":
-		return "mgeko"
-	case "webtoons.com", "m.webtoons.com":
-		return "webtoons"
-	case "freewebnovel.com":
-		return "freewebnovel"
-	case "mangaupdates.com", "api.mangaupdates.com":
-		return "mangaupdates"
-	case "comick.dev", "comick.io", "comick.fun", "api.comick.dev":
-		return "comick"
-	case "mangahub.io", "api.mghcdn.com":
-		return "mangahub"
-	default:
-		return key
-	}
+	return strings.TrimPrefix(key, "www.")
 }
 
 func (r *Registry) List() []Descriptor {

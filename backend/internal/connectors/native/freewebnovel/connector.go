@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"io"
-	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -25,21 +23,28 @@ import (
 
 const canonicalBaseURL = "https://freewebnovel.com"
 
+// siteHosts is the one list of hostnames this connector claims: both the
+// constructors' default and SiteInfo.Hosts read it, so the registry's URL
+// routing can never drift from the connector's own ownership check. Only
+// freewebnovel.com has ever been read here — other sites mirror the same
+// catalogue, but a mirror belongs in this list only once its URLs are
+// confirmed to follow the /novel/{slug}/chapter-{N} scheme the connector
+// parses and rebuilds.
+var siteHosts = []string{"freewebnovel.com"}
+
 var (
 	searchRowSplitPattern    = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*\bli-row\b[^"']*["'][^>]*>`)
 	searchTitleAnchorPattern = regexp.MustCompile(`(?is)<h3[^>]*class=["'][^"']*\btit\b[^"']*["'][^>]*>\s*<a[^>]+href=["']/novel/([^"'/?#]+)["'][^>]*>(.*?)</a>`)
 	searchImgSrcPattern      = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["'][^>]*>`)
 	chapterHrefPattern       = regexp.MustCompile(`(?is)/novel/[^"'/]+/chapter-([0-9]+)`)
 
-	ogTitlePattern         = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:title["'][^>]*content="([^"]*)"`)
-	ogImagePattern         = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:image["'][^>]*content="([^"]*)"`)
-	novelNamePattern       = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:novel_name["'][^>]*content="([^"]*)"`)
-	updateTimePattern      = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:update_time["'][^>]*content="([^"]*)"`)
-	latestChapterURLPatt   = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:lastest_chapter_url["'][^>]*content="([^"]*)"`)
-	titleHeadingPattern    = regexp.MustCompile(`(?is)<h1[^>]*class=["'][^"']*\btit\b[^"']*["'][^>]*>(.*?)</h1>`)
-	alternativeNamesPatt   = regexp.MustCompile(`(?is)title=["']Alternative names["'][^>]*>.*?<div[^>]*class=["'][^"']*\bright\b[^"']*["'][^>]*>\s*<span[^>]*class=["'][^"']*\bs1\b[^"']*["'][^>]*>(.*?)</span>`)
-	htmlTagPattern         = regexp.MustCompile(`(?is)<[^>]+>`)
-	whitespacePattern      = regexp.MustCompile(`\s+`)
+	ogTitlePattern       = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:title["'][^>]*content="([^"]*)"`)
+	ogImagePattern       = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:image["'][^>]*content="([^"]*)"`)
+	novelNamePattern     = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:novel_name["'][^>]*content="([^"]*)"`)
+	updateTimePattern    = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:update_time["'][^>]*content="([^"]*)"`)
+	latestChapterURLPatt = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:lastest_chapter_url["'][^>]*content="([^"]*)"`)
+	titleHeadingPattern  = regexp.MustCompile(`(?is)<h1[^>]*class=["'][^"']*\btit\b[^"']*["'][^>]*>(.*?)</h1>`)
+	alternativeNamesPatt = regexp.MustCompile(`(?is)title=["']Alternative names["'][^>]*>.*?<div[^>]*class=["'][^"']*\bright\b[^"']*["'][^>]*>\s*<span[^>]*class=["'][^"']*\bs1\b[^"']*["'][^>]*>(.*?)</span>`)
 )
 
 type Connector struct {
@@ -61,7 +66,7 @@ type searchEntry struct {
 func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     canonicalBaseURL,
-		allowedHost: []string{"freewebnovel.com"},
+		allowedHost: siteHosts,
 		httpClient:  newChromeHTTPClient(12 * time.Second),
 	}
 }
@@ -76,7 +81,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"freewebnovel.com"}
+		allowedHost = siteHosts
 	}
 	return &Connector{
 		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
@@ -197,12 +202,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	body, err := c.fetchPageResilient(ctx, c.baseURL+"/search?keyword="+url.QueryEscape(query), c.baseURL+"/")
 	if err != nil {
@@ -243,8 +243,11 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
-		return "", fmt.Errorf("invalid chapter")
+	if !connectors.ValidChapterWithin(chapter, connectors.MaxPlausibleNovelChapter) {
+		// Wrapped so the reading chain reads this as "this site does not carry
+		// that chapter" and cedes the turn, rather than as "the site could not
+		// be asked", which would leave the reader on the bare series URL.
+		return "", fmt.Errorf("invalid chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 	}
 
 	trimmed := strings.TrimSpace(rawURL)
@@ -269,7 +272,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// /novel/{slug}/chapter-{N}. The tracked chapter number is that same
 	// index (taken from og:novel:lastest_chapter_url), so we can build the
 	// URL directly without fetching a chapter list.
-	return c.novelURL(slug) + "/chapter-" + formatChapterNumber(chapter), nil
+	return c.novelURL(slug) + "/chapter-" + connectors.FormatChapter(chapter), nil
 }
 
 func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
@@ -281,10 +284,10 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	title := extractTitle(body, slug)
 	relatedTitles := extractRelatedTitles(body, title)
 
-	coverImageURL := c.absoluteURL(strings.TrimSpace(html.UnescapeString(firstSubmatch(ogImagePattern, body))))
+	coverImageURL := c.absoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body))))
 
-	latestChapter := parseLatestChapterFromURL(firstSubmatch(latestChapterURLPatt, body))
-	lastUpdatedAt := parseUpdateTime(firstSubmatch(updateTimePattern, body))
+	latestChapter := parseLatestChapterFromURL(connectors.FirstSubmatch(latestChapterURLPatt, body))
+	lastUpdatedAt := parseUpdateTime(connectors.FirstSubmatch(updateTimePattern, body))
 
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
@@ -330,15 +333,15 @@ func parseSearchEntries(body string) []searchEntry {
 			continue
 		}
 
-		title := cleanText(anchor[2])
+		title := connectors.CleanText(anchor[2])
 		if title == "" {
-			title = prettifySlug(slug)
+			title = titleFromSlug(slug)
 		}
 
-		coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(searchImgSrcPattern, block)))
+		coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(searchImgSrcPattern, block)))
 
 		var latestChapter *float64
-		if chapterRaw := firstSubmatch(chapterHrefPattern, block); chapterRaw != "" {
+		if chapterRaw := connectors.FirstSubmatch(chapterHrefPattern, block); chapterRaw != "" {
 			latestChapter = parseChapterNumber(chapterRaw)
 		}
 
@@ -355,28 +358,28 @@ func parseSearchEntries(body string) []searchEntry {
 }
 
 func extractTitle(body string, slug string) string {
-	title := strings.TrimSpace(html.UnescapeString(firstSubmatch(ogTitlePattern, body)))
+	title := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogTitlePattern, body)))
 	if title != "" {
 		return title
 	}
 
-	title = strings.TrimSpace(html.UnescapeString(firstSubmatch(novelNamePattern, body)))
+	title = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(novelNamePattern, body)))
 	if title != "" {
 		return title
 	}
 
-	title = cleanText(firstSubmatch(titleHeadingPattern, body))
+	title = connectors.CleanText(connectors.FirstSubmatch(titleHeadingPattern, body))
 	if title != "" {
 		return title
 	}
 
-	return prettifySlug(slug)
+	return titleFromSlug(slug)
 }
 
 func extractRelatedTitles(body string, primaryTitle string) []string {
 	candidates := make([]string, 0, 16)
 
-	altRaw := cleanText(firstSubmatch(alternativeNamesPatt, body))
+	altRaw := connectors.CleanText(connectors.FirstSubmatch(alternativeNamesPatt, body))
 	if altRaw != "" {
 		for _, part := range strings.Split(altRaw, ",") {
 			candidate := strings.TrimSpace(part)
@@ -435,6 +438,12 @@ func (c *Connector) fetchPageResilient(ctx context.Context, endpoint string, ref
 	if err == nil {
 		return body, nil
 	}
+	// A 404 is the site answering, not challenging us: the novel was removed
+	// or the slug is wrong, and no clearance cookie changes that. Re-warming
+	// would spend two more requests to be told the same thing.
+	if connectors.IsNotFound(err) {
+		return "", err
+	}
 
 	c.warmMu.Lock()
 	c.warmed = false
@@ -452,6 +461,8 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string, referer stri
 
 	// Present as a real Chrome navigation. freewebnovel.com sits behind
 	// Cloudflare, which challenges requests that don't look browser-like.
+	// These are set before the shared fetch helper runs: it fills in only the
+	// headers a connector left blank, so this site-specific set survives.
 	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
@@ -469,42 +480,33 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string, referer stri
 		req.Header.Set("Sec-Fetch-Site", "none")
 	}
 
-	res, err := c.httpClient.Do(req)
+	rawBody, _, err := connectors.FetchBytes(c.httpClient, req, 0)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	rawBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
+		return "", err
 	}
 
 	return string(rawBody), nil
 }
 
 func parseLatestChapterFromURL(raw string) *float64 {
-	chapterRaw := firstSubmatch(chapterHrefPattern, strings.TrimSpace(html.UnescapeString(raw)))
+	chapterRaw := connectors.FirstSubmatch(chapterHrefPattern, strings.TrimSpace(html.UnescapeString(raw)))
 	if chapterRaw == "" {
 		return nil
 	}
 	return parseChapterNumber(chapterRaw)
 }
 
+// parseChapterNumber reads a chapter index out of a /chapter-{N} href. The
+// plausibility guard keeps a stray id or year picked up by the pattern from
+// inflating a tracker to a number the site will never reach. It uses the novel
+// bound, not the comic one: the serials here genuinely run into the thousands,
+// and rejecting a real chapter would freeze the tracker instead of protecting it.
 func parseChapterNumber(raw string) *float64 {
 	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil {
+	if err != nil || !connectors.ValidChapterWithin(value, connectors.MaxPlausibleNovelChapter) {
 		return nil
 	}
 	return &value
-}
-
-func formatChapterNumber(chapter float64) string {
-	return strconv.FormatFloat(chapter, 'f', -1, 64)
 }
 
 // siteTimeZone is the zone og:novel:update_time is rendered in. The site emits
@@ -552,47 +554,44 @@ func extractNovelSlugFromPath(rawPath string) string {
 	return slug
 }
 
-func prettifySlug(slug string) string {
-	trimmed := strings.TrimSpace(slug)
-	if trimmed == "" {
-		return "Untitled"
+// titleFromSlug is the display-title fallback for a page that carries no
+// usable title. connectors.PrettifySlug leaves a slug made of nothing but
+// separators empty, while every tracker row needs something to show, so the
+// placeholder this connector has always used is kept here.
+func titleFromSlug(slug string) string {
+	if pretty := connectors.PrettifySlug(slug); pretty != "" {
+		return pretty
 	}
-
-	trimmed = strings.ReplaceAll(trimmed, "-", " ")
-	parts := strings.Fields(trimmed)
-	for index := range parts {
-		if len(parts[index]) == 0 {
-			continue
-		}
-		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
-	}
-	return strings.Join(parts, " ")
-}
-
-func cleanText(raw string) string {
-	text := htmlTagPattern.ReplaceAllString(raw, " ")
-	text = html.UnescapeString(text)
-	text = whitespacePattern.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
-}
-
-func firstSubmatch(pattern *regexp.Regexp, raw string) string {
-	matches := pattern.FindStringSubmatch(raw)
-	if len(matches) < 2 {
-		return ""
-	}
-	return matches[1]
+	return "Untitled"
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: FreeWebNovel is a readable novel
+// site in the default tier.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankDefault
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on. It
+// is deliberately the production host rather than c.baseURL: c.baseURL is
+// where requests go (a test server in tests), while the URLs handed back are
+// stored in trackers and opened by the reader's browser, so they must always
+// point at the real site.
+func (c *Connector) canonicalBaseURL() string {
+	return canonicalBaseURL
 }
 
 func (c *Connector) absoluteURL(raw string) string {
@@ -607,11 +606,11 @@ func (c *Connector) absoluteURL(raw string) string {
 		return "https:" + trimmed
 	}
 	if strings.HasPrefix(trimmed, "/") {
-		return canonicalBaseURL + trimmed
+		return c.canonicalBaseURL() + trimmed
 	}
-	return canonicalBaseURL + "/" + trimmed
+	return c.canonicalBaseURL() + "/" + trimmed
 }
 
 func (c *Connector) novelURL(slug string) string {
-	return canonicalBaseURL + "/novel/" + slug
+	return c.canonicalBaseURL() + "/novel/" + slug
 }

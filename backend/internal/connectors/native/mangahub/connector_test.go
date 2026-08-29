@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func newTestConnector(t *testing.T, handler http.Handler) *Connector {
@@ -161,6 +163,40 @@ func TestResolveChapterURLChecksRangeAndBuildsReaderLink(t *testing.T) {
 	}
 }
 
+// A quota refusal arrives as HTTP 200 with an errors array, which no
+// status-code classifier can see; the connector has to turn it into a typed
+// 429 itself or the poller treats a rate-limit episode as a normal failure.
+func TestRateLimitErrorBecomesTyped429(t *testing.T) {
+	connector := newTestConnector(t, graphqlHandler(t, func(string) string {
+		return `{"errors":[{"message":"API rate limit excessed"}],"data":{"manga":null}}`
+	}))
+
+	_, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/one-piece_142")
+	if err == nil {
+		t.Fatalf("expected the rate limit to surface as an error")
+	}
+	if !connectors.IsHTTPStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("expected a typed 429 verdict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rate limit excessed") {
+		t.Fatalf("expected the site's own wording to survive, got %v", err)
+	}
+}
+
+// A schema error shares the same envelope but says nothing about quota, so it
+// must not be dressed up as a rate limit.
+func TestSchemaErrorIsNotClassifiedAsRateLimit(t *testing.T) {
+	connector := newTestConnector(t, onePieceHandler(t))
+
+	_, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/no-such-slug")
+	if err == nil {
+		t.Fatalf("expected the graphql error to surface")
+	}
+	if connectors.IsHTTPStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("expected no rate-limit verdict, got %v", err)
+	}
+}
+
 func TestResolveByURLSkipsImplausibleChapterNumbers(t *testing.T) {
 	connector := newTestConnector(t, graphqlHandler(t, func(string) string {
 		return `{"data":{"manga":{"id":9,"title":"Corrupt","slug":"corrupt_1","latestChapter":13521,
@@ -173,5 +209,33 @@ func TestResolveByURLSkipsImplausibleChapterNumbers(t *testing.T) {
 	}
 	if result.LatestChapter != nil || result.LastUpdatedAt != nil {
 		t.Fatalf("expected corrupt numbers to be dropped, got %#v %#v", result.LatestChapter, result.LastUpdatedAt)
+	}
+}
+
+// The registry maps hosts solely through SiteInfo now, and the switch it
+// replaced routed api.mghcdn.com here too. The API host is on a different
+// registrable domain than mangahub.io, so nothing covers it implicitly: it has
+// to be claimed by name or those lookups resolve to nothing.
+func TestHostsClaimsAPIOriginWithoutWideningSeriesURLs(t *testing.T) {
+	connector := NewConnector()
+
+	if !connectors.HostAllowed("api.mghcdn.com", connector.Hosts()) {
+		t.Fatalf("expected the API host to be claimed, got %v", connector.Hosts())
+	}
+	if !connectors.HostAllowed("mangahub.io", connector.Hosts()) {
+		t.Fatalf("expected the site host to be claimed, got %v", connector.Hosts())
+	}
+
+	// Claiming it for routing must not make it a series URL: the API serves no
+	// series pages, so a slug read out of one would be fiction.
+	if _, err := connector.parseSeriesURL("https://api.mghcdn.com/manga/one-piece_142"); err == nil {
+		t.Fatalf("expected the API host to be refused as a series URL")
+	}
+
+	// Hosts() must not hand out the shared default slice itself.
+	claimed := connector.Hosts()
+	claimed[0] = "tampered.example"
+	if defaultAllowedHosts[0] != "mangahub.io" {
+		t.Fatalf("Hosts() aliased the package default: %v", defaultAllowedHosts)
 	}
 }

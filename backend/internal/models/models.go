@@ -49,10 +49,10 @@ type Tracker struct {
 	LastCheckedAt         *time.Time `json:"lastCheckedAt,omitempty"`
 	// ReadingSourceID pins the tracker's reading links to one linked source;
 	// nil lets the dashboard pick the best available site.
-	ReadingSourceID *int64 `json:"readingSourceId,omitempty"`
-	Tags                []CustomTag `json:"tags,omitempty"`
-	CreatedAt           time.Time   `json:"createdAt"`
-	UpdatedAt           time.Time   `json:"updatedAt"`
+	ReadingSourceID *int64      `json:"readingSourceId,omitempty"`
+	Tags            []CustomTag `json:"tags,omitempty"`
+	CreatedAt       time.Time   `json:"createdAt"`
+	UpdatedAt       time.Time   `json:"updatedAt"`
 }
 
 type CustomTag struct {

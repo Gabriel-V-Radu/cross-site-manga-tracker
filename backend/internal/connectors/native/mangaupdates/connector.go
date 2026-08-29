@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -40,9 +39,18 @@ const (
 
 	staleReleaseCutoff = 60 * 24 * time.Hour
 
-	// maxPlausibleChapter mirrors the MangaBuddy guard against data noise.
-	maxPlausibleChapter = 10000
+	// releaseDateLayout is the only shape a release date arrives in; a value
+	// in any other shape is no date rather than a guess, because a wrong date
+	// would defeat the staleness guard below.
+	releaseDateLayout = "2006-01-02"
 )
+
+// defaultHosts is the single source of truth for the domains this connector
+// claims — the constructors' fallback and the SiteInfo claim the registry maps
+// URLs through. The API host (api.mangaupdates.com), the cover CDN
+// (cdn.mangaupdates.com) and the www site are all subdomains, which
+// connectors.HostAllowed covers without listing them.
+var defaultHosts = []string{"mangaupdates.com"}
 
 var (
 	seriesPathPattern = regexp.MustCompile(`(?i)^/series/([0-9a-z]+)(?:/|$)`)
@@ -58,8 +66,8 @@ type Connector struct {
 func NewConnector() *Connector {
 	return &Connector{
 		apiBaseURL:  canonicalAPIBaseURL,
-		allowedHost: []string{"mangaupdates.com"},
-		httpClient:  connectors.NewThrottledClient(15 * time.Second),
+		allowedHost: defaultHosts,
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -68,7 +76,7 @@ func NewConnectorWithOptions(apiBaseURL string, allowedHost []string, client *ht
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"mangaupdates.com"}
+		allowedHost = defaultHosts
 	}
 	return &Connector{
 		apiBaseURL:  strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
@@ -146,17 +154,12 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		related = append(related, associated.Title)
 	}
 
-	canonicalURL := strings.TrimSpace(record.URL)
-	if canonicalURL == "" {
-		canonicalURL = canonicalSiteURL + "/series/" + strconv.FormatInt(seriesID, 36)
-	}
-
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  strconv.FormatInt(seriesID, 10),
 		Title:         strings.TrimSpace(record.Title),
 		RelatedTitles: searchutil.FilterEnglishAlphabetNames(related),
-		URL:           canonicalURL,
+		URL:           c.seriesURL(record.URL, seriesID),
 		CoverImageURL: strings.TrimSpace(record.Image.URL.Original),
 		LatestChapter: latestChapter,
 		LastUpdatedAt: releaseAt,
@@ -203,12 +206,13 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 		return nil, nil
 	}
 
-	if best == nil || (recordLatestChapter > *best && recordLatestChapter < maxPlausibleChapter) {
-		if recordLatestChapter > 0 && recordLatestChapter < maxPlausibleChapter {
-			value := recordLatestChapter
-			best = &value
-			bestDate = newest
-		}
+	// The series record's own counter wins only when it is both plausible and
+	// ahead of what the releases say: it is maintained by hand and can carry a
+	// number the release feed has not spelled out yet.
+	if connectors.ValidChapter(recordLatestChapter) && (best == nil || recordLatestChapter > *best) {
+		value := recordLatestChapter
+		best = &value
+		bestDate = newest
 	}
 	return best, bestDate
 }
@@ -224,12 +228,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	var response apiSearchResponse
 	if err := c.postJSON(ctx, "/series/search", map[string]any{"search": query, "perpage": limit}, &response); err != nil {
@@ -247,7 +246,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceKey:     c.Key(),
 			SourceItemID:  strconv.FormatInt(record.SeriesID, 10),
 			Title:         strings.TrimSpace(record.Title),
-			URL:           strings.TrimSpace(record.URL),
+			URL:           c.seriesURL(record.URL, record.SeriesID),
 			CoverImageURL: strings.TrimSpace(record.Image.URL.Original),
 		})
 	}
@@ -284,22 +283,47 @@ func (c *Connector) parseSeriesURL(rawURL string) (int64, error) {
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo. MangaUpdates hosts no chapters
+// and resolves no reader links, so it never actually wins a turn in the
+// reading chain; the default tier is simply where a site that does not claim
+// to be better than the rest belongs.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankDefault
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on. It
+// is the production site rather than c.apiBaseURL: apiBaseURL is where
+// requests go (a test server in tests) and is the API host besides, while the
+// URLs handed back are stored in trackers and opened in a browser.
+func (c *Connector) canonicalBaseURL() string {
+	return canonicalSiteURL
+}
+
+// seriesURL prefers the link the API hands out — it carries the zero-padded
+// base36 id and the title slug the site itself uses — and falls back to
+// building one on canonicalBaseURL for a record that omits it.
+func (c *Connector) seriesURL(recordURL string, seriesID int64) string {
+	if trimmed := strings.TrimSpace(recordURL); trimmed != "" {
+		return trimmed
 	}
-	return false
+	return c.canonicalBaseURL() + "/series/" + strconv.FormatInt(seriesID, 36)
 }
 
 func (c *Connector) getJSON(ctx context.Context, path string, target any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	return c.doJSON(req, target)
+	return connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+path, target)
 }
 
 func (c *Connector) postJSON(ctx context.Context, path string, payload any, target any) error {
@@ -312,31 +336,7 @@ func (c *Connector) postJSON(ctx context.Context, path string, payload any, targ
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.doJSON(req, target)
-}
-
-func (c *Connector) doJSON(req *http.Request, target any) error {
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
-	req.Header.Set("Accept", "application/json")
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	raw, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return nil
+	return connectors.DoJSON(c.httpClient, req, target, 0)
 }
 
 // parseChapterString extracts the highest chapter number from a release's
@@ -345,7 +345,7 @@ func parseChapterString(raw string) *float64 {
 	var best *float64
 	for _, token := range numberPattern.FindAllString(raw, -1) {
 		parsed, err := strconv.ParseFloat(token, 64)
-		if err != nil || parsed <= 0 || parsed >= maxPlausibleChapter {
+		if err != nil || !connectors.ValidChapter(parsed) {
 			continue
 		}
 		if best == nil || parsed > *best {
@@ -357,14 +357,5 @@ func parseChapterString(raw string) *float64 {
 }
 
 func parseReleaseDate(raw string) *time.Time {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-	parsed, err := time.Parse("2006-01-02", trimmed)
-	if err != nil {
-		return nil
-	}
-	utc := parsed.UTC()
-	return &utc
+	return connectors.ParseFirstTime(raw, releaseDateLayout)
 }

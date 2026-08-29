@@ -141,12 +141,26 @@ func TestLinksDismissRemovesFromQueue(t *testing.T) {
 }
 
 // unreachableConnector stands in for a site behind a browser challenge: it is
-// registered, but every request fails.
-type unreachableConnector struct{ key string }
+// registered, but every request fails. It publishes SiteInfo like every real
+// connector because the registry maps a URL to a connector solely through the
+// hosts each one claims; a double that skipped it would be unreachable by URL
+// for a reason no production connector shares, and would test the wrong thing.
+type unreachableConnector struct {
+	key   string
+	hosts []string
+}
 
-func (u unreachableConnector) Key() string                       { return u.key }
-func (u unreachableConnector) Name() string                      { return u.key }
-func (u unreachableConnector) Kind() string                      { return connectors.KindNative }
+func (u unreachableConnector) Key() string     { return u.key }
+func (u unreachableConnector) Name() string    { return u.key }
+func (u unreachableConnector) Kind() string    { return connectors.KindNative }
+func (u unreachableConnector) Hosts() []string { return u.hosts }
+func (u unreachableConnector) ReaderRank() int { return connectors.ReaderRankDefault }
+func (u unreachableConnector) HomeURL() string {
+	if len(u.hosts) == 0 {
+		return ""
+	}
+	return "https://" + u.hosts[0]
+}
 func (u unreachableConnector) HealthCheck(context.Context) error { return errors.New("blocked") }
 func (u unreachableConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
 	return nil, errors.New("blocked")
@@ -160,7 +174,7 @@ func (u unreachableConnector) ResolveByURL(context.Context, string) (*connectors
 // ones this server cannot reach while the reader's browser can (MangaFire).
 func TestManualLinkAcceptsUnverifiableURL(t *testing.T) {
 	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
-		if err := registry.Register(unreachableConnector{key: "mangafire"}); err != nil {
+		if err := registry.Register(unreachableConnector{key: "mangafire", hosts: []string{"mangafire.to"}}); err != nil {
 			t.Fatalf("register unreachable connector: %v", err)
 		}
 	})

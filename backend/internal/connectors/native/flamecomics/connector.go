@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -18,6 +16,27 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
+const (
+	canonicalHost    = "flamecomics.xyz"
+	canonicalBaseURL = "https://" + canonicalHost
+)
+
+// siteHosts is the only place the connector's domains are written down. The
+// constructors' default and the Hosts() the registry routes URLs through read
+// the same list, so the two cannot drift apart and leave the site reachable by
+// one path but not the other. Subdomains (www., cdn.) are covered by
+// connectors.HostAllowed.
+var siteHosts = []string{canonicalHost}
+
+// flameDateLayouts are the shapes a release date is printed in on the series
+// page; the time-less variants exist because older entries carry only the day.
+var flameDateLayouts = []string{
+	"January 2, 2006 3:04 PM",
+	"Jan 2, 2006 3:04 PM",
+	"January 2, 2006",
+	"Jan 2, 2006",
+}
+
 var (
 	seriesIDPattern               = regexp.MustCompile(`^\d+$`)
 	seriesAnchorPattern           = regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/series/(\d+)["'][^>]*>(.*?)</a>`)
@@ -28,8 +47,6 @@ var (
 	chapterAnchorPattern          = regexp.MustCompile(`(?is)<a[^>]+href=["']((?:https?://[^"']+)?/series/(\d+)/[^"']+)["'][^>]*>(.*?)</a>`)
 	chapterNumberPattern          = regexp.MustCompile(`(?i)Chapter(?:\s|<!--\s*-->|&nbsp;)+([0-9]+(?:\.[0-9]+)?)`)
 	fullDateTimePattern           = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?`)
-	htmlTagPattern                = regexp.MustCompile(`(?is)<[^>]+>`)
-	whitespacePattern             = regexp.MustCompile(`\s+`)
 	trailingRegionCodeTitleSuffix = regexp.MustCompile(`\s+(KR|JP|CN|XX)$`)
 )
 
@@ -41,9 +58,9 @@ type Connector struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     "https://flamecomics.xyz",
-		allowedHost: []string{"flamecomics.xyz"},
-		httpClient:  connectors.NewThrottledClient(12 * time.Second),
+		baseURL:     canonicalBaseURL,
+		allowedHost: siteHosts,
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -52,9 +69,13 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		client = &http.Client{Timeout: 12 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"flamecomics.xyz"}
+		allowedHost = siteHosts
 	}
-	return &Connector{baseURL: strings.TrimRight(baseURL, "/"), allowedHost: allowedHost, httpClient: client}
+	return &Connector{
+		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		allowedHost: allowedHost,
+		httpClient:  client,
+	}
 }
 
 func (c *Connector) Key() string {
@@ -112,12 +133,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	body, err := c.fetchPage(ctx, c.baseURL+"/latest")
 	if err != nil {
@@ -163,7 +179,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -208,15 +224,14 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 			continue
 		}
 
-		chapterRaw := firstSubmatch(chapterNumberPattern, innerHTML)
+		chapterRaw := connectors.FirstSubmatch(chapterNumberPattern, innerHTML)
 		if chapterRaw == "" {
-			segmentEnd := match[1] + 500
-			if segmentEnd > len(body) {
-				segmentEnd = len(body)
-			}
+			// Some rows print the number next to the anchor rather than inside
+			// it, so a short window past the anchor is searched before the
+			// entry is given up on.
+			segmentEnd := min(match[1]+500, len(body))
 			if match[0] < segmentEnd {
-				segment := body[match[0]:segmentEnd]
-				chapterRaw = firstSubmatch(chapterNumberPattern, segment)
+				chapterRaw = connectors.FirstSubmatch(chapterNumberPattern, body[match[0]:segmentEnd])
 			}
 		}
 		if chapterRaw == "" {
@@ -224,23 +239,17 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		}
 
 		parsedChapter, parseErr := strconv.ParseFloat(strings.TrimSpace(chapterRaw), 64)
-		if parseErr != nil {
+		if parseErr != nil || !connectors.ValidChapter(parsedChapter) {
 			continue
 		}
-		if math.Abs(parsedChapter-chapter) > 1e-9 {
+		if !connectors.SameChapter(parsedChapter, chapter) {
 			continue
 		}
 
-		if strings.HasPrefix(hrefRaw, "http://") || strings.HasPrefix(hrefRaw, "https://") {
-			return hrefRaw, nil
-		}
-		if strings.HasPrefix(hrefRaw, "/") {
-			return "https://flamecomics.xyz" + hrefRaw, nil
-		}
-		return "https://flamecomics.xyz/" + hrefRaw, nil
+		return c.absoluteURL(hrefRaw), nil
 	}
 
-	return "", fmt.Errorf("chapter %.3f not found", chapter)
+	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 }
 
 type seriesEntry struct {
@@ -265,7 +274,7 @@ func (c *Connector) collectSeriesEntries(body string) []seriesEntry {
 			continue
 		}
 
-		title := cleanText(match[2])
+		title := connectors.CleanText(match[2])
 		title = strings.TrimSpace(trailingRegionCodeTitleSuffix.ReplaceAllString(title, ""))
 		if title == "" || strings.EqualFold(title, "All Chapters") || strings.HasPrefix(strings.ToLower(title), "chapter ") {
 			continue
@@ -295,7 +304,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 	relatedTitles := searchutil.ExtractRelatedTitles(body)
 	relatedTitles = removeMatchingTitle(relatedTitles, title)
 
-	coverImageURL := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
+	coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body)))
 	coverImageURL = normalizeFlameImageURL(coverImageURL)
 
 	latestChapter, latestReleaseAt := extractLatestChapterAndReleaseAt(body, seriesID)
@@ -305,7 +314,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		SourceItemID:  seriesID,
 		Title:         title,
 		RelatedTitles: relatedTitles,
-		URL:           "https://flamecomics.xyz/series/" + seriesID,
+		URL:           c.seriesURL(seriesID),
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestReleaseAt,
@@ -332,22 +341,22 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 		}
 
 		segmentStart := loc[0]
-		segmentEnd := segmentStart + 1800
-		if segmentEnd > len(body) {
-			segmentEnd = len(body)
-		}
+		segmentEnd := min(segmentStart+1800, len(body))
 		if segmentStart >= segmentEnd {
 			continue
 		}
 
 		segment := body[segmentStart:segmentEnd]
-		chapterRaw := firstSubmatch(chapterNumberPattern, segment)
+		chapterRaw := connectors.FirstSubmatch(chapterNumberPattern, segment)
 		if chapterRaw == "" {
 			continue
 		}
 
+		// The window is wide enough to run past the entry into unrelated
+		// markup, so a number that could not be a release is dropped rather
+		// than reported as the latest chapter.
 		parsedChapter, parseChapterErr := strconv.ParseFloat(strings.TrimSpace(chapterRaw), 64)
-		if parseChapterErr != nil {
+		if parseChapterErr != nil || !connectors.ValidChapter(parsedChapter) {
 			continue
 		}
 
@@ -364,7 +373,7 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 			continue
 		}
 
-		if latestChapter != nil && parsedChapter == *latestChapter && latestReleaseAt == nil && parsedDate != nil {
+		if latestChapter != nil && connectors.SameChapter(parsedChapter, *latestChapter) && latestReleaseAt == nil && parsedDate != nil {
 			dateCopy := *parsedDate
 			latestReleaseAt = &dateCopy
 		}
@@ -374,33 +383,13 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 }
 
 func parseFlameDate(raw string) *time.Time {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-
-	layouts := []string{
-		"January 2, 2006 3:04 PM",
-		"Jan 2, 2006 3:04 PM",
-		"January 2, 2006",
-		"Jan 2, 2006",
-	}
-
-	for _, layout := range layouts {
-		parsed, err := time.Parse(layout, trimmed)
-		if err == nil {
-			utc := parsed.UTC()
-			return &utc
-		}
-	}
-
-	return nil
+	return connectors.ParseFirstTime(raw, flameDateLayouts...)
 }
 
 func extractTitle(body string) string {
-	title := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaTitlePattern, body)))
+	title := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaTitlePattern, body)))
 	if title == "" {
-		title = strings.TrimSpace(html.UnescapeString(cleanText(firstSubmatch(titleTagPattern, body))))
+		title = strings.TrimSpace(html.UnescapeString(connectors.CleanText(connectors.FirstSubmatch(titleTagPattern, body))))
 	}
 	if title == "" {
 		return ""
@@ -411,6 +400,9 @@ func extractTitle(body string) string {
 	return title
 }
 
+// normalizeFlameImageURL unwraps the site's Next.js image proxy: og:image
+// points at /_next/image with the real CDN URL in a query parameter, and the
+// stored cover has to be the CDN original, not a resize served by the site.
 func normalizeFlameImageURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -418,7 +410,7 @@ func normalizeFlameImageURL(raw string) string {
 	}
 	trimmed = strings.ReplaceAll(trimmed, "&amp;", "&")
 	if parsed, err := url.Parse(trimmed); err == nil {
-		if parsed.Host == "flamecomics.xyz" && strings.HasPrefix(parsed.Path, "/_next/image") {
+		if parsed.Host == canonicalHost && strings.HasPrefix(parsed.Path, "/_next/image") {
 			target := parsed.Query().Get("url")
 			decoded, decodeErr := url.QueryUnescape(target)
 			if decodeErr == nil && strings.TrimSpace(decoded) != "" {
@@ -427,21 +419,6 @@ func normalizeFlameImageURL(raw string) string {
 		}
 	}
 	return trimmed
-}
-
-func cleanText(raw string) string {
-	text := htmlTagPattern.ReplaceAllString(raw, " ")
-	text = html.UnescapeString(text)
-	text = whitespacePattern.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
-}
-
-func firstSubmatch(pattern *regexp.Regexp, raw string) string {
-	matches := pattern.FindStringSubmatch(raw)
-	if len(matches) < 2 {
-		return ""
-	}
-	return matches[1]
 }
 
 func removeMatchingTitle(values []string, title string) []string {
@@ -470,40 +447,55 @@ func removeMatchingTitle(values []string, title string) []string {
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
-
-	rawBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
-	}
-
-	return string(rawBody), nil
+	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: Flame is an origin scanlator —
+// for its own series chapters appear here before any aggregator mirrors them.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankOrigin
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on. It
+// is deliberately the production host rather than c.baseURL: c.baseURL is
+// where requests go (a test server in tests), while the URLs handed back are
+// stored in trackers and opened in the reader's browser, so they must always
+// point at the real site.
+func (c *Connector) canonicalBaseURL() string {
+	return canonicalBaseURL
+}
+
+func (c *Connector) seriesURL(seriesID string) string {
+	return c.canonicalBaseURL() + "/series/" + seriesID
+}
+
+func (c *Connector) absoluteURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
 	}
-	return false
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return trimmed
+	}
+	if strings.HasPrefix(trimmed, "//") {
+		return "https:" + trimmed
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return c.canonicalBaseURL() + trimmed
+	}
+	return c.canonicalBaseURL() + "/" + trimmed
 }

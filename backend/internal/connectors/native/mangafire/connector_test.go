@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -387,80 +386,9 @@ func TestMangaFireConnectorCoolsDownAfterForbidden(t *testing.T) {
 	}
 }
 
-// TestEscalatedCooldown pins the backoff curve: each relapse doubles the base,
-// capped at maxCooldown.
-func TestEscalatedCooldown(t *testing.T) {
-	cases := []struct {
-		base   time.Duration
-		streak int
-		want   time.Duration
-	}{
-		{base: 30 * time.Minute, streak: 0, want: 30 * time.Minute},
-		{base: 30 * time.Minute, streak: 1, want: time.Hour},
-		{base: 30 * time.Minute, streak: 3, want: 4 * time.Hour},
-		{base: 30 * time.Minute, streak: 4, want: maxCooldown},
-		{base: 30 * time.Minute, streak: 50, want: maxCooldown},
-		{base: 5 * time.Minute, streak: 2, want: 20 * time.Minute},
-	}
-
-	for _, tc := range cases {
-		if got := escalatedCooldown(tc.base, tc.streak); got != tc.want {
-			t.Fatalf("escalatedCooldown(%s, %d) = %s, want %s", tc.base, tc.streak, got, tc.want)
-		}
-	}
-}
-
-// TestStartCooldownEscalatesOnRelapse walks the streak state machine: a
-// cooldown that reopens shortly after expiring doubles, a success in between
-// resets the streak, and a relapse long after the window starts over at base.
-func TestStartCooldownEscalatesOnRelapse(t *testing.T) {
-	connector := &Connector{}
-
-	assertRemainingNear := func(t *testing.T, want time.Duration) {
-		t.Helper()
-		remaining, _ := connector.CooldownRemaining()
-		if remaining < want-time.Minute || remaining > want {
-			t.Fatalf("expected roughly %s of cooldown, got %s", want, remaining)
-		}
-	}
-	expireCooldown := func() {
-		connector.requestMu.Lock()
-		connector.cooldownUntil = time.Now().UTC().Add(-time.Minute)
-		connector.requestMu.Unlock()
-	}
-
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, 30*time.Minute)
-
-	// A second failure while the cooldown is still open is the same incident.
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, 30*time.Minute)
-
-	// The cooldown expires, the next attempt fails again: escalate.
-	expireCooldown()
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, time.Hour)
-	if _, reason := connector.CooldownRemaining(); !strings.Contains(reason, "still failing") {
-		t.Fatalf("expected the reason to name the escalation, got %q", reason)
-	}
-
-	expireCooldown()
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, 2*time.Hour)
-
-	// A successful request closes the breaker entirely.
-	expireCooldown()
-	connector.noteRequestSuccess()
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, 30*time.Minute)
-
-	// A relapse far outside the window is a fresh outage, not a continuation.
-	connector.requestMu.Lock()
-	connector.cooldownUntil = time.Now().UTC().Add(-2 * cooldownRelapseWindow)
-	connector.requestMu.Unlock()
-	connector.startCooldown(30*time.Minute, "challenge")
-	assertRemainingNear(t, 30*time.Minute)
-}
+// The escalation state machine itself (relapse doubling, success reset,
+// relapse-window expiry) is pinned in the shared package the machinery moved
+// to: internal/connectors/breaker_test.go.
 
 // TestBuildChapterURL pins the offline reader-URL construction: the scheme the
 // site serves readers on, derivable from a stored series URL with no network.

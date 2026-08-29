@@ -2,10 +2,13 @@ package freewebnovel
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 const searchResultsHTML = `
@@ -273,6 +276,45 @@ func TestFreeWebNovelRejectsNonFreeWebNovelURL(t *testing.T) {
 	}
 	if _, err := conn.ResolveByURL(context.Background(), "https://freewebnovel.com/genre/Action"); err == nil {
 		t.Fatalf("expected non-novel url to fail")
+	}
+}
+
+// TestChapterNumbersUseTheNovelPlausibilityBound pins that the comic-derived
+// ceiling is not applied here. Translated web novels run into the thousands —
+// the fixture series in this file is already past 4000 — and a rejected number
+// does not fail loudly: the poller simply has nothing to store, so the tracker
+// stops advancing and looks abandoned rather than broken.
+func TestChapterNumbersUseTheNovelPlausibilityBound(t *testing.T) {
+	beyondComicBound := connectors.MaxPlausibleChapter + 2345.0
+	parsed := parseChapterNumber(connectors.FormatChapter(beyondComicBound))
+	if parsed == nil {
+		t.Fatalf("chapter %v must parse: novels legitimately run past the comic bound", beyondComicBound)
+	}
+	if *parsed != beyondComicBound {
+		t.Fatalf("parseChapterNumber = %v, want %v", *parsed, beyondComicBound)
+	}
+
+	if parsed := parseChapterNumber("0"); parsed != nil {
+		t.Fatalf("chapter 0 must be rejected, got %v", *parsed)
+	}
+	if parsed := parseChapterNumber(connectors.FormatChapter(connectors.MaxPlausibleNovelChapter + 1)); parsed != nil {
+		t.Fatalf("a number past the novel bound must be rejected as parser noise, got %v", *parsed)
+	}
+}
+
+// TestResolveChapterURLReportsAnImpossibleChapterAsNotCarried pins the error
+// classification: the reading chain only cedes a site's turn when it says it
+// does not carry the chapter, so an unwrapped error would strand the reader on
+// the bare series URL instead of trying the next site.
+func TestResolveChapterURLReportsAnImpossibleChapterAsNotCarried(t *testing.T) {
+	connector := NewConnector()
+
+	_, err := connector.ResolveChapterURL(context.Background(), "https://freewebnovel.com/novel/star-odyssey", 0)
+	if err == nil {
+		t.Fatalf("expected chapter 0 to be refused")
+	}
+	if !errors.Is(err, connectors.ErrChapterNotFound) {
+		t.Fatalf("error must wrap ErrChapterNotFound, got %v", err)
 	}
 }
 

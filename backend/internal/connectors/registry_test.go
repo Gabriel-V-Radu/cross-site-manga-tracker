@@ -13,6 +13,7 @@ type fakeConnector struct {
 	name   string
 	kind   string
 	health error
+	hosts  []string
 }
 
 func (f *fakeConnector) Key() string                       { return f.key }
@@ -25,6 +26,17 @@ func (f *fakeConnector) ResolveByURL(context.Context, string) (*connectors.Manga
 func (f *fakeConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
 	return nil, nil
 }
+
+// fakeConnector implements connectors.SiteInfo, mirroring how the native
+// connectors publish the hosts the registry maps keys and URLs with.
+func (f *fakeConnector) Hosts() []string { return f.hosts }
+func (f *fakeConnector) HomeURL() string {
+	if len(f.hosts) == 0 {
+		return ""
+	}
+	return "https://" + f.hosts[0]
+}
+func (f *fakeConnector) ReaderRank() int { return connectors.ReaderRankDefault }
 
 func TestRegistryRegisterListHealth(t *testing.T) {
 	r := connectors.NewRegistry()
@@ -58,22 +70,22 @@ func TestRegistryRegisterListHealth(t *testing.T) {
 
 func TestRegistryGetNormalizesKnownAliasAndFormatting(t *testing.T) {
 	r := connectors.NewRegistry()
-	if err := r.Register(&fakeConnector{key: "mangafire", name: "MangaFire", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "mangafire", name: "MangaFire", kind: connectors.KindNative, hosts: []string{"mangafire.to"}}); err != nil {
 		t.Fatalf("register mangafire: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "asuracomic", name: "AsuraComic", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "asuracomic", name: "AsuraComic", kind: connectors.KindNative, hosts: []string{"asuracomic.net", "asurascans.com"}}); err != nil {
 		t.Fatalf("register asuracomic: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "flamecomics", name: "FlameComics", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "flamecomics", name: "FlameComics", kind: connectors.KindNative, hosts: []string{"flamecomics.xyz"}}); err != nil {
 		t.Fatalf("register flamecomics: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "mgeko", name: "Mgeko", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "mgeko", name: "Mgeko", kind: connectors.KindNative, hosts: []string{"mgeko.cc"}}); err != nil {
 		t.Fatalf("register mgeko: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "webtoons", name: "WEBTOON", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "webtoons", name: "WEBTOON", kind: connectors.KindNative, hosts: []string{"webtoons.com"}}); err != nil {
 		t.Fatalf("register webtoons: %v", err)
 	}
-	if err := r.Register(&fakeConnector{key: "freewebnovel", name: "FreeWebNovel", kind: connectors.KindNative}); err != nil {
+	if err := r.Register(&fakeConnector{key: "freewebnovel", name: "FreeWebNovel", kind: connectors.KindNative, hosts: []string{"freewebnovel.com"}}); err != nil {
 		t.Fatalf("register freewebnovel: %v", err)
 	}
 

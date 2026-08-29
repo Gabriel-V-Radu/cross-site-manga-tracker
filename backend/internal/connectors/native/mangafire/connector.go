@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -41,29 +39,21 @@ type Connector struct {
 	httpClient  *http.Client
 	signer      *signer
 
-	requestMu          sync.Mutex
-	nextAllowedRequest time.Time
-	minRequestInterval time.Duration
-	cooldownUntil      time.Time
-	cooldownReason     string
-	// cooldownStreak counts cooldowns that reopened without a successful
-	// request in between, which is what escalates their duration. A site-wide
-	// Cloudflare challenge lasts hours to days; retrying it every 30 minutes
-	// re-confirms the same outage against every poll cycle, so each relapse
-	// doubles the cooldown up to maxCooldown instead.
-	cooldownStreak int
+	// breaker classifies outages the shared per-host throttle cannot see
+	// (Cloudflare challenges, token rejections) and escalates its cooldown on
+	// every relapse. Request pacing lives in the shared throttle: mangafire.to
+	// carries a widened host gap there, so the connector no longer paces on
+	// top of it.
+	breaker *connectors.EscalatingBreaker
 }
 
 func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     "https://mangafire.to",
 		allowedHost: []string{"mangafire.to"},
-		httpClient:  connectors.NewThrottledClient(12 * time.Second),
+		httpClient:  connectors.NewThrottledClient(),
 		signer:      newSigner(),
-		// Cloudflare on mangafire.to blocks IPs that burst requests, so the
-		// live connector paces itself much more conservatively than the
-		// local test servers need.
-		minRequestInterval: 1500 * time.Millisecond,
+		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 	}
 }
 
@@ -75,11 +65,11 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		allowedHost = []string{"mangafire.to"}
 	}
 	return &Connector{
-		baseURL:            strings.TrimRight(baseURL, "/"),
-		allowedHost:        allowedHost,
-		httpClient:         client,
-		signer:             newSigner(),
-		minRequestInterval: 150 * time.Millisecond,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		allowedHost: allowedHost,
+		httpClient:  client,
+		signer:      newSigner(),
+		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 	}
 }
 
@@ -215,12 +205,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	params := url.Values{}
 	params.Set("keyword", query)
@@ -245,7 +230,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -274,7 +259,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 
 	match := pickChapterEntry(chapters, chapter)
 	if match == nil {
-		return "", fmt.Errorf("chapter %s: %w", strconv.FormatFloat(chapter, 'f', -1, 64), connectors.ErrChapterNotFound)
+		return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 	}
 
 	if slug == "" {
@@ -285,7 +270,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		slug = detail.Slug
 	}
 
-	return "https://mangafire.to/title/" + titleKey(hid, slug) + "/" + strconv.FormatInt(match.ID, 10), nil
+	return c.canonicalBaseURL() + "/title/" + titleKey(hid, slug) + "/" + strconv.FormatInt(match.ID, 10), nil
 }
 
 // BuildChapterURL constructs the site's reader URL for a chapter without any
@@ -297,7 +282,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 // from a tracking-only source while mangafire.to sits behind a browser
 // challenge this server cannot pass but the reader's own browser can.
 func (c *Connector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", false
 	}
 
@@ -309,8 +294,8 @@ func (c *Connector) BuildChapterURL(rawURL string, chapter float64) (string, boo
 		slug = "title"
 	}
 
-	return "https://mangafire.to/read/" + slug + "." + hid + "/en/chapter-" +
-		strconv.FormatFloat(chapter, 'f', -1, 64), true
+	return c.canonicalBaseURL() + "/read/" + slug + "." + hid + "/en/chapter-" +
+		connectors.FormatChapter(chapter), true
 }
 
 // parseTitleURL extracts the title hid (and slug when present) from both the
@@ -453,7 +438,7 @@ func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*floa
 	// one that dates the release.
 	var releaseAt *time.Time
 	for _, entry := range chapters {
-		if !sameChapterNumber(entry.Number, latest) || entry.CreatedAt <= 0 {
+		if !connectors.SameChapter(entry.Number, latest) || entry.CreatedAt <= 0 {
 			continue
 		}
 		createdAt := time.Unix(entry.CreatedAt, 0).UTC()
@@ -469,7 +454,7 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 	key := titleKey(item.HID, item.Slug)
 	title := strings.TrimSpace(item.Title)
 	if title == "" {
-		title = prettifySlug(item.Slug)
+		title = connectors.PrettifySlug(item.Slug)
 	}
 
 	coverImageURL := ""
@@ -489,7 +474,7 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		SourceItemID:  key,
 		Title:         title,
 		RelatedTitles: buildRelatedTitles(title, item.Slug, item.AltTitles),
-		URL:           "https://mangafire.to/title/" + key,
+		URL:           c.canonicalBaseURL() + "/title/" + key,
 		CoverImageURL: coverImageURL,
 	}
 }
@@ -498,15 +483,11 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 // its input to chapterLanguage, so any match is one the reader can open.
 func pickChapterEntry(chapters []apiChapter, chapter float64) *apiChapter {
 	for index := range chapters {
-		if sameChapterNumber(chapters[index].Number, chapter) {
+		if connectors.SameChapter(chapters[index].Number, chapter) {
 			return &chapters[index]
 		}
 	}
 	return nil
-}
-
-func sameChapterNumber(a float64, b float64) bool {
-	return math.Abs(a-b) < 1e-9
 }
 
 func titleKey(hid string, slug string) string {
@@ -520,7 +501,7 @@ func titleKey(hid string, slug string) string {
 
 func buildRelatedTitles(title string, slug string, altTitles []string) []string {
 	candidates := make([]string, 0, len(altTitles)+1)
-	candidates = append(candidates, prettifySlug(slug))
+	candidates = append(candidates, connectors.PrettifySlug(slug))
 	candidates = append(candidates, searchutil.FilterEnglishAlphabetNames(altTitles)...)
 	candidates = searchutil.UniqueNonEmpty(candidates)
 
@@ -542,28 +523,12 @@ func buildRelatedTitles(title string, slug string, altTitles []string) []string 
 	return filtered
 }
 
-func prettifySlug(slug string) string {
-	slug = strings.TrimSpace(strings.ReplaceAll(slug, "-", " "))
-	if slug == "" {
-		return ""
-	}
-	parts := strings.Fields(slug)
-	for index := range parts {
-		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
-	}
-	return strings.Join(parts, " ")
-}
-
 func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if remaining, reason := c.CooldownRemaining(); remaining > 0 {
-			return fmt.Errorf("mangafire %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &httpStatusError{StatusCode: http.StatusTooManyRequests})
-		}
-
-		if err := c.waitForRequestWindow(ctx); err != nil {
-			return err
+			return fmt.Errorf("mangafire %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint})
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -577,17 +542,19 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		req.Header.Set("Referer", c.baseURL+"/")
 
+		// The response is handled by hand rather than through the shared fetch
+		// helpers because the error path needs the response headers and body
+		// (Retry-After, Cf-Mitigated, the token-rejection message) to classify
+		// what kind of 403 this was.
 		res, err := c.httpClient.Do(req)
 		if err != nil {
-			c.deferRequests(c.minRequestInterval)
 			return fmt.Errorf("request failed: %w", err)
 		}
 
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
-			rawBody, readErr := io.ReadAll(res.Body)
+			rawBody, readErr := connectors.ReadBodyLimited(res.Body, 0)
 			res.Body.Close()
-			c.deferRequests(c.minRequestInterval)
-			c.noteRequestSuccess()
+			c.breaker.NoteSuccess()
 			if readErr != nil {
 				return fmt.Errorf("read response body: %w", readErr)
 			}
@@ -597,7 +564,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 			return nil
 		}
 
-		statusErr := &httpStatusError{StatusCode: res.StatusCode}
+		statusErr := &connectors.HTTPStatusError{StatusCode: res.StatusCode, URL: endpoint}
 		retryAfter := res.Header.Get("Retry-After")
 		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		res.Body.Close()
@@ -610,7 +577,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 			// Cloudflare rate-limit; still back off to avoid hammering a
 			// rejection that will not clear until the bundle is refreshed.
 			if isTokenRejection(errBody) {
-				c.startCooldown(2*time.Minute, "signer token rejected (stale signer_bundle.js? see signer_bundle.README.md)")
+				c.breaker.Trip(2*time.Minute, "signer token rejected (stale signer_bundle.js? see signer_bundle.README.md)")
 				return fmt.Errorf("mangafire rejected request token (stale signer_bundle.js? see signer_bundle.README.md): %w", statusErr)
 			}
 			// A managed Cloudflare challenge is a site-wide configuration
@@ -619,13 +586,13 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 			// rate-limit cooldown so polling stays quiet, and name it precisely
 			// so it is not misread as a throttle that a retry would clear.
 			if isCloudflareChallenge(res.Header, errBody) {
-				c.startCooldown(30*time.Minute, "Cloudflare browser challenge — the site now requires interactive verification")
+				c.breaker.Trip(30*time.Minute, "Cloudflare browser challenge — the site now requires interactive verification")
 				return fmt.Errorf("mangafire is behind a Cloudflare browser challenge and cannot be fetched programmatically: %w", statusErr)
 			}
 			// Otherwise Cloudflare has rate limited the IP ("Access denied");
 			// retrying immediately only extends the block, so open the circuit
 			// and fail fast until the cooldown expires.
-			c.startCooldown(5*time.Minute, "rate limited")
+			c.breaker.Trip(5*time.Minute, "rate limited")
 			return statusErr
 		}
 
@@ -635,19 +602,21 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 				if delay < 2*time.Second {
 					delay = 2 * time.Second
 				}
-				c.deferRequests(delay)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
 				continue
 			}
-			c.startCooldown(2*time.Minute, "rate limited")
+			c.breaker.Trip(2*time.Minute, "rate limited")
 			return statusErr
 		}
-
-		c.deferRequests(c.minRequestInterval)
 
 		return statusErr
 	}
 
-	return &httpStatusError{StatusCode: http.StatusTooManyRequests}
+	return &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint}
 }
 
 // cooldownRelapseWindow is how soon after a cooldown expires a new one must
@@ -663,64 +632,7 @@ const maxCooldown = 6 * time.Hour
 
 // CooldownRemaining implements connectors.CooldownReporter.
 func (c *Connector) CooldownRemaining() (time.Duration, string) {
-	c.requestMu.Lock()
-	defer c.requestMu.Unlock()
-	return time.Until(c.cooldownUntil), c.cooldownReason
-}
-
-func (c *Connector) startCooldown(base time.Duration, reason string) {
-	now := time.Now().UTC()
-	c.requestMu.Lock()
-	defer c.requestMu.Unlock()
-
-	switch {
-	case now.Before(c.cooldownUntil):
-		// A request that was already in flight when the circuit opened; the
-		// same incident, not new evidence of the outage persisting.
-	case !c.cooldownUntil.IsZero() && now.Before(c.cooldownUntil.Add(cooldownRelapseWindow)):
-		c.cooldownStreak++
-	default:
-		c.cooldownStreak = 0
-	}
-
-	duration := escalatedCooldown(base, c.cooldownStreak)
-	until := now.Add(duration)
-	if until.After(c.cooldownUntil) {
-		c.cooldownUntil = until
-		c.cooldownReason = reason
-		if c.cooldownStreak > 0 {
-			c.cooldownReason = fmt.Sprintf("%s (still failing after %d cooldowns)", reason, c.cooldownStreak)
-		}
-	}
-}
-
-// escalatedCooldown doubles base once per relapse, capped at maxCooldown.
-func escalatedCooldown(base time.Duration, streak int) time.Duration {
-	duration := base
-	for i := 0; i < streak; i++ {
-		duration *= 2
-		if duration >= maxCooldown {
-			return maxCooldown
-		}
-	}
-	if duration > maxCooldown {
-		return maxCooldown
-	}
-	return duration
-}
-
-// noteRequestSuccess closes the breaker: the site answered, so any expired
-// cooldown record must not escalate the next one. Guarded against an active
-// cooldown so a slow success that raced the circuit opening cannot clear it.
-func (c *Connector) noteRequestSuccess() {
-	now := time.Now().UTC()
-	c.requestMu.Lock()
-	if !c.cooldownUntil.After(now) {
-		c.cooldownStreak = 0
-		c.cooldownUntil = time.Time{}
-		c.cooldownReason = ""
-	}
-	c.requestMu.Unlock()
+	return c.breaker.Remaining()
 }
 
 // isTokenRejection reports whether a 403 body is the API's vrf-token error
@@ -743,51 +655,6 @@ func isCloudflareChallenge(header http.Header, body []byte) bool {
 	return strings.Contains(lower, "just a moment") ||
 		strings.Contains(lower, "challenges.cloudflare.com") ||
 		strings.Contains(lower, "cf-challenge")
-}
-
-func (c *Connector) waitForRequestWindow(ctx context.Context) error {
-	for {
-		c.requestMu.Lock()
-		nextAllowed := c.nextAllowedRequest
-		c.requestMu.Unlock()
-
-		now := time.Now().UTC()
-		if !nextAllowed.After(now) {
-			return nil
-		}
-
-		wait := time.Until(nextAllowed)
-		if wait <= 0 {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
-	}
-}
-
-func (c *Connector) deferRequests(delay time.Duration) {
-	if delay <= 0 {
-		delay = c.minRequestInterval
-	}
-
-	next := time.Now().UTC().Add(delay)
-	c.requestMu.Lock()
-	if next.After(c.nextAllowedRequest) {
-		c.nextAllowedRequest = next
-	}
-	c.requestMu.Unlock()
-}
-
-type httpStatusError struct {
-	StatusCode int
-}
-
-func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("unexpected status: %d", e.StatusCode)
 }
 
 func computeRetryDelay(attempt int, retryAfter string) time.Duration {
@@ -814,12 +681,30 @@ func computeRetryDelay(attempt int, retryAfter string) time.Duration {
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: MangaFire is a readable
+// aggregator in the default tier.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankDefault
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on.
+// It is deliberately the production host rather than c.baseURL: c.baseURL is
+// where requests go (a test server in tests), while the URLs handed back are
+// stored in trackers and opened by the reader's browser, so they must always
+// point at the real site.
+func (c *Connector) canonicalBaseURL() string {
+	return "https://mangafire.to"
 }

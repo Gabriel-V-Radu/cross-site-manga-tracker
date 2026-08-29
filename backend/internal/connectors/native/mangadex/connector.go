@@ -1,10 +1,22 @@
+// Package mangadex reads MangaDex (mangadex.org) through its open, unsigned
+// JSON API at api.mangadex.org.
+//
+// Endpoints used:
+//   - GET /ping                                → liveness, answers plain text
+//   - GET /manga/{id}?includes[]=cover_art     → titles, alt titles, cover,
+//     and attributes.lastChapter
+//   - GET /manga?title=&limit=                 → search
+//   - GET /manga/{id}/feed?translatedLanguage[]=en&order[chapter]=desc
+//     → the English chapters, the only place release dates come from, and the
+//     chapter ids reader URLs are built from.
+//
+// Every feed read is English-scoped on purpose: MangaDex numbers chapters per
+// language, so an unscoped feed inflates the count with raw uploads.
 package mangadex
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -17,7 +29,30 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
+const (
+	canonicalSiteURL = "https://mangadex.org"
+	canonicalAPIURL  = "https://api.mangadex.org"
+	// coverCDNURL is a separate origin from the site on purpose: covers are
+	// served from the upload CDN, never from mangadex.org itself.
+	coverCDNURL = "https://uploads.mangadex.org"
+)
+
+// defaultHosts is the single list of hosts this connector claims, shared by the
+// constructors and by Hosts() so the registry's URL routing can never drift
+// from the URL-ownership check. One entry covers the whole site: the API
+// (api.mangadex.org) and the cover CDN (uploads.mangadex.org) are subdomains,
+// which HostAllowed matches, and mangadex.org has never moved domain.
+var defaultHosts = []string{"mangadex.org"}
+
 var titleIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
+
+// The two feed reads ask for different page sizes: resolving a chapter URL has
+// to find one specific number anywhere in the series, while tracking only needs
+// the newest ones.
+const (
+	chapterLookupFeedLimit = 500
+	latestChapterFeedLimit = 100
+)
 
 type Connector struct {
 	apiBaseURL  string
@@ -27,9 +62,9 @@ type Connector struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		apiBaseURL:  "https://api.mangadex.org",
-		allowedHost: []string{"mangadex.org"},
-		httpClient:  connectors.NewThrottledClient(10 * time.Second),
+		apiBaseURL:  canonicalAPIURL,
+		allowedHost: defaultHosts,
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -38,7 +73,7 @@ func NewConnectorWithOptions(apiBaseURL string, allowedHost []string, client *ht
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"mangadex.org"}
+		allowedHost = defaultHosts
 	}
 	return &Connector{apiBaseURL: strings.TrimRight(apiBaseURL, "/"), allowedHost: allowedHost, httpClient: client}
 }
@@ -61,14 +96,10 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 
-	res, err := c.httpClient.Do(req)
-	if err != nil {
+	// /ping answers "pong" in plain text, so the body is read only to be
+	// discarded; the status is the whole verdict.
+	if _, _, err := connectors.FetchBytes(c.httpClient, req, 0); err != nil {
 		return fmt.Errorf("request ping: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status: %d", res.StatusCode)
 	}
 
 	return nil
@@ -76,49 +107,17 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
 	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	titleID, err := c.parseTitleURL(trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to mangadex")
-	}
-
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "title" {
-		return nil, fmt.Errorf("mangadex url must match /title/{id}")
-	}
-
-	titleID := segments[1]
-	if !titleIDPattern.MatchString(titleID) {
-		return nil, fmt.Errorf("invalid mangadex title id")
+		return nil, err
 	}
 
 	values := url.Values{}
 	values.Add("includes[]", "cover_art")
-	mangaURL := c.apiBaseURL + "/manga/" + titleID + "?" + values.Encode()
-	apiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, mangaURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create api request: %w", err)
-	}
-
-	res, err := c.httpClient.Do(apiReq)
-	if err != nil {
-		return nil, fmt.Errorf("request manga by id: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("mangadex returned status %d", res.StatusCode)
-	}
 
 	var payload mangaByIDResponse
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode mangadex response: %w", err)
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+"/manga/"+titleID+"?"+values.Encode(), &payload); err != nil {
+		return nil, fmt.Errorf("fetch mangadex manga: %w", err)
 	}
 
 	title := pickBestTitle(payload.Data.Attributes.Title)
@@ -132,6 +131,12 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 	relatedTitles = removePrimaryTitle(relatedTitles, title)
 
+	// lastChapter outlives the English feed: a licensed series whose chapters
+	// were pulled, and a oneshot whose only chapter has a null number, keep
+	// serving a number here while the feed — the sole source of release dates —
+	// answers empty. Such a series legitimately comes back with a chapter and no
+	// LastUpdatedAt, which is what trackers.latest_chapter_seen_at exists to
+	// cover; attributes.updatedAt is not a substitute, it tracks metadata edits.
 	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
 	feedLatestChapter, latestReleaseAt, _ := c.fetchLatestChapterFromFeed(ctx, titleID)
 	if latestChapter == nil {
@@ -143,6 +148,10 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		SourceItemID:  payload.Data.ID,
 		Title:         title,
 		RelatedTitles: relatedTitles,
+		// The caller's own URL is echoed back rather than rebuilt from the id:
+		// MangaDex title URLs carry an optional trailing slug (/title/{id}/{slug})
+		// that users' stored links keep, and dropping it would rewrite every
+		// linked source on the next resolve.
 		URL:           trimmed,
 		CoverImageURL: pickCoverImageURL(payload.Data.ID, payload.Data.Relationships),
 		LatestChapter: latestChapter,
@@ -161,44 +170,20 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
-	requestLimit := limit * 4
-	if requestLimit < limit {
-		requestLimit = limit
-	}
-	if requestLimit > 50 {
-		requestLimit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
+	// The API is asked for a wider page than the caller wants because results
+	// are filtered against the query afterwards: MangaDex matches loosely, so a
+	// 1:1 page comes back short. 50 is the API's own per-page ceiling.
+	requestLimit := min(limit*4, 50)
 
 	values := url.Values{}
 	values.Set("title", query)
-	values.Set("limit", fmt.Sprintf("%d", requestLimit))
+	values.Set("limit", strconv.Itoa(requestLimit))
 	values.Add("includes[]", "cover_art")
 
-	searchURL := c.apiBaseURL + "/manga?" + values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create search request: %w", err)
-	}
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("search request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("mangadex returned status %d", res.StatusCode)
-	}
-
 	var payload mangaSearchResponse
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode search response: %w", err)
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+"/manga?"+values.Encode(), &payload); err != nil {
+		return nil, fmt.Errorf("search mangadex titles: %w", err)
 	}
 
 	items := make([]connectors.MangaResult, 0, min(limit, len(payload.Data)))
@@ -231,7 +216,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceItemID:  item.ID,
 			Title:         bestTitle,
 			RelatedTitles: englishRelatedTitles,
-			URL:           "https://mangadex.org/title/" + item.ID,
+			URL:           c.canonicalBaseURL() + "/title/" + item.ID,
 			CoverImageURL: pickCoverImageURL(item.ID, item.Relationships),
 			LatestChapter: latestChapter,
 		})
@@ -245,10 +230,43 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
+	titleID, err := c.parseTitleURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	var payload mangaFeedResponse
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(titleID, chapterLookupFeedLimit), &payload); err != nil {
+		return "", fmt.Errorf("fetch mangadex feed: %w", err)
+	}
+
+	for _, chapterItem := range payload.Data {
+		parsedChapter := parseChapterNumber(chapterItem.Attributes.Chapter)
+		if parsedChapter == nil {
+			continue
+		}
+		if !connectors.SameChapter(*parsedChapter, chapter) {
+			continue
+		}
+
+		chapterID := strings.TrimSpace(chapterItem.ID)
+		if chapterID == "" {
+			continue
+		}
+
+		return c.canonicalBaseURL() + "/chapter/" + chapterID, nil
+	}
+
+	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
+}
+
+// parseTitleURL extracts the title id from a series URL (/title/{id} with an
+// optional trailing slug segment).
+func (c *Connector) parseTitleURL(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return "", fmt.Errorf("url is required")
@@ -272,67 +290,37 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("invalid mangadex title id")
 	}
 
-	values := url.Values{}
-	values.Set("limit", "500")
-	values.Set("offset", "0")
-	values.Set("order[chapter]", "desc")
-	values.Set("includeExternalUrl", "0")
-	values.Add("translatedLanguage[]", "en")
-	values.Add("contentRating[]", "safe")
-	values.Add("contentRating[]", "suggestive")
-	values.Add("contentRating[]", "erotica")
-	values.Add("contentRating[]", "pornographic")
-
-	feedURL := c.apiBaseURL + "/manga/" + titleID + "/feed?" + values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("create feed request: %w", err)
-	}
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request feed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
-	}
-
-	var payload mangaFeedResponse
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode feed response: %w", err)
-	}
-
-	for _, chapterItem := range payload.Data {
-		parsedChapter := parseChapterNumber(chapterItem.Attributes.Chapter)
-		if parsedChapter == nil {
-			continue
-		}
-		if math.Abs(*parsedChapter-chapter) > 1e-9 {
-			continue
-		}
-
-		chapterID := strings.TrimSpace(chapterItem.ID)
-		if chapterID == "" {
-			continue
-		}
-
-		return "https://mangadex.org/chapter/" + chapterID, nil
-	}
-
-	return "", fmt.Errorf("chapter %.3f not found", chapter)
+	return titleID, nil
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo. The API and cover hosts are subdomains
+// of the site domain, so the one entry covers them.
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: MangaDex is a readable site in the
+// default tier — its own reader is fine, but scanlations reach it after the
+// origin sites and it freezes on licensed series.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankDefault
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on. It
+// is deliberately the production site rather than c.apiBaseURL: the API host is
+// where requests go (a test server in tests) and never serves pages, while the
+// URLs handed back are stored in trackers and opened by the reader's browser.
+func (c *Connector) canonicalBaseURL() string {
+	return canonicalSiteURL
 }
 
 func pickBestTitle(titleMap map[string]string) string {
@@ -419,7 +407,7 @@ func pickCoverImageURL(mangaID string, relationships []mangaRelationship) string
 		if fileName == "" {
 			continue
 		}
-		return "https://uploads.mangadex.org/covers/" + mangaID + "/" + fileName + ".256.jpg"
+		return coverCDNURL + "/covers/" + mangaID + "/" + fileName + ".256.jpg"
 	}
 
 	return ""
@@ -432,7 +420,7 @@ func parseChapterNumber(raw string) *float64 {
 	}
 
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
+	if err != nil || !connectors.ValidChapter(parsed) {
 		return nil
 	}
 
@@ -444,36 +432,9 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 		return nil, nil, nil
 	}
 
-	values := url.Values{}
-	values.Set("limit", "100")
-	values.Set("offset", "0")
-	values.Set("order[chapter]", "desc")
-	values.Set("includeExternalUrl", "0")
-	values.Add("translatedLanguage[]", "en")
-	values.Add("contentRating[]", "safe")
-	values.Add("contentRating[]", "suggestive")
-	values.Add("contentRating[]", "erotica")
-	values.Add("contentRating[]", "pornographic")
-
-	feedURL := c.apiBaseURL + "/manga/" + mangaID + "/feed?" + values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create feed request: %w", err)
-	}
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("request feed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("mangadex feed returned status %d", res.StatusCode)
-	}
-
 	var payload mangaFeedResponse
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, nil, fmt.Errorf("decode feed response: %w", err)
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(mangaID, latestChapterFeedLimit), &payload); err != nil {
+		return nil, nil, fmt.Errorf("fetch mangadex feed: %w", err)
 	}
 
 	var latest *float64
@@ -485,7 +446,7 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 		}
 		if latest == nil || *parsed > *latest {
 			latest = parsed
-			latestReleaseAt = parseOptionalRFC3339Time(
+			latestReleaseAt = parseChapterTime(
 				chapter.Attributes.PublishAt,
 				chapter.Attributes.ReadableAt,
 				chapter.Attributes.CreatedAt,
@@ -496,16 +457,33 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 	return latest, latestReleaseAt, nil
 }
 
-func parseOptionalRFC3339Time(values ...string) *time.Time {
+// feedURL builds a chapter feed request. Both callers share one builder so the
+// filters stay identical: English only, external-only chapters excluded because
+// they have no MangaDex page to link to, and every content rating listed
+// because the API's default set hides erotica and pornographic entries, which
+// would silently report a stale latest chapter for those series.
+func (c *Connector) feedURL(mangaID string, limit int) string {
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(limit))
+	values.Set("offset", "0")
+	values.Set("order[chapter]", "desc")
+	values.Set("includeExternalUrl", "0")
+	values.Add("translatedLanguage[]", "en")
+	values.Add("contentRating[]", "safe")
+	values.Add("contentRating[]", "suggestive")
+	values.Add("contentRating[]", "erotica")
+	values.Add("contentRating[]", "pornographic")
+
+	return c.apiBaseURL + "/manga/" + mangaID + "/feed?" + values.Encode()
+}
+
+// parseChapterTime takes the first timestamp MangaDex actually filled in:
+// publishAt is the release, readableAt and createdAt are the fallbacks older
+// entries carry.
+func parseChapterTime(values ...string) *time.Time {
 	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		parsed, err := time.Parse(time.RFC3339, trimmed)
-		if err == nil {
-			utc := parsed.UTC()
-			return &utc
+		if parsed := connectors.ParseFirstTime(value, time.RFC3339); parsed != nil {
+			return parsed
 		}
 	}
 	return nil

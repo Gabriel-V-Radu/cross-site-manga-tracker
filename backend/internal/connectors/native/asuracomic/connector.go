@@ -2,11 +2,8 @@ package asuracomic
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html"
-	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -19,10 +16,14 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
+// defaultAllowedHosts is the one list behind both the constructors' default and
+// Hosts(): asuracomic.net is the current domain and asurascans.com the one
+// trackers were linked on before the move, so URLs stored in either era still
+// resolve to this connector.
+var defaultAllowedHosts = []string{"asurascans.com", "asuracomic.net"}
+
 var (
 	seriesHrefPattern                = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/?(?:series|comics)/([a-z0-9-]+)["']`)
-	htmlTagPattern                   = regexp.MustCompile(`(?is)<[^>]+>`)
-	whitespacePattern                = regexp.MustCompile(`\s+`)
 	chapterHrefPattern               = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
 	chapterPublishedEscPattern       = regexp.MustCompile(`(?is)\\"name\\":\s*(\d+(?:\.\d+)?).*?\\"published_at\\":\\"([^\\"]+)\\"`)
 	chapterPublishedRawPattern       = regexp.MustCompile(`(?is)"name":\s*(\d+(?:\.\d+)?).*?"published_at":"([^"]+)"`)
@@ -36,18 +37,6 @@ var (
 	monthDayOrdinalYearPattern       = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
 )
 
-type httpStatusError struct {
-	statusCode int
-}
-
-func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("unexpected status: %d", e.statusCode)
-}
-
-func (e *httpStatusError) StatusCode() int {
-	return e.statusCode
-}
-
 type Connector struct {
 	baseURL     string
 	allowedHost []string
@@ -57,8 +46,8 @@ type Connector struct {
 func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     "https://asurascans.com",
-		allowedHost: []string{"asurascans.com", "asuracomic.net"},
-		httpClient:  connectors.NewThrottledClient(12 * time.Second),
+		allowedHost: defaultAllowedHosts,
+		httpClient:  connectors.NewThrottledClient(),
 	}
 }
 
@@ -67,7 +56,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		client = &http.Client{Timeout: 12 * time.Second}
 	}
 	if len(allowedHost) == 0 {
-		allowedHost = []string{"asurascans.com", "asuracomic.net"}
+		allowedHost = defaultAllowedHosts
 	}
 	return &Connector{baseURL: strings.TrimRight(baseURL, "/"), allowedHost: allowedHost, httpClient: client}
 }
@@ -127,12 +116,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("title is required")
 	}
 
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit = connectors.ClampSearchLimit(limit)
 
 	body, err := c.fetchPage(ctx, c.searchPageURL(title))
 	if err != nil {
@@ -173,7 +157,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 }
 
 func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter <= 0 {
+	if !connectors.ValidChapter(chapter) {
 		return "", fmt.Errorf("invalid chapter")
 	}
 
@@ -222,11 +206,11 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	if result.LatestChapter == nil {
 		return "", fmt.Errorf("no chapters listed for %s", seriesID)
 	}
-	chapterSegment := strconv.FormatFloat(chapter, 'f', -1, 64)
+	chapterSegment := connectors.FormatChapter(chapter)
 	if chapter > *result.LatestChapter {
 		return "", fmt.Errorf("chapter %s beyond latest %s: %w",
 			chapterSegment,
-			strconv.FormatFloat(*result.LatestChapter, 'f', -1, 64),
+			connectors.FormatChapter(*result.LatestChapter),
 			connectors.ErrChapterNotFound)
 	}
 
@@ -238,7 +222,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 	if err == nil {
 		return result, nil
 	}
-	if !isHTTPStatus(err, http.StatusNotFound) {
+	if !connectors.IsNotFound(err) {
 		return nil, err
 	}
 
@@ -324,50 +308,37 @@ func (c *Connector) searchPageURL(query string) string {
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", &httpStatusError{statusCode: res.StatusCode}
-	}
-
-	rawBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
-	}
-
-	return string(rawBody), nil
-}
-
-func isHTTPStatus(err error, statusCode int) bool {
-	var statusErr *httpStatusError
-	if !errors.As(err, &statusErr) {
-		return false
-	}
-	return statusErr.StatusCode() == statusCode
+	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
 }
 
 func (c *Connector) isAllowedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	for _, allowed := range c.allowedHost {
-		allowed = strings.ToLower(strings.TrimSpace(allowed))
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
+	return connectors.HostAllowed(host, c.allowedHost)
+}
+
+// Hosts implements connectors.SiteInfo (see defaultAllowedHosts for why the
+// pre-move domain is still claimed).
+func (c *Connector) Hosts() []string {
+	return c.allowedHost
+}
+
+// HomeURL implements connectors.SiteInfo.
+func (c *Connector) HomeURL() string {
+	return c.canonicalBaseURL()
+}
+
+// ReaderRank implements connectors.SiteInfo: Asura is an origin scanlator —
+// for its own series chapters appear here before any aggregator mirrors them.
+func (c *Connector) ReaderRank() int {
+	return connectors.ReaderRankOrigin
+}
+
+// canonicalBaseURL is the origin every returned or stored URL is built on.
+// Unlike the other scrapers it follows c.baseURL instead of a pinned
+// production constant: Asura has already moved domain once, so the base is the
+// single place that choice is made, and a stored link must point at the same
+// origin the connector verified the chapter on.
+func (c *Connector) canonicalBaseURL() string {
+	return c.baseURL
 }
 
 func (c *Connector) absoluteURL(raw string) string {
@@ -382,9 +353,9 @@ func (c *Connector) absoluteURL(raw string) string {
 		return "https:" + trimmed
 	}
 	if strings.HasPrefix(trimmed, "/") {
-		return c.baseURL + trimmed
+		return c.canonicalBaseURL() + trimmed
 	}
-	return c.baseURL + "/" + trimmed
+	return c.canonicalBaseURL() + "/" + trimmed
 }
 
 func collectUniqueSeriesIDs(body string) []string {
@@ -423,7 +394,7 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 		if len(match) < 2 {
 			continue
 		}
-		candidate := cleanText(match[1])
+		candidate := connectors.CleanText(match[1])
 		if candidate == "" || strings.EqualFold(candidate, "poster") || strings.EqualFold(candidate, "image") {
 			continue
 		}
@@ -438,9 +409,9 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 }
 
 func extractTitle(body string) string {
-	title := strings.TrimSpace(html.UnescapeString(firstSubmatch(metaTitlePattern, body)))
+	title := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaTitlePattern, body)))
 	if title == "" {
-		title = strings.TrimSpace(html.UnescapeString(cleanText(firstSubmatch(titleTagPattern, body))))
+		title = strings.TrimSpace(html.UnescapeString(connectors.CleanText(connectors.FirstSubmatch(titleTagPattern, body))))
 	}
 	if title == "" {
 		return ""
@@ -453,12 +424,12 @@ func extractTitle(body string) string {
 }
 
 func extractCoverImageURL(body string) string {
-	renderedCover := strings.TrimSpace(html.UnescapeString(firstSubmatch(renderedCoverPattern, body)))
+	renderedCover := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(renderedCoverPattern, body)))
 	if renderedCover != "" {
 		return renderedCover
 	}
 
-	return strings.TrimSpace(html.UnescapeString(firstSubmatch(metaImagePattern, body)))
+	return strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body)))
 }
 
 func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {
@@ -484,7 +455,7 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 
 		chapterRaw := body[loc[2]:loc[3]]
 		parsedChapter, chapterErr := strconv.ParseFloat(strings.TrimSpace(chapterRaw), 64)
-		if chapterErr != nil {
+		if chapterErr != nil || !connectors.ValidChapter(parsedChapter) {
 			continue
 		}
 
@@ -524,7 +495,7 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 }
 
 func extractLastUpdatedAt(body string) *time.Time {
-	raw := strings.TrimSpace(firstSubmatch(updatedOnPattern, body))
+	raw := strings.TrimSpace(connectors.FirstSubmatch(updatedOnPattern, body))
 	if raw != "" {
 		if parsed := parseAsuraDate(raw); parsed != nil {
 			return parsed
@@ -553,7 +524,10 @@ func parseAsuraDate(raw string) *time.Time {
 		return nil
 	}
 
-	normalized := fmt.Sprintf("%s %s %s", strings.Title(strings.ToLower(matches[1])), matches[2], matches[3])
+	// time.Parse only accepts the canonical month spelling ("February", "Feb")
+	// while the page renders months in whatever case its template feels like,
+	// so the captured month is lowercased and re-capitalized before parsing.
+	normalized := fmt.Sprintf("%s %s %s", connectors.PrettifySlug(strings.ToLower(matches[1])), matches[2], matches[3])
 	parsed, err := time.Parse("January 2 2006", normalized)
 	if err != nil {
 		parsed, err = time.Parse("Jan 2 2006", normalized)
@@ -566,7 +540,7 @@ func parseAsuraDate(raw string) *time.Time {
 }
 
 func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
-	if math.IsNaN(chapter) || math.IsInf(chapter, 0) || chapter < 0 {
+	if !connectors.ValidChapter(chapter) {
 		return nil
 	}
 
@@ -578,7 +552,7 @@ func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
 			}
 
 			parsedChapter, err := strconv.ParseFloat(strings.TrimSpace(match[1]), 64)
-			if err != nil || math.Abs(parsedChapter-chapter) > 1e-9 {
+			if err != nil || !connectors.SameChapter(parsedChapter, chapter) {
 				continue
 			}
 
@@ -592,21 +566,7 @@ func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
 }
 
 func parseAsuraPublishedAt(raw string) *time.Time {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		parsed, err := time.Parse(layout, trimmed)
-		if err != nil {
-			continue
-		}
-		utc := parsed.UTC()
-		return &utc
-	}
-
-	return nil
+	return connectors.ParseFirstTime(raw, time.RFC3339Nano, time.RFC3339)
 }
 
 func isValidSeriesID(seriesID string) bool {
@@ -620,24 +580,11 @@ func isValidSeriesID(seriesID string) bool {
 }
 
 func prettifySeriesID(seriesID string) string {
-	trimmed := strings.TrimSpace(seriesID)
-	if trimmed == "" {
+	pretty := connectors.PrettifySlug(seriesID)
+	if pretty == "" {
 		return "Untitled"
 	}
-
-	trimmed = strings.ReplaceAll(trimmed, "-", " ")
-	parts := strings.Fields(trimmed)
-	for index, part := range parts {
-		parts[index] = strings.Title(part)
-	}
-	return strings.Join(parts, " ")
-}
-
-func cleanText(raw string) string {
-	text := htmlTagPattern.ReplaceAllString(raw, " ")
-	text = html.UnescapeString(text)
-	text = whitespacePattern.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
+	return pretty
 }
 
 func parseSeriesIDFromPath(rawPath string) (string, string, error) {
@@ -698,12 +645,4 @@ func looksLikeHashedSuffix(suffix string) bool {
 	}
 
 	return hasLetter && hasDigit
-}
-
-func firstSubmatch(pattern *regexp.Regexp, raw string) string {
-	matches := pattern.FindStringSubmatch(raw)
-	if len(matches) < 2 {
-		return ""
-	}
-	return matches[1]
 }
