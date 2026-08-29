@@ -22,6 +22,7 @@ type fakeRepo struct {
 	updatedCurrentURL   string
 	clearedReleaseAt    bool
 	updatedPendingLower *float64
+	markedChecked       []int64
 }
 
 func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
@@ -39,6 +40,11 @@ func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
 	f.updatedCurrentURL = update.CurrentSourceURL
 	f.clearedReleaseAt = update.ClearLatestReleaseAt
 	f.updatedPendingLower = update.PendingLowerChapter
+	return nil
+}
+
+func (f *fakeRepo) MarkPollCheckedAt(trackerID int64, _ time.Time) error {
+	f.markedChecked = append(f.markedChecked, trackerID)
 	return nil
 }
 
@@ -837,6 +843,127 @@ func TestPollerRunOnce_NoUpdateWhenPrimaryFailsWithoutAlternates(t *testing.T) {
 
 	if repo.updatedCount != 0 {
 		t.Fatalf("expected no update when the only source fails, got %d", repo.updatedCount)
+	}
+	// The attempt itself must still be stamped: a tracker whose only source is
+	// dark would otherwise never age into the idle skip and would be retried
+	// in full every cycle for the whole outage.
+	if len(repo.markedChecked) != 1 || repo.markedChecked[0] != 1 {
+		t.Fatalf("expected the failed check to stamp last_checked_at, got %v", repo.markedChecked)
+	}
+}
+
+// coolingConnector declares itself cooling down and counts resolve calls, so a
+// test can prove the poller refused the request locally instead of asking a
+// site it already knows is dark.
+type coolingConnector struct {
+	key      string
+	resolves int
+}
+
+func (c *coolingConnector) Key() string                       { return c.key }
+func (c *coolingConnector) Name() string                      { return c.key }
+func (c *coolingConnector) Kind() string                      { return connectors.KindNative }
+func (c *coolingConnector) HealthCheck(context.Context) error { return nil }
+func (c *coolingConnector) CooldownRemaining() (time.Duration, string) {
+	return 5 * time.Minute, "rate limited"
+}
+func (c *coolingConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (c *coolingConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	c.resolves++
+	return nil, errors.New("resolve must not be called while cooling down")
+}
+
+// TestPollerRunOnce_SkipsCoolingDownPrimaryAndFallsBack pins the cooldown
+// short-circuit: a primary that reports itself cooling down is never asked,
+// and the tracker still advances from its alternates exactly as it would had
+// the request been made and failed.
+func TestPollerRunOnce_SkipsCoolingDownPrimaryAndFallsBack(t *testing.T) {
+	prev := 10.0
+	next := 12.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://cooling/series",
+		SourceKey:          "coolingsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	cooling := &coolingConnector{key: "coolingsource"}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(cooling); err != nil {
+		t.Fatalf("register cooling connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &next,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if cooling.resolves != 0 {
+		t.Fatalf("expected the cooling-down primary never to be asked, got %d resolves", cooling.resolves)
+	}
+	if repo.updatedCount != 1 || repo.updatedLatest == nil || *repo.updatedLatest != next {
+		t.Fatalf("expected the fallback to advance the chapter to %.1f, got count=%d latest=%#v", next, repo.updatedCount, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 9 {
+		t.Fatalf("expected the mirror to be recorded as the reporter, got %#v", repo.updatedLatestSource)
+	}
+}
+
+// TestPollerRunOnce_SkipsCoolingDownAlternate proves the same short-circuit
+// applies inside the fallback sweep: a cooling-down alternate cedes to the
+// others without being asked.
+func TestPollerRunOnce_SkipsCoolingDownAlternate(t *testing.T) {
+	prev := 10.0
+	next := 12.0
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &prev,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "coolingsource", SourceURL: "https://cooling/series"},
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	cooling := &coolingConnector{key: "coolingsource"}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(cooling); err != nil {
+		t.Fatalf("register cooling connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &next,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if cooling.resolves != 0 {
+		t.Fatalf("expected the cooling-down alternate never to be asked, got %d resolves", cooling.resolves)
+	}
+	if repo.updatedLatest == nil || *repo.updatedLatest != next {
+		t.Fatalf("expected the live mirror's chapter %.1f, got %#v", next, repo.updatedLatest)
 	}
 }
 

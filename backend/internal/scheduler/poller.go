@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -20,6 +21,7 @@ const pollResolveTimeout = 30 * time.Second
 type pollRepository interface {
 	ListForPolling() ([]repository.PollingTracker, error)
 	UpdatePollingState(update repository.PollingUpdate) error
+	MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error
 }
 
 type Poller struct {
@@ -116,6 +118,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 
 	skippedIdle := 0
+	coolingResolves := 0
 	for _, tracker := range trackers {
 		if p.shouldSkipIdle(tracker) {
 			skippedIdle++
@@ -128,14 +131,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			continue
 		}
 
-		// The budget covers the shared throttle's slot wait too: a host with a
-		// widened gap (api.comick.dev at 3.5s) plus a burst of dashboard-driven
-		// requests can queue a resolve for >15s, and a poll that gives up then
-		// hands the answer to a staler mirror. The poller is a background loop,
-		// so waiting longer costs nothing.
-		requestCtx, cancel := context.WithTimeout(ctx, pollResolveTimeout)
-		result, resolveErr := connector.ResolveByURL(requestCtx, tracker.SourceURL)
-		cancel()
+		result, resolveErr := p.resolveSource(ctx, connector, tracker.SourceURL)
 
 		// A source can go dark for reasons no retry fixes — a site put behind an
 		// interactive bot challenge, a domain that moved. When that happens, poll
@@ -157,7 +153,23 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		}
 
 		if resolveErr != nil {
-			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+			// A cooling-down source is a known, already-logged outage; one Warn
+			// per tracker per cycle for it is noise, and the cycle summary below
+			// reports the count. Anything else is worth a line of its own.
+			var cooling *connectors.SourceCoolingDownError
+			if errors.As(resolveErr, &cooling) {
+				coolingResolves++
+				p.logger.Debug("poll resolve skipped: source cooling down", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+			} else {
+				p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+			}
+			// A failed check is still a check. Without stamping it, a non-reading
+			// tracker whose sources are all dark keeps last_checked_at frozen, so
+			// shouldSkipIdle can never defer it and the poller retries it in full
+			// every cycle for as long as the outage lasts.
+			if err := p.repo.MarkPollCheckedAt(tracker.ID, time.Now().UTC()); err != nil {
+				p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
+			}
 			continue
 		}
 
@@ -272,8 +284,37 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	if skippedIdle > 0 {
 		p.logger.Debug("poll skipped idle trackers", "count", skippedIdle)
 	}
+	if coolingResolves > 0 {
+		p.logger.Info("poll cycle hit cooling-down sources", "resolvesRefused", coolingResolves)
+	}
 
 	return nil
+}
+
+// resolveSource asks a connector for a series — unless the connector already
+// declared itself cooling down, in which case the call is refused locally.
+// The connector would fail such a request fast anyway; asking first spares
+// the doomed round through URL parsing and the signer, and returns the same
+// SourceCoolingDownError the shared throttle uses, so the caller classifies
+// both breakers identically.
+func (p *Poller) resolveSource(ctx context.Context, connector connectors.Connector, rawURL string) (*connectors.MangaResult, error) {
+	if reporter, ok := connector.(connectors.CooldownReporter); ok {
+		if remaining, reason := reporter.CooldownRemaining(); remaining > 0 {
+			return nil, fmt.Errorf("%s: %w", reason, &connectors.SourceCoolingDownError{
+				Host:       connector.Key(),
+				RetryAfter: remaining,
+			})
+		}
+	}
+
+	// The budget covers the shared throttle's slot wait too: a host with a
+	// widened gap (api.comick.dev at 3.5s) plus a burst of dashboard-driven
+	// requests can queue a resolve for >15s, and a poll that gives up then
+	// hands the answer to a staler mirror. The poller is a background loop,
+	// so waiting longer costs nothing.
+	requestCtx, cancel := context.WithTimeout(ctx, pollResolveTimeout)
+	defer cancel()
+	return connector.ResolveByURL(requestCtx, rawURL)
 }
 
 // chapterOutcome is what a poll decides to record for a tracker's chapter
@@ -392,10 +433,7 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 			continue
 		}
 
-		requestCtx, cancel := context.WithTimeout(ctx, pollResolveTimeout)
-		result, err := connector.ResolveByURL(requestCtx, source.SourceURL)
-		cancel()
-
+		result, err := p.resolveSource(ctx, connector, source.SourceURL)
 		if err != nil {
 			p.logger.Debug("poll fallback source failed",
 				"trackerId", tracker.ID, "sourceKey", source.SourceKey, "error", err)

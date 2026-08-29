@@ -42,6 +42,17 @@ type ChapterURLResolver interface {
 	ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error)
 }
 
+// CooldownReporter is implemented by connectors that keep their own circuit
+// breaker (MangaFire classifies Cloudflare responses the shared per-host
+// throttle cannot see). CooldownRemaining returns how much longer the
+// connector will refuse requests and why; zero or negative means it is
+// accepting requests. The poller consults it before resolving so a site known
+// to be dark is skipped outright instead of burning a doomed request — and a
+// log line — per tracker.
+type CooldownReporter interface {
+	CooldownRemaining() (time.Duration, string)
+}
+
 // OfflineChapterLinker builds a best-effort reader URL for a chapter from the
 // series URL alone, without touching the network. It exists for sites whose
 // reader URL scheme is derivable but whose API sits behind a bot challenge

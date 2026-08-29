@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
@@ -366,6 +367,19 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 	}
 
 	return alternates, nil
+}
+
+// MarkPollCheckedAt records that a poll cycle attempted this tracker even
+// though no source answered. It touches nothing but last_checked_at — no
+// chapter data, and not updated_at, since nothing about the tracker's content
+// changed. Without this stamp a tracker whose sources are all dark can never
+// become idle-skippable, and the poller retries it in full every cycle for as
+// long as the outage lasts.
+func (r *TrackerRepository) MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error {
+	if _, err := r.db.Exec(`UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
+		return fmt.Errorf("mark poll checked: %w", err)
+	}
+	return nil
 }
 
 func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) error {

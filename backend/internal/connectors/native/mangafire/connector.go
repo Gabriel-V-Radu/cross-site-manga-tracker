@@ -46,6 +46,12 @@ type Connector struct {
 	minRequestInterval time.Duration
 	cooldownUntil      time.Time
 	cooldownReason     string
+	// cooldownStreak counts cooldowns that reopened without a successful
+	// request in between, which is what escalates their duration. A site-wide
+	// Cloudflare challenge lasts hours to days; retrying it every 30 minutes
+	// re-confirms the same outage against every poll cycle, so each relapse
+	// doubles the cooldown up to maxCooldown instead.
+	cooldownStreak int
 }
 
 func NewConnector() *Connector {
@@ -552,7 +558,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	const maxAttempts = 3
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if remaining, reason := c.cooldownRemaining(); remaining > 0 {
+		if remaining, reason := c.CooldownRemaining(); remaining > 0 {
 			return fmt.Errorf("mangafire %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &httpStatusError{StatusCode: http.StatusTooManyRequests})
 		}
 
@@ -581,6 +587,7 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 			rawBody, readErr := io.ReadAll(res.Body)
 			res.Body.Close()
 			c.deferRequests(c.minRequestInterval)
+			c.noteRequestSuccess()
 			if readErr != nil {
 				return fmt.Errorf("read response body: %w", readErr)
 			}
@@ -643,18 +650,75 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	return &httpStatusError{StatusCode: http.StatusTooManyRequests}
 }
 
-func (c *Connector) cooldownRemaining() (time.Duration, string) {
+// cooldownRelapseWindow is how soon after a cooldown expires a new one must
+// open to count as the same outage. It has to outlast a full poll interval
+// (30 minutes) plus a cycle's runtime, or the streak would reset between the
+// cooldown expiring and the poller's next attempt at the site.
+const cooldownRelapseWindow = 90 * time.Minute
+
+// maxCooldown caps the escalation. Long enough that a multi-day challenge
+// costs a handful of probes per day, short enough that the connector notices
+// the site coming back within one sitting.
+const maxCooldown = 6 * time.Hour
+
+// CooldownRemaining implements connectors.CooldownReporter.
+func (c *Connector) CooldownRemaining() (time.Duration, string) {
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
 	return time.Until(c.cooldownUntil), c.cooldownReason
 }
 
-func (c *Connector) startCooldown(duration time.Duration, reason string) {
-	until := time.Now().UTC().Add(duration)
+func (c *Connector) startCooldown(base time.Duration, reason string) {
+	now := time.Now().UTC()
 	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+
+	switch {
+	case now.Before(c.cooldownUntil):
+		// A request that was already in flight when the circuit opened; the
+		// same incident, not new evidence of the outage persisting.
+	case !c.cooldownUntil.IsZero() && now.Before(c.cooldownUntil.Add(cooldownRelapseWindow)):
+		c.cooldownStreak++
+	default:
+		c.cooldownStreak = 0
+	}
+
+	duration := escalatedCooldown(base, c.cooldownStreak)
+	until := now.Add(duration)
 	if until.After(c.cooldownUntil) {
 		c.cooldownUntil = until
 		c.cooldownReason = reason
+		if c.cooldownStreak > 0 {
+			c.cooldownReason = fmt.Sprintf("%s (still failing after %d cooldowns)", reason, c.cooldownStreak)
+		}
+	}
+}
+
+// escalatedCooldown doubles base once per relapse, capped at maxCooldown.
+func escalatedCooldown(base time.Duration, streak int) time.Duration {
+	duration := base
+	for i := 0; i < streak; i++ {
+		duration *= 2
+		if duration >= maxCooldown {
+			return maxCooldown
+		}
+	}
+	if duration > maxCooldown {
+		return maxCooldown
+	}
+	return duration
+}
+
+// noteRequestSuccess closes the breaker: the site answered, so any expired
+// cooldown record must not escalate the next one. Guarded against an active
+// cooldown so a slow success that raced the circuit opening cannot clear it.
+func (c *Connector) noteRequestSuccess() {
+	now := time.Now().UTC()
+	c.requestMu.Lock()
+	if !c.cooldownUntil.After(now) {
+		c.cooldownStreak = 0
+		c.cooldownUntil = time.Time{}
+		c.cooldownReason = ""
 	}
 	c.requestMu.Unlock()
 }
