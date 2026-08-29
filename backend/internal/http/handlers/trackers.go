@@ -66,6 +66,7 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 
 	exists, err := h.repo.SourceExists(tracker.SourceID)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
 	}
 	if !exists {
@@ -76,6 +77,7 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 
 	created, err := h.repo.Create(tracker)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to create tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to create tracker"})
 	}
 
@@ -104,6 +106,7 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 
 	trackers, err := h.repo.List(options)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to list trackers", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to list trackers"})
 	}
 
@@ -123,6 +126,7 @@ func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
 
 	tracker, err := h.repo.GetByID(profile.ID, id)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to get tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to get tracker"})
 	}
 	if tracker == nil {
@@ -155,6 +159,7 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 
 	exists, err := h.repo.SourceExists(tracker.SourceID)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
 	}
 	if !exists {
@@ -165,6 +170,7 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 
 	updated, err := h.repo.Update(profile.ID, id, tracker)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to update tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to update tracker"})
 	}
 	if updated == nil {
@@ -187,6 +193,7 @@ func (h *TrackersHandler) Delete(c *fiber.Ctx) error {
 
 	deleted, err := h.repo.Delete(profile.ID, id)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to delete tracker", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to delete tracker"})
 	}
 	if !deleted {

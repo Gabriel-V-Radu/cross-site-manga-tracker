@@ -19,7 +19,7 @@ import (
 func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -48,7 +48,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	totalTrackers, err := h.trackerRepo.Count(listOptions)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load trackers", err)
 	}
 
 	totalPages := int(math.Ceil(float64(totalTrackers) / float64(pageSize)))
@@ -67,23 +67,23 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	items, err := h.trackerRepo.List(listOptions)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load trackers")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load trackers", err)
 	}
 
 	hasNextPage := page < totalPages
 	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
 	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
 	sources, err := h.sourceRepo.ListEnabled()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load sources")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
 
 	sourceByID := make(map[int64]models.Source, len(sources))
@@ -95,7 +95,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	// let them fall back when that source is unreadable.
 	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTracker(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sources")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sources", err)
 	}
 
 	cards, pendingCovers := h.buildTrackerCards(items, sourceByID, sourceLogoBySourceID, alternatesByTracker, refreshKey)
@@ -105,9 +105,9 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	// line, so only the top few show and the rest fold behind a toggle.
 	trackerCountsBySource, err := h.trackerRepo.CountTrackersBySource(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to count linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to count linked sites", err)
 	}
-	topSiteLinks, moreSiteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID, trackerCountsBySource)
+	topSiteLinks, moreSiteLinks := buildTrackerSiteLinks(linkedSites, sourceLogoBySourceID, trackerCountsBySource, h.sourceHomeURLForKey)
 
 	return h.render(c, "trackers_partial.html", trackersPartialData{
 		Trackers:      cards,
@@ -351,6 +351,7 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 		LastReadChapter:   lastReadChapter,
 		ReporterSourceKey: reporterSourceKey,
 		CoverSourceKey:    coverSourceKey,
+		SourceKeyForURL:   h.sourceKeyForURL,
 	})
 
 	card.LatestKnownChapterURL = decision.LatestChapterURL
@@ -405,6 +406,13 @@ type trackerLinkInputs struct {
 	// CoverSourceKey the one that supplied the art; both empty when unknown.
 	ReporterSourceKey string
 	CoverSourceKey    string
+
+	// SourceKeyForURL names the site a resolved chapter link opens on. The
+	// caller supplies it — the handler reads it off the connector registry —
+	// so the arbitration below stays a pure function that can be exercised
+	// without one. A nil lookup attributes no link to any site, which is what
+	// an unrecognized host already means here.
+	SourceKeyForURL func(rawURL string) string
 }
 
 // trackerLinkDecision is where one card sends the reader. The site keys are
@@ -451,6 +459,11 @@ type trackerLinkDecision struct {
 //     whoever supplied the cover art — the weakest signal on the card, but
 //     better than badging a primary that served nothing.
 func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
+	sourceKeyForURL := in.SourceKeyForURL
+	if sourceKeyForURL == nil {
+		sourceKeyForURL = func(string) string { return "" }
+	}
+
 	readingBaseURL := in.PrimarySourceURL
 	if in.Pinned != nil {
 		readingBaseURL = in.Pinned.SourceURL
@@ -466,7 +479,7 @@ func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
 	if in.LatestChapter.Attempted {
 		decision.LatestChapterURL = in.LatestChapter.URL
 		if in.LatestChapter.Resolved {
-			confirmedChapterSiteKey = inferSourceKeyFromURL(in.LatestChapter.URL)
+			confirmedChapterSiteKey = sourceKeyForURL(in.LatestChapter.URL)
 			decision.LatestChapterSiteKey = confirmedChapterSiteKey
 		}
 	}
@@ -487,7 +500,7 @@ func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
 	if in.LastReadChapter.Attempted {
 		decision.LastReadChapterURL = in.LastReadChapter.URL
 		if in.LastReadChapter.Resolved {
-			decision.LastReadChapterSiteKey = inferSourceKeyFromURL(in.LastReadChapter.URL)
+			decision.LastReadChapterSiteKey = sourceKeyForURL(in.LastReadChapter.URL)
 		}
 	}
 
@@ -600,7 +613,9 @@ func pinnedReadingRef(item models.Tracker, primaryKey string, alternates []repos
 // fold behind the "+N" toggle.
 const maxVisibleSiteLinks = 4
 
-func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string, trackerCounts map[int64]int) ([]trackerSiteLinkView, []trackerSiteLinkView) {
+// buildTrackerSiteLinks takes homeURLForKey rather than reading the connector
+// metadata itself, so the shortcut row can be built without a registry.
+func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int64]string, trackerCounts map[int64]int, homeURLForKey func(string) string) ([]trackerSiteLinkView, []trackerSiteLinkView) {
 	type rankedLink struct {
 		view  trackerSiteLinkView
 		count int
@@ -608,7 +623,7 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 
 	ranked := make([]rankedLink, 0, len(sources))
 	for _, source := range sources {
-		homeURL := sourceHomeURLForKey(source.Key)
+		homeURL := homeURLForKey(source.Key)
 		if source.BaseURL != nil && strings.TrimSpace(*source.BaseURL) != "" {
 			homeURL = strings.TrimSpace(*source.BaseURL)
 		}
@@ -773,37 +788,33 @@ func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
 }
 
 // readerCandidateRank orders a tracker's linked sources for chapter-link
-// resolution when no reading pin narrows the choice. Origin scanlator sites
-// go first: for their own series they are where chapters appear before any
-// aggregator mirrors them, and their readers are the best of the chain. Then
-// MangaHub, English-only fresh, then the remaining reader sites in their
-// incoming order. ComicK ranks last as the info floor: it always has the
-// chapter page, which makes it the reliable fallback, but its reader is the
-// worst of the chain — see fetchChapterURL for how the floor is only reached
-// after every readable site and every offline-built link had its turn.
-func readerCandidateRank(sourceKey string) int {
-	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
-	case "asuracomic", "flamecomics":
-		return 0
-	case "mangahub":
-		return 1
-	case "comick":
-		return readerRankInfoFloor
-	default:
-		return 2
+// resolution when no reading pin narrows the choice. Each site's tier is the
+// connector's own (SiteInfo.ReaderRank), so the chain follows the site the
+// connector says it reads rather than a second table here that could disagree
+// with it. Origin scanlator sites go first: for their own series they are where
+// chapters appear before any aggregator mirrors them, and their readers are the
+// best of the chain. Then the fresh aggregators, then the remaining reader
+// sites in their incoming order. The info floor ranks last: those sites always
+// have the chapter page, which makes them the reliable fallback, but their
+// readers are the worst of the chain — see fetchChapterURL for how the floor is
+// only reached after every readable site and every offline-built link had its
+// turn. A source with no connector, or one that publishes no metadata, keeps
+// the default tier it has always had.
+func (h *DashboardHandler) readerCandidateRank(sourceKey string) int {
+	info, ok := h.siteInfoForKey(sourceKey)
+	if !ok {
+		return connectors.ReaderRankDefault
 	}
+	return info.ReaderRank()
 }
 
-// readerRankInfoFloor marks sources nobody wants to read on: they take part
-// in the chain only after every readable site and offline-built link failed.
-const readerRankInfoFloor = 3
-
-// orderReaderCandidates reorders candidates in place by readerCandidateRank,
+// orderReaderCandidates reorders candidates in place by the rank function,
 // keeping the incoming order (primary first, then linked alternates) between
-// sources of equal rank.
-func orderReaderCandidates(candidates []repository.TrackerSourceRef) {
+// sources of equal rank. The ranking is passed in so the ordering can be
+// exercised against any rank table, the handler's included.
+func orderReaderCandidates(candidates []repository.TrackerSourceRef, rank func(sourceKey string) int) {
 	sort.SliceStable(candidates, func(i, j int) bool {
-		return readerCandidateRank(candidates[i].SourceKey) < readerCandidateRank(candidates[j].SourceKey)
+		return rank(candidates[i].SourceKey) < rank(candidates[j].SourceKey)
 	})
 }
 
@@ -843,7 +854,7 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
 	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: trimmedSourceKey, SourceURL: trimmedSourceURL})
 	candidates = append(candidates, alternates...)
-	orderReaderCandidates(candidates)
+	orderReaderCandidates(candidates, h.readerCandidateRank)
 
 	// A source that was actually queried and failed may succeed shortly; one with
 	// no usable connector will not, so the two are cached for different spans.
@@ -901,7 +912,7 @@ func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter 
 		if candidateKey == "" || candidateURL == "" {
 			continue
 		}
-		if readerCandidateRank(candidateKey) == readerRankInfoFloor {
+		if h.readerCandidateRank(candidateKey) == connectors.ReaderRankInfoFloor {
 			infoFloor = append(infoFloor, candidate)
 			continue
 		}

@@ -265,6 +265,58 @@ func TestPlanTrackerPrimarySourcePromotions(t *testing.T) {
 	}
 }
 
+// Replacements for every affected tracker are read in one query, so the rows
+// of different trackers arrive interleaved and a candidate could leak from one
+// tracker to the next. Each tracker must still get the first usable link of
+// its own, by ts.id.
+func TestPlanTrackerPrimarySourcePromotionsPicksPerTrackerCandidate(t *testing.T) {
+	db := openTestDB(t)
+
+	staleA := sourceIDByKey(t, db, "mangabuddy")
+	staleB := sourceIDByKey(t, db, "weebcentral")
+	mangadexID := sourceIDByKey(t, db, "mangadex")
+	comickID := sourceIDByKey(t, db, "comick")
+
+	first := seedTracker(t, db, "First", staleA, "https://mangabuddy.com/first")
+	second := seedTracker(t, db, "Second", staleA, "https://mangabuddy.com/second")
+
+	// Seeded so the two trackers' link rows alternate by ts.id: the first
+	// tracker's winner (mangadex) is inserted after the second tracker's winner
+	// (comick).
+	seedTrackerSource(t, db, first, staleB, "https://weebcentral.com/first", nil)
+	seedTrackerSource(t, db, second, comickID, "https://comick.io/comic/second", nil)
+	seedTrackerSource(t, db, first, mangadexID, "https://mangadex.org/title/first", nil)
+	seedTrackerSource(t, db, second, mangadexID, "https://mangadex.org/title/second", nil)
+	seedTrackerSource(t, db, first, comickID, "https://comick.io/comic/first", nil)
+
+	staleIDs := map[int64]struct{}{staleA: {}, staleB: {}}
+	staleKeys := map[int64]string{staleA: "mangabuddy", staleB: "weebcentral"}
+
+	promotions, orphaned, err := planTrackerPrimarySourcePromotions(db, staleIDs, staleKeys)
+	if err != nil {
+		t.Fatalf("plan promotions: %v", err)
+	}
+	if len(orphaned) != 0 {
+		t.Fatalf("expected no orphans, got %+v", orphaned)
+	}
+	if len(promotions) != 2 {
+		t.Fatalf("expected two promotions, got %+v", promotions)
+	}
+
+	if promotions[0].TrackerID != first || promotions[0].NewSourceID != mangadexID {
+		t.Fatalf("tracker %d must be promoted to mangadex, got %+v", first, promotions[0])
+	}
+	if promotions[0].NewSourceURL != "https://mangadex.org/title/first" {
+		t.Fatalf("first tracker got another tracker's URL: %+v", promotions[0])
+	}
+	if promotions[1].TrackerID != second || promotions[1].NewSourceID != comickID {
+		t.Fatalf("tracker %d must be promoted to comick, got %+v", second, promotions[1])
+	}
+	if promotions[1].NewSourceURL != "https://comick.io/comic/second" {
+		t.Fatalf("second tracker got another tracker's URL: %+v", promotions[1])
+	}
+}
+
 func TestPlanTrackerPrimarySourcePromotionsEmptyInput(t *testing.T) {
 	db := openTestDB(t)
 

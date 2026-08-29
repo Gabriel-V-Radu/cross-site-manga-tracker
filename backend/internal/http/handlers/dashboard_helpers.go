@@ -7,6 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"image"
+	// Registered for imageDimensions: these are the formats whose shape can be
+	// measured before a cover is accepted.
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log/slog"
 	"math"
@@ -157,31 +163,43 @@ func toTrackerTagIcons(tags []models.CustomTag) []trackerTagIconView {
 	return icons
 }
 
-func sourceHomeURLForKey(sourceKey string) string {
-	switch strings.ToLower(strings.TrimSpace(sourceKey)) {
-	case "asuracomic":
-		return "https://asurascans.com"
-	case "flamecomics":
-		return "https://flamecomics.xyz"
-	case "mangadex":
-		return "https://mangadex.org"
-	case "mangafire":
-		return "https://mangafire.to"
-	case "mgeko":
-		return "https://www.mgeko.cc"
-	case "webtoons":
-		return "https://www.webtoons.com"
-	case "freewebnovel":
-		return "https://freewebnovel.com"
-	case "mangaupdates":
-		return "https://www.mangaupdates.com"
-	case "comick":
-		return "https://comick.dev"
-	case "mangahub":
-		return "https://mangahub.io"
-	default:
+// sourceHomeURLForKey is the site root a source's shortcut opens. The address
+// comes from the connector that reads the site, so a site that moves domain
+// takes the dashboard with it instead of leaving a shortcut pointing at the
+// address it was renamed away from. A key no connector claims has no home to
+// offer: the caller then falls back to the source row's own base URL, and drops
+// the shortcut when there is none — the behavior an unlisted key always had.
+func (h *DashboardHandler) sourceHomeURLForKey(sourceKey string) string {
+	info, ok := h.siteInfoForKey(sourceKey)
+	if !ok {
 		return ""
 	}
+	return strings.TrimSpace(info.HomeURL())
+}
+
+// siteInfoForKey resolves a source key to the metadata its connector publishes.
+// A handler built without a registry — the card-building tests construct one by
+// struct literal — resolves nothing rather than panicking.
+func (h *DashboardHandler) siteInfoForKey(sourceKey string) (connectors.SiteInfo, bool) {
+	if h.registry == nil {
+		return nil, false
+	}
+	connector, ok := h.registry.Get(strings.TrimSpace(sourceKey))
+	if !ok {
+		return nil, false
+	}
+	info, ok := connector.(connectors.SiteInfo)
+	return info, ok
+}
+
+// connectorForURL resolves the connector that claims a URL's host, through the
+// hosts the connectors themselves publish. Nil-registry safe for the same
+// reason as siteInfoForKey.
+func (h *DashboardHandler) connectorForURL(rawURL string) (connectors.Connector, bool) {
+	if h.registry == nil {
+		return nil, false
+	}
+	return h.registry.GetByURL(rawURL)
 }
 
 func prioritizeTrackerTags(tags []trackerTagView, maxVisible int) ([]trackerTagView, int) {
@@ -258,19 +276,25 @@ func relativeTime(value time.Time) string {
 		return fmt.Sprintf("%d min ago", minutes)
 	}
 	if delta < 24*time.Hour {
-		hours := int(delta / time.Hour)
-		return fmt.Sprintf("%d hours ago", hours)
+		return countedAgo(int(delta/time.Hour), "hour")
 	}
 	if delta < 30*24*time.Hour {
-		days := int(delta / (24 * time.Hour))
-		return fmt.Sprintf("%d days ago", days)
+		return countedAgo(int(delta/(24*time.Hour)), "day")
 	}
 	if delta < 365*24*time.Hour {
-		months := int(delta / (30 * 24 * time.Hour))
-		return fmt.Sprintf("%d months ago", months)
+		return countedAgo(int(delta/(30*24*time.Hour)), "month")
 	}
-	years := int(delta / (365 * 24 * time.Hour))
-	return fmt.Sprintf("%d years ago", years)
+	return countedAgo(int(delta/(365*24*time.Hour)), "year")
+}
+
+// countedAgo spells a whole-unit age. The card shows a release date on every
+// row, so the one-unit case is common enough that "1 hours ago" was on screen
+// most of the time.
+func countedAgo(count int, unit string) string {
+	if count == 1 {
+		return "1 " + unit + " ago"
+	}
+	return fmt.Sprintf("%d %ss ago", count, unit)
 }
 
 // trackerAlternatesForProfile loads a profile's alternate linked sources so a
@@ -333,7 +357,7 @@ func (h *DashboardHandler) fetchCoverURL(parent context.Context, sourceKey, sour
 	tryKeys := make([]string, 0, 2)
 	tryKeys = append(tryKeys, trimmedSourceKey)
 
-	if fallbackKey := inferSourceKeyFromURL(resolvedURL); fallbackKey != "" && fallbackKey != trimmedSourceKey {
+	if fallbackKey := h.sourceKeyForURL(resolvedURL); fallbackKey != "" && fallbackKey != trimmedSourceKey {
 		tryKeys = append(tryKeys, fallbackKey)
 	}
 
@@ -592,6 +616,15 @@ func (h *DashboardHandler) storeCoverLocally(parent context.Context, coverURL st
 		return "", false
 	}
 
+	if width, height, measured := imageDimensions(body); measured && !coverShaped(width, height) {
+		// Cover art is portrait. A square image on a cover endpoint is a promo
+		// banner or a site placeholder, and accepting one ends the fallback
+		// chain on something that is not the cover — the caller can still find
+		// the real art on one of the tracker's other linked sources.
+		slog.Debug("cover rejected as not cover-shaped", "url", coverURL, "width", width, "height", height)
+		return "", false
+	}
+
 	name := fmt.Sprintf("%x%s", sha1.Sum([]byte(coverURL)), ext)
 	target := filepath.Join(h.coverDir, name)
 	if _, statErr := os.Stat(target); statErr == nil {
@@ -619,6 +652,28 @@ func (h *DashboardHandler) storeCoverLocally(parent context.Context, coverURL st
 		}
 	}
 	return name, true
+}
+
+// coverAspectFloor is how portrait a downloaded image must be to pass as cover
+// art. The library on disk runs from 1.33 to 1.56 tall-over-wide, so the floor
+// clears every real cover with room to spare while still catching the square
+// thumbnails some sites serve from their cover endpoint.
+const coverAspectFloor = 1.2
+
+// imageDimensions reads an image header without decoding the pixels. It
+// reports measured=false for a format the standard library cannot read — webp
+// and avif, which much of the library is stored in — because a shape that
+// cannot be measured must not be judged.
+func imageDimensions(body []byte) (width int, height int, measured bool) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return 0, 0, false
+	}
+	return config.Width, config.Height, true
+}
+
+func coverShaped(width int, height int) bool {
+	return float64(height)/float64(width) >= coverAspectFloor
 }
 
 // coverFileExt maps a downloaded cover to the extension the static route
@@ -702,37 +757,16 @@ func (h *DashboardHandler) resolveCoverFromConnector(parent context.Context, sou
 	return strings.TrimSpace(result.CoverImageURL), true, nil
 }
 
-func inferSourceKeyFromURL(rawURL string) string {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
+// sourceKeyForURL names the site a URL belongs to. The registry matches the
+// hosts each connector claims, historical domains included, where this was a
+// second host table that matched by substring — and so also claimed any host
+// that merely contained "asura" or "flame" for the real site's connector.
+func (h *DashboardHandler) sourceKeyForURL(rawURL string) string {
+	connector, ok := h.connectorForURL(rawURL)
+	if !ok {
 		return ""
 	}
-
-	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
-	switch {
-	case strings.Contains(host, "mangadex"):
-		return "mangadex"
-	case strings.Contains(host, "mangafire"):
-		return "mangafire"
-	case strings.Contains(host, "mgeko"):
-		return "mgeko"
-	case strings.Contains(host, "asura"):
-		return "asuracomic"
-	case strings.Contains(host, "flame"):
-		return "flamecomics"
-	case strings.Contains(host, "webtoons"):
-		return "webtoons"
-	case strings.Contains(host, "freewebnovel"):
-		return "freewebnovel"
-	case strings.Contains(host, "mangaupdates"):
-		return "mangaupdates"
-	case strings.Contains(host, "comick"):
-		return "comick"
-	case strings.Contains(host, "mangahub"):
-		return "mangahub"
-	default:
-		return ""
-	}
+	return connector.Key()
 }
 
 func buildCoverCacheKey(sourceKey, sourceURL string, sourceItemID *string) string {

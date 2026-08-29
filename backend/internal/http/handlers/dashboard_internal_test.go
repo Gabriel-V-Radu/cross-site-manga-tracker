@@ -4,8 +4,17 @@ import (
 	"testing"
 	"time"
 
+	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
+
+// newSiteMetadataHandler builds a handler around the connector set the app
+// actually runs, which is where the site metadata below now comes from: these
+// tests exist to catch a connector that stops claiming a domain or moves its
+// home page, so a stub registry would test nothing.
+func newSiteMetadataHandler() *DashboardHandler {
+	return &DashboardHandler{registry: connectordefaults.NewRegistry()}
+}
 
 func TestHasResolvedSourceMetadataRequiresReleaseDate(t *testing.T) {
 	chapter := 42.0
@@ -31,48 +40,77 @@ func TestHasResolvedSourceMetadataRequiresReleaseDate(t *testing.T) {
 }
 
 func TestSourceHomeURLForKeySupportsMgeko(t *testing.T) {
-	homeURL := sourceHomeURLForKey("mgeko")
+	homeURL := newSiteMetadataHandler().sourceHomeURLForKey("mgeko")
 	if homeURL != "https://www.mgeko.cc" {
 		t.Fatalf("expected mgeko home url, got %q", homeURL)
 	}
 }
 
-func TestInferSourceKeyFromURLSupportsMgeko(t *testing.T) {
-	inferred := inferSourceKeyFromURL("https://www.mgeko.cc/manga/sample-series/")
+func TestSourceKeyForURLSupportsMgeko(t *testing.T) {
+	inferred := newSiteMetadataHandler().sourceKeyForURL("https://www.mgeko.cc/manga/sample-series/")
 	if inferred != "mgeko" {
 		t.Fatalf("expected inferred source key mgeko, got %q", inferred)
 	}
 }
 
 func TestSourceHomeURLForKeySupportsFreeWebNovel(t *testing.T) {
-	homeURL := sourceHomeURLForKey("freewebnovel")
+	homeURL := newSiteMetadataHandler().sourceHomeURLForKey("freewebnovel")
 	if homeURL != "https://freewebnovel.com" {
 		t.Fatalf("expected freewebnovel home url, got %q", homeURL)
 	}
 }
 
-func TestInferSourceKeyFromURLSupportsFreeWebNovel(t *testing.T) {
-	inferred := inferSourceKeyFromURL("https://freewebnovel.com/novel/star-odyssey")
+func TestSourceKeyForURLSupportsFreeWebNovel(t *testing.T) {
+	inferred := newSiteMetadataHandler().sourceKeyForURL("https://freewebnovel.com/novel/star-odyssey")
 	if inferred != "freewebnovel" {
 		t.Fatalf("expected inferred source key freewebnovel, got %q", inferred)
 	}
 }
 
-// TestInferSourceKeyFromURLKnowsEveryChapterSource pins a gap that has now
-// shipped twice (MangaBuddy, then ComicK/MangaHub): a connector gets wired
-// everywhere except here, and then a resolved chapter link cannot be
-// attributed to its site — which silently breaks the open-to-read button
-// following the freshest source.
-func TestInferSourceKeyFromURLKnowsEveryChapterSource(t *testing.T) {
+// TestSourceKeyForURLKnowsEveryChapterSource pins a gap that has now shipped
+// twice (MangaBuddy, then ComicK/MangaHub): a connector gets wired everywhere
+// except here, and then a resolved chapter link cannot be attributed to its
+// site — which silently breaks the open-to-read button following the freshest
+// source.
+func TestSourceKeyForURLKnowsEveryChapterSource(t *testing.T) {
+	handler := newSiteMetadataHandler()
 	cases := map[string]string{
 		"https://mangahub.io/manga/sample-series_142": "mangahub",
 		"https://comick.dev/comic/kagura-bachi":       "comick",
 		"https://mangafire.to/title/npozj-akanabe":    "mangafire",
 	}
 	for rawURL, want := range cases {
-		if inferred := inferSourceKeyFromURL(rawURL); inferred != want {
+		if inferred := handler.sourceKeyForURL(rawURL); inferred != want {
 			t.Fatalf("expected inferred source key %q for %s, got %q", want, rawURL, inferred)
 		}
+	}
+}
+
+// TestSourceKeyForURLRejectsALookalikeHost covers what the substring table this
+// replaced could not: a host that merely reads like a site's name is not that
+// site, and attributing a card to it would name the wrong reader.
+func TestSourceKeyForURLRejectsALookalikeHost(t *testing.T) {
+	handler := newSiteMetadataHandler()
+	for _, rawURL := range []string{
+		"https://asura-mirror.example/comics/sample",
+		"https://comick.example/comic/sample",
+	} {
+		if inferred := handler.sourceKeyForURL(rawURL); inferred != "" {
+			t.Fatalf("expected no source key for %s, got %q", rawURL, inferred)
+		}
+	}
+}
+
+// TestSourceKeyForURLWithoutARegistry covers the handlers the card builders
+// construct by struct literal: no registry means nothing is attributed, not a
+// panic.
+func TestSourceKeyForURLWithoutARegistry(t *testing.T) {
+	handler := &DashboardHandler{}
+	if inferred := handler.sourceKeyForURL("https://mangahub.io/manga/sample-series_142"); inferred != "" {
+		t.Fatalf("expected no source key without a registry, got %q", inferred)
+	}
+	if homeURL := handler.sourceHomeURLForKey("mangahub"); homeURL != "" {
+		t.Fatalf("expected no home url without a registry, got %q", homeURL)
 	}
 }
 

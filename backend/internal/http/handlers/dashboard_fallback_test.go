@@ -10,13 +10,30 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
+// siteTier is the SiteInfo a double publishes. The reading chain reads each
+// site's tier off its connector, so a double standing in for a ranked site
+// (the fresh aggregator, the info floor) has to say which one it is, exactly
+// as the real connectors do. Left unset it is the origin tier, which is what a
+// double standing in for a tracker's own primary wants. The hosts stay empty:
+// these doubles are reached by key, and claiming a host would enter them into
+// the registry's URL routing for no reason.
+type siteTier struct{ rank int }
+
+func (s siteTier) Hosts() []string { return nil }
+func (s siteTier) HomeURL() string { return "" }
+func (s siteTier) ReaderRank() int { return s.rank }
+
 // blockedConnector stands in for a source behind a bot challenge: it is
 // registered and reachable in principle, but every resolve fails.
-type blockedConnector struct{ key string }
+type blockedConnector struct {
+	siteTier
+	key string
+}
 
 func (b blockedConnector) Key() string                       { return b.key }
 func (b blockedConnector) Name() string                      { return b.key }
@@ -34,6 +51,7 @@ func (b blockedConnector) ResolveChapterURL(context.Context, string, float64) (s
 
 // mirrorConnector stands in for a working alternate source.
 type mirrorConnector struct {
+	siteTier
 	key   string
 	cover string
 }
@@ -169,7 +187,11 @@ func mixedSourceCard(t *testing.T, latestChapterURL string, latestResolved bool)
 	)
 	latest, lastRead := 65.0, 59.0
 
-	h := newFallbackHandler(t, connectors.NewRegistry())
+	// The real connector set, for its host claims alone: the URLs below are the
+	// production ones, and attributing them to a site is what the badge is being
+	// checked on here. Every lookup is seeded into the caches, so nothing is
+	// resolved through it.
+	h := newFallbackHandler(t, connectordefaults.NewRegistry())
 
 	// The cover came from the mirror: the primary's art endpoint was unreachable.
 	h.setCachedCoverFromSource(buildCoverCacheKey("mangafire", primaryURL, nil),
@@ -672,7 +694,7 @@ func TestFetchChapterURLBlockedGuessBeatsInfoFloor(t *testing.T) {
 	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedsource"}}); err != nil {
 		t.Fatalf("register blocked linkable connector: %v", err)
 	}
-	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
 	}
 
@@ -711,7 +733,7 @@ func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
 	if err := registry.Register(linkableCappedConnector{cappedResolverConnector{mirrorConnector{key: "answeredsource"}, 81}}); err != nil {
 		t.Fatalf("register answered connector: %v", err)
 	}
-	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
 	}
 
@@ -734,16 +756,16 @@ func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
 // fresh MangaHub, a linkable MangaFire, and the ComicK floor all at once.
 func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 	registry := connectors.NewRegistry()
-	if err := registry.Register(mirrorConnector{key: "asuracomic"}); err != nil {
+	if err := registry.Register(mirrorConnector{key: "asuracomic", siteTier: siteTier{rank: connectors.ReaderRankOrigin}}); err != nil {
 		t.Fatalf("register asuracomic stub: %v", err)
 	}
-	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub"}, 100}); err != nil {
+	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub", siteTier: siteTier{rank: connectors.ReaderRankFreshAggregator}}, 100}); err != nil {
 		t.Fatalf("register mangahub stub: %v", err)
 	}
-	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire"}}); err != nil {
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
 		t.Fatalf("register mangafire stub: %v", err)
 	}
-	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
 	}
 
@@ -788,13 +810,13 @@ func (c cappedResolverConnector) ResolveChapterURL(ctx context.Context, rawURL s
 func newReaderPriorityHandler(t *testing.T, mangahubLatest float64) (*DashboardHandler, []repository.TrackerSourceRef) {
 	t.Helper()
 	registry := connectors.NewRegistry()
-	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire"}}); err != nil {
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
 		t.Fatalf("register mangafire stub: %v", err)
 	}
-	if err := registry.Register(mirrorConnector{key: "comick"}); err != nil {
+	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
 	}
-	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub"}, mangahubLatest}); err != nil {
+	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub", siteTier: siteTier{rank: connectors.ReaderRankFreshAggregator}}, mangahubLatest}); err != nil {
 		t.Fatalf("register mangahub stub: %v", err)
 	}
 
@@ -852,7 +874,11 @@ func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
 
 // TestOrderReaderCandidates pins the ranking itself: origin scanlator sites
 // first, then MangaHub, ComicK last, everything else keeps its incoming order.
+// It runs against the connector set the app actually ships, since that is where
+// the tiers are published — a connector that changes its rank sends readers to
+// a worse site, and this is where that shows up.
 func TestOrderReaderCandidates(t *testing.T) {
+	handler := &DashboardHandler{registry: connectordefaults.NewRegistry()}
 	candidates := []repository.TrackerSourceRef{
 		{SourceKey: "mangafire"},
 		{SourceKey: "mangaupdates"},
@@ -862,7 +888,7 @@ func TestOrderReaderCandidates(t *testing.T) {
 		{SourceKey: "mangahub"},
 		{SourceKey: "flamecomics"},
 	}
-	orderReaderCandidates(candidates)
+	orderReaderCandidates(candidates, handler.readerCandidateRank)
 
 	got := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {

@@ -28,7 +28,7 @@ import (
 	"os"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 // utf8BOM is the byte-order mark a spreadsheet export prepends to the first
@@ -61,7 +61,12 @@ func main() {
 		log.Fatalf("read csv: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", *dbPath)
+	// Opened the way the app opens it. This writes to the database the API is
+	// serving from, so it needs the same WAL journal and busy timeout: without
+	// them a link insert that lands during a poll cycle fails outright on
+	// SQLITE_BUSY. It also brings the app's single connection, so every query
+	// below has to finish and release it before the next one starts.
+	db, err := database.Open(*dbPath)
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}

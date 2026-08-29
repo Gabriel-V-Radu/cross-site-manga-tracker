@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -28,6 +29,9 @@ func (h *DashboardHandler) SearchSourceTitles(c *fiber.Ctx) error {
 
 	source, err := h.sourceRepo.GetByID(sourceID)
 	if err != nil {
+		// Answered as a rendered results box rather than a status, so the log
+		// is the only place this failure is visible to the operator.
+		slog.Error("source lookup failed", "path", c.Path(), "source", sourceID, "error", err)
 		return h.render(c, "tracker_search_results.html", trackerSearchResultsData{Query: query, Error: "Failed to resolve source", Intent: intent})
 	}
 	if source == nil || !source.Enabled {
@@ -109,6 +113,7 @@ func (h *DashboardHandler) ResolveSourceChapter(c *fiber.Ctx) error {
 
 	source, err := h.sourceRepo.GetByID(sourceID)
 	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "Failed to resolve source", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(sourceChapterResponse{Error: "Failed to resolve source"})
 	}
 	if source == nil || !source.Enabled {

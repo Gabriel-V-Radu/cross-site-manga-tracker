@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -213,12 +214,12 @@ type linkCardResponseData struct {
 func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	sources, err := h.scannableSources()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
 
 	lastScope := h.lastLinkScanScopeValues()
@@ -302,17 +303,17 @@ func (h *DashboardHandler) selectedLinkSource(c *fiber.Ctx, sources []models.Sou
 func (h *DashboardHandler) LinksQueuePartial(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, publicRequestMessage(err, "Could not load that site"), err)
 	}
 
 	data, err := h.buildLinkQueue(profile.ID, source, h.parseLinkScanScope(c))
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
 	return h.render(c, "links_queue_partial.html", data)
 }
@@ -406,10 +407,8 @@ func (h *DashboardHandler) toLinkReviewTrackerView(item repository.LinkReviewTra
 	if item.LatestReleaseAt != nil {
 		view.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
 	}
-	if key := inferSourceKeyFromURL(item.SourceURL); key != "" {
-		if connector, ok := h.registry.Get(key); ok {
-			view.PrimarySourceName = connector.Name()
-		}
+	if connector, ok := h.connectorForURL(item.SourceURL); ok {
+		view.PrimarySourceName = connector.Name()
 	}
 	return view
 }
@@ -442,11 +441,11 @@ func toLinkSuggestionView(suggestion repository.LinkSuggestion) linkSuggestionVi
 func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, publicRequestMessage(err, "Could not load that site"), err)
 	}
 
 	if err := h.linkScanner.Start(profile.ID, source.ID, source.Key, source.Name, h.parseLinkScanScope(c).Filter); err != nil {
@@ -492,12 +491,12 @@ func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, fromPoll bool) err
 func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	suggestionID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || suggestionID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("invalid suggestion id")
+		return h.fail(c, fiber.StatusBadRequest, "invalid suggestion id", err)
 	}
 
 	// The whole decision — link row, accepted status, sibling rejections —
@@ -505,10 +504,10 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	// the queue offering a candidate for a tracker it has already linked.
 	accepted, err := h.linkSuggestionRepo.AcceptSuggestion(profile.ID, suggestionID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the suggestion", err)
 	}
 	if accepted == nil {
-		return c.Status(fiber.StatusNotFound).SendString("suggestion not found")
+		return h.fail(c, fiber.StatusNotFound, "suggestion not found", nil)
 	}
 	h.invalidateLinkLookups()
 
@@ -518,24 +517,24 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	suggestionID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || suggestionID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("invalid suggestion id")
+		return h.fail(c, fiber.StatusBadRequest, "invalid suggestion id", err)
 	}
 
 	suggestion, err := h.linkSuggestionRepo.GetPendingSuggestion(profile.ID, suggestionID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the suggestion", err)
 	}
 	if suggestion == nil {
-		return c.Status(fiber.StatusNotFound).SendString("suggestion not found")
+		return h.fail(c, fiber.StatusNotFound, "suggestion not found", nil)
 	}
 
 	if err := h.linkSuggestionRepo.DecideSuggestion(profile.ID, suggestionID, repository.LinkSuggestionRejected); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to reject the suggestion", err)
 	}
 
 	return h.renderLinkCardResponse(c, profile.ID, suggestion.SourceID, suggestion.TrackerID, "")
@@ -544,20 +543,20 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, publicRequestMessage(err, "Could not load that site"), err)
 	}
 
 	trackerID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || trackerID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("invalid tracker id")
+		return h.fail(c, fiber.StatusBadRequest, "invalid tracker id", err)
 	}
 
 	if err := h.linkSuggestionRepo.DismissTracker(profile.ID, trackerID, source.ID); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to dismiss the tracker", err)
 	}
 
 	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "")
@@ -571,16 +570,16 @@ func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, publicRequestMessage(err, "Could not load that site"), err)
 	}
 
 	trackerID, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || trackerID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("invalid tracker id")
+		return h.fail(c, fiber.StatusBadRequest, "invalid tracker id", err)
 	}
 
 	rawURL := strings.TrimSpace(c.FormValue("url"))
@@ -599,7 +598,11 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	// transaction as the link, so the queue can never end up holding a
 	// settled tracker's live candidates.
 	if err := h.linkSuggestionRepo.ApplyManualLink(profile.ID, trackerID, link, source.ID); err != nil {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, err.Error())
+		// Reported inside the re-rendered row rather than as a status, so the
+		// user can retry the paste; the repository's own wording names tables
+		// and belongs in the log instead of the card.
+		slog.Error("manual link failed", "path", c.Path(), "tracker", trackerID, "source", source.ID, "error", err)
+		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Could not save that link.")
 	}
 	h.invalidateLinkLookups()
 
@@ -628,7 +631,10 @@ func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL stri
 	}
 	linkedSource, err := h.sourceRepo.GetByKey(connector.Key())
 	if err != nil {
-		return nil, models.TrackerSource{}, err
+		// Both callers show this text to the user — in the review card and in
+		// the edit form's error — so the lookup's own wording stays in the log.
+		slog.Error("source lookup failed", "source", connector.Key(), "error", err)
+		return nil, models.TrackerSource{}, fmt.Errorf("that site could not be checked; try again")
 	}
 	if linkedSource == nil {
 		return nil, models.TrackerSource{}, fmt.Errorf("that site is not registered as a source")
@@ -662,7 +668,11 @@ func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID i
 		return nil, err
 	}
 	if err := h.trackerRepo.UpsertTrackerSource(profileID, trackerID, link); err != nil {
-		return nil, err
+		// The edit form prints this error next to the pasted URL, and the
+		// repository's own wording names tables and columns, so it stays in
+		// the log — same split as resolveSourceLink's lookup failure above.
+		slog.Error("attach source by url failed", "tracker", trackerID, "source", linkedSource.ID, "error", err)
+		return nil, fmt.Errorf("that link could not be saved; try again")
 	}
 
 	h.invalidateLinkLookups()
@@ -674,17 +684,17 @@ func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID i
 func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+		return h.fail(c, fiber.StatusBadRequest, publicRequestMessage(err, "Could not load that site"), err)
 	}
 
 	scope := h.parseLinkScanScope(c)
 	queue, err := h.linkSuggestionRepo.ListReviewQueue(profile.ID, source.ID, scope.Filter)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
 
 	linked := false
@@ -699,7 +709,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 				// each accept is its own transaction.
 				accepted, err := h.linkSuggestionRepo.AcceptSuggestion(profile.ID, suggestion.ID)
 				if err != nil {
-					return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+					return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the exact matches", err)
 				}
 				linked = linked || accepted != nil
 				break
@@ -712,7 +722,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 
 	data, err := h.buildLinkQueue(profile.ID, source, scope)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
 	return h.render(c, "links_queue_partial.html", data)
 }
@@ -723,14 +733,14 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64, sourceID int64, trackerID int64, errorMessage string) error {
 	source, err := h.sourceRepo.GetByID(sourceID)
 	if err != nil || source == nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("source lookup failed")
+		return h.fail(c, fiber.StatusInternalServerError, "source lookup failed", err)
 	}
 
 	// The action buttons include the scope controls, so the re-rendered
 	// summary keeps counting the same slice the queue is showing.
 	data, err := h.buildLinkQueue(profileID, source, h.parseLinkScanScope(c))
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
 
 	response := linkCardResponseData{Summary: data.Summary}

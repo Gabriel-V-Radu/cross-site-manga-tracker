@@ -26,22 +26,22 @@ const (
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	profiles, err := h.profileResolver.ListProfiles()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
 
 	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
 
 	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 	selectedLinkedSiteIDs := sourceIDFilterMap(parseSourceIDsFromQuery(c))
 
@@ -64,19 +64,19 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	name := strings.TrimSpace(c.FormValue("profile_name"))
 	if name == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Profile name is required")
+		return h.fail(c, fiber.StatusBadRequest, "Profile name is required", nil)
 	}
 	if len(name) > 40 {
-		return c.Status(fiber.StatusBadRequest).SendString("Profile name must be 40 characters or less")
+		return h.fail(c, fiber.StatusBadRequest, "Profile name must be 40 characters or less", nil)
 	}
 
 	if _, err := h.profileRepo.Rename(activeProfile.ID, name); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to rename profile")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to rename profile", err)
 	}
 
 	return c.Redirect("/dashboard?profile="+url.QueryEscape(activeProfile.Key), fiber.StatusSeeOther)
@@ -85,7 +85,7 @@ func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "", "")
@@ -94,12 +94,12 @@ func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
 
 	return h.render(c, "profile_filter_tags_partial.html", profileFilterTagsData{ProfileTags: profileTags})
@@ -108,12 +108,12 @@ func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 func (h *DashboardHandler) ProfileFilterLinkedSitesPartial(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
 	return h.render(c, "profile_filter_linked_sites_partial.html", profileFilterLinkedSitesData{
@@ -125,12 +125,12 @@ func (h *DashboardHandler) ProfileFilterLinkedSitesPartial(c *fiber.Ctx) error {
 func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
 	profileKey := strings.TrimSpace(string(c.Request().PostArgs().Peek("profile")))
 	if profileKey == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Profile is required")
+		return h.fail(c, fiber.StatusBadRequest, "Profile is required", nil)
 	}
 
 	profiles, err := h.profileResolver.ListProfiles()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
 
 	for _, profile := range profiles {
@@ -139,27 +139,27 @@ func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.Status(fiber.StatusBadRequest).SendString("Selected profile does not exist")
+	return h.fail(c, fiber.StatusBadRequest, "Selected profile does not exist", nil)
 }
 
 func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	tagName := strings.TrimSpace(c.FormValue("tag_name"))
 	if tagName == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag name is required")
+		return h.fail(c, fiber.StatusBadRequest, "Tag name is required", nil)
 	}
 	if len(tagName) > 40 {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag name must be 40 characters or less")
+		return h.fail(c, fiber.StatusBadRequest, "Tag name must be 40 characters or less", nil)
 	}
 
 	var iconKey *string
 	if rawIcon := strings.TrimSpace(c.FormValue("icon_key")); rawIcon != "" {
 		if !allowedTagIconKeys[rawIcon] {
-			return c.Status(fiber.StatusBadRequest).SendString("Invalid icon")
+			return h.fail(c, fiber.StatusBadRequest, "Invalid icon", nil)
 		}
 		iconKey = &rawIcon
 	}
@@ -168,11 +168,11 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 		lowerErr := strings.ToLower(err.Error())
 		if strings.Contains(lowerErr, "unique") {
 			if iconKey != nil {
-				return c.Status(fiber.StatusBadRequest).SendString("That icon is already used by another tag")
+				return h.fail(c, fiber.StatusBadRequest, "That icon is already used by another tag", err)
 			}
-			return c.Status(fiber.StatusBadRequest).SendString("A tag with that name already exists")
+			return h.fail(c, fiber.StatusBadRequest, "A tag with that name already exists", err)
 		}
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save tag")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tag", err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Tag saved", `{"trackersChanged":true,"profileTagsChanged":true}`)
@@ -181,32 +181,32 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
 	if err != nil || tagID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid tag")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid tag", err)
 	}
 
 	tagName := strings.TrimSpace(c.FormValue("tag_name"))
 	if tagName == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag name is required")
+		return h.fail(c, fiber.StatusBadRequest, "Tag name is required", nil)
 	}
 	if len(tagName) > 40 {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag name must be 40 characters or less")
+		return h.fail(c, fiber.StatusBadRequest, "Tag name must be 40 characters or less", nil)
 	}
 
 	renamed, err := h.trackerRepo.RenameProfileTag(activeProfile.ID, tagID, tagName)
 	if err != nil {
 		lowerErr := strings.ToLower(err.Error())
 		if strings.Contains(lowerErr, "unique") {
-			return c.Status(fiber.StatusBadRequest).SendString("A tag with that name already exists")
+			return h.fail(c, fiber.StatusBadRequest, "A tag with that name already exists", err)
 		}
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to rename tag")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to rename tag", err)
 	}
 	if !renamed {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
+		return h.fail(c, fiber.StatusBadRequest, "Tag not found", nil)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Tag renamed", `{"trackersChanged":true,"profileTagsChanged":true}`)
@@ -215,20 +215,20 @@ func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
 	if err != nil || tagID <= 0 {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid tag")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid tag", err)
 	}
 
 	deleted, err := h.trackerRepo.DeleteProfileTag(activeProfile.ID, tagID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to delete tag")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to delete tag", err)
 	}
 	if !deleted {
-		return c.Status(fiber.StatusBadRequest).SendString("Tag not found")
+		return h.fail(c, fiber.StatusBadRequest, "Tag not found", nil)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Tag deleted", `{"trackersChanged":true,"profileTagsChanged":true}`)
@@ -237,12 +237,12 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid profile")
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
 	}
 
 	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 	if len(linkedSites) == 0 {
 		return h.renderProfileMenu(c, activeProfile, "No sites available to configure", "")
@@ -250,7 +250,7 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 
 	existingLogosBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
 	logoBySourceID, err := readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
@@ -259,7 +259,7 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 	}
 
 	if err := h.sourceRepo.UpsertProfileSourceLogoURLs(activeProfile.ID, logoBySourceID); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save linked site logos")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked site logos", err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Linked site logos saved", `{"trackersChanged":true}`)
@@ -276,22 +276,22 @@ func (h *DashboardHandler) listLinkedSourcesForProfile(_ int64) ([]models.Source
 func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models.Profile, message string, hxTrigger string) error {
 	profiles, err := h.profileResolver.ListProfiles()
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profiles")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profiles", err)
 	}
 
 	profileTags, err := h.trackerRepo.ListProfileTags(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load profile tags")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile tags", err)
 	}
 
 	linkedSites, err := h.listLinkedSourcesForProfile(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked sites")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
 	sourceLogoURLs, err := h.sourceRepo.ListProfileSourceLogoURLs(activeProfile.ID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to load linked site logos")
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
 	if strings.TrimSpace(hxTrigger) != "" {

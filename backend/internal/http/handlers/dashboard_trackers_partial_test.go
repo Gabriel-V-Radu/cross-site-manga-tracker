@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
@@ -15,6 +16,23 @@ const (
 	mangafireSeriesURL = "https://mangafire.to/manga/sample.abc"
 	comickSeriesURL    = "https://comick.dev/comic/sample"
 )
+
+// testSourceKeyForURL stands in for the lookup the handler injects, which in
+// the running app reads the hosts the connectors claim. It is spelled out here
+// so the policy below is pinned on its own: which site a link is attributed to
+// is a separate question from which connectors happen to be registered.
+func testSourceKeyForURL(rawURL string) string {
+	switch {
+	case strings.Contains(rawURL, "mangafire.to"):
+		return "mangafire"
+	case strings.Contains(rawURL, "comick.dev"):
+		return "comick"
+	case strings.Contains(rawURL, "mangaupdates.com"):
+		return "mangaupdates"
+	default:
+		return ""
+	}
+}
 
 func sampleAlternates() []repository.TrackerSourceRef {
 	return []repository.TrackerSourceRef{
@@ -60,6 +78,7 @@ func TestDecideTrackerLinksPrefersTheConfirmedChapterSite(t *testing.T) {
 		LatestChapter:     chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
 		ReporterSourceKey: "comick",
 		CoverSourceKey:    "comick",
+		SourceKeyForURL:   testSourceKeyForURL,
 	})
 
 	if decision.LatestChapterSiteKey != "mangafire" {
@@ -124,6 +143,7 @@ func TestDecideTrackerLinksKeepsThePrimaryBadgeWhenItServedTheCard(t *testing.T)
 		PrimarySourceURL: mangafireSeriesURL,
 		Alternates:       sampleAlternates(),
 		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		SourceKeyForURL:  testSourceKeyForURL,
 	})
 
 	if decision.ServingSourceKey != "mangafire" {
@@ -221,6 +241,7 @@ func TestDecideTrackerLinksPinnedChapterLinkStillSetsTheBadge(t *testing.T) {
 		Pinned:           &pinned,
 		Alternates:       sampleAlternates(),
 		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		SourceKeyForURL:  testSourceKeyForURL,
 	})
 
 	if decision.ServingSourceKey != "mangafire" {
@@ -255,6 +276,7 @@ func TestDecideTrackerLinksLastReadLinkIsIndependent(t *testing.T) {
 		PrimarySourceURL: primarySeriesURL,
 		Alternates:       sampleAlternates(),
 		LastReadChapter:  chapterLinkLookup{Attempted: true, URL: "https://comick.dev/comic/sample/chapter-12", Resolved: true},
+		SourceKeyForURL:  testSourceKeyForURL,
 	})
 
 	if resolved.LastReadChapterSiteKey != "comick" {
@@ -264,6 +286,28 @@ func TestDecideTrackerLinksLastReadLinkIsIndependent(t *testing.T) {
 	// newest chapter, so it never wins the badge.
 	if resolved.ServingSourceKey != "" {
 		t.Fatalf("expected the last-read link not to decide the badge, got %q", resolved.ServingSourceKey)
+	}
+}
+
+// TestDecideTrackerLinksWithoutASiteLookupNamesNoSite pins the default the
+// arbitration keeps when no lookup is supplied: links still resolve, but
+// nothing is attributed to a site — the same answer an unknown host gets.
+func TestDecideTrackerLinksWithoutASiteLookupNamesNoSite(t *testing.T) {
+	decision := decideTrackerLinks(trackerLinkInputs{
+		PrimarySourceKey: "mangaupdates",
+		PrimarySourceURL: primarySeriesURL,
+		Alternates:       sampleAlternates(),
+		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+	})
+
+	if decision.LatestChapterURL != "https://mangafire.to/read/sample.abc/en/chapter-82" {
+		t.Fatalf("expected the confirmed link to stand, got %q", decision.LatestChapterURL)
+	}
+	if decision.LatestChapterSiteKey != "" {
+		t.Fatalf("expected no site label without a lookup, got %q", decision.LatestChapterSiteKey)
+	}
+	if decision.HighlightURL != primarySeriesURL {
+		t.Fatalf("expected the open-to-read button unmoved without a lookup, got %q", decision.HighlightURL)
 	}
 }
 
@@ -277,6 +321,7 @@ func TestDecideTrackerLinksIgnoresAnUnrecognisedChapterHost(t *testing.T) {
 		Alternates:        sampleAlternates(),
 		LatestChapter:     chapterLinkLookup{Attempted: true, URL: "https://unknown-mirror.example/read/sample/82", Resolved: true},
 		ReporterSourceKey: "comick",
+		SourceKeyForURL:   testSourceKeyForURL,
 	})
 
 	if decision.LatestChapterURL != "https://unknown-mirror.example/read/sample/82" {
