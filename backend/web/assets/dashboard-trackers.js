@@ -658,6 +658,38 @@ window.renderTrackersSkeleton = function (viewMode) {
         '<div class="' + (mode === 'list' ? 'cards-list' : 'cards-grid') + '">' + items.join('') + '</div>';
 };
 
+// A silent cover refresh replaces the whole trackers region, and everything
+// the user was holding open or pointing at goes with it: the connector menu
+// and the rating popovers are <details> elements that come back closed, and a
+// hovered link loses its highlight for the instant the element is swapped —
+// which reads as the page flickering under the cursor for no reason. The
+// covers being waited on are never urgent, so the refresh yields to whatever
+// the user is doing and asks again shortly. Hover only counts over the
+// connector strip: the pointer rests over the card grid most of the time, and
+// deferring on that would stop covers from ever arriving.
+window.trackersInteractionInProgress = function () {
+    var zone = document.getElementById('trackers-zone');
+    if (!zone) {
+        return false;
+    }
+
+    if (zone.querySelector('details[open]')) {
+        return true;
+    }
+
+    var strip = zone.querySelector('.pagination-site-links');
+    if (strip && strip.matches && strip.matches(':hover')) {
+        return true;
+    }
+
+    var focused = document.activeElement;
+    if (focused && focused !== document.body && zone.contains(focused)) {
+        return true;
+    }
+
+    return false;
+};
+
 document.body.addEventListener('htmx:beforeRequest', function (event) {
     var detail = event && event.detail;
     if (!detail || !detail.target || detail.target.id !== 'trackers-zone') {

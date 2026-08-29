@@ -136,6 +136,14 @@
                 }
             }
 
+            // Same courtesy for an open menu, a hovered connector or a focused
+            // control: swapping the region out from under the pointer closes
+            // what the user opened and flickers what they are pointing at.
+            if (window.trackersInteractionInProgress && window.trackersInteractionInProgress()) {
+                window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
+                return;
+            }
+
             window.__silentCoverRefresh = true;
             document.body.dispatchEvent(new Event('trackersChanged'));
         };
