@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,8 +12,12 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
+// fakeRepo's mutations are mutex-guarded: RunOnce shards trackers across
+// goroutines, so different sources' polls write here concurrently. Tests read
+// the fields only after RunOnce returns, which happens-after every write.
 type fakeRepo struct {
 	items               []repository.PollingTracker
+	mu                  sync.Mutex
 	updatedCount        int
 	updatedItemID       *string
 	updatedURL          string
@@ -30,6 +36,8 @@ func (f *fakeRepo) ListForPolling() ([]repository.PollingTracker, error) {
 }
 
 func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.updatedCount++
 	f.updatedItemID = update.SourceItemID
 	f.updatedURL = update.SourceURL
@@ -44,6 +52,8 @@ func (f *fakeRepo) UpdatePollingState(update repository.PollingUpdate) error {
 }
 
 func (f *fakeRepo) MarkPollCheckedAt(trackerID int64, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.markedChecked = append(f.markedChecked, trackerID)
 	return nil
 }
@@ -964,6 +974,126 @@ func TestPollerRunOnce_SkipsCoolingDownAlternate(t *testing.T) {
 	}
 	if repo.updatedLatest == nil || *repo.updatedLatest != next {
 		t.Fatalf("expected the live mirror's chapter %.1f, got %#v", next, repo.updatedLatest)
+	}
+}
+
+// rendezvousConnector's resolve refuses to finish until every sibling has
+// also started resolving. Registered for two different sources, it can only
+// succeed if the poller polls those sources on separate goroutines — the
+// property the per-source sharding exists to provide.
+type rendezvousConnector struct {
+	key   string
+	ready *sync.WaitGroup
+}
+
+func (c rendezvousConnector) Key() string                       { return c.key }
+func (c rendezvousConnector) Name() string                      { return c.key }
+func (c rendezvousConnector) Kind() string                      { return connectors.KindNative }
+func (c rendezvousConnector) HealthCheck(context.Context) error { return nil }
+func (c rendezvousConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (c rendezvousConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	c.ready.Done()
+	met := make(chan struct{})
+	go func() {
+		c.ready.Wait()
+		close(met)
+	}()
+	select {
+	case <-met:
+		chapter := 5.0
+		return &connectors.MangaResult{SourceKey: c.key, LatestChapter: &chapter}, nil
+	case <-time.After(2 * time.Second):
+		return nil, errors.New("the other source never started resolving: polls ran sequentially")
+	}
+}
+
+// TestPollerRunOnce_PollsDifferentSourcesInParallel pins the sharding: two
+// trackers on different sources must be in flight at the same time. Were the
+// cycle sequential again, the first resolve would time out waiting for the
+// second and only one tracker would update.
+func TestPollerRunOnce_PollsDifferentSourcesInParallel(t *testing.T) {
+	repo := &fakeRepo{items: []repository.PollingTracker{
+		{ID: 1, Title: "A", Status: "reading", SourceURL: "https://one/series", SourceKey: "sourceone"},
+		{ID: 2, Title: "B", Status: "reading", SourceURL: "https://two/series", SourceKey: "sourcetwo"},
+	}}
+
+	var ready sync.WaitGroup
+	ready.Add(2)
+	registry := connectors.NewRegistry()
+	if err := registry.Register(rendezvousConnector{key: "sourceone", ready: &ready}); err != nil {
+		t.Fatalf("register first connector: %v", err)
+	}
+	if err := registry.Register(rendezvousConnector{key: "sourcetwo", ready: &ready}); err != nil {
+		t.Fatalf("register second connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedCount != 2 {
+		t.Fatalf("expected both sources to resolve concurrently and update, got %d updates", repo.updatedCount)
+	}
+}
+
+// overlapCountingConnector records whether two resolves were ever in flight at
+// once. The sleep gives an accidental overlap room to actually happen instead
+// of the second resolve slotting in after an instantly returning first.
+type overlapCountingConnector struct {
+	key        string
+	inFlight   atomic.Int32
+	overlapped atomic.Bool
+}
+
+func (c *overlapCountingConnector) Key() string                       { return c.key }
+func (c *overlapCountingConnector) Name() string                      { return c.key }
+func (c *overlapCountingConnector) Kind() string                      { return connectors.KindNative }
+func (c *overlapCountingConnector) HealthCheck(context.Context) error { return nil }
+func (c *overlapCountingConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (c *overlapCountingConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	if c.inFlight.Add(1) > 1 {
+		c.overlapped.Store(true)
+	}
+	time.Sleep(10 * time.Millisecond)
+	c.inFlight.Add(-1)
+	chapter := 5.0
+	return &connectors.MangaResult{SourceKey: c.key, LatestChapter: &chapter}, nil
+}
+
+// TestPollerRunOnce_KeepsOneSourceSequential pins the other half of the
+// sharding contract: trackers of the same source stay on one goroutine, so a
+// host never has more than one poll request queued against its pacing gap.
+func TestPollerRunOnce_KeepsOneSourceSequential(t *testing.T) {
+	items := make([]repository.PollingTracker, 0, 5)
+	for i := int64(1); i <= 5; i++ {
+		items = append(items, repository.PollingTracker{
+			ID: i, Title: "A", Status: "reading",
+			SourceURL: "https://one/series", SourceKey: "sourceone",
+		})
+	}
+	repo := &fakeRepo{items: items}
+
+	connector := &overlapCountingConnector{key: "sourceone"}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if connector.overlapped.Load() {
+		t.Fatal("two polls of the same source were in flight at once")
+	}
+	if repo.updatedCount != 5 {
+		t.Fatalf("expected all 5 trackers to update, got %d", repo.updatedCount)
 	}
 }
 
