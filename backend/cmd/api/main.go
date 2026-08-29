@@ -64,9 +64,13 @@ func main() {
 		poller.Start(pollerCtx)
 	}
 
+	// Listen returns nil on graceful Shutdown, so anything on this channel is a
+	// real failure (port taken, socket error). Without it the process would keep
+	// running headless — poller alive, no HTTP — and Docker would never restart it.
+	serverErr := make(chan error, 1)
 	go func() {
 		if err := app.Listen(":" + cfg.Port); err != nil {
-			slog.Error("server stopped", "error", err)
+			serverErr <- err
 		}
 	}()
 
@@ -74,14 +78,23 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	<-ctx.Done()
 
-	slog.Info("shutting down server")
+	exitCode := 0
+	select {
+	case <-ctx.Done():
+		slog.Info("shutting down server")
+	case err := <-serverErr:
+		slog.Error("server stopped unexpectedly", "error", err)
+		exitCode = 1
+	}
 	pollerCancel()
 	poller.StopWait(2 * time.Second)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }

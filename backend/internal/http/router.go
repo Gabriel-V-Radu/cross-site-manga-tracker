@@ -2,6 +2,7 @@ package http
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -18,9 +19,17 @@ func NewServer(cfg config.Config, db *sql.DB) *fiber.App {
 func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Registry) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName: cfg.AppName,
+		// Without these fasthttp keeps stalled connections forever; on the Pi
+		// dead clients on flaky Wi-Fi accumulate. WriteTimeout stays generous
+		// because live source searches can legitimately take tens of seconds.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 2 * time.Minute,
+		IdleTimeout:  2 * time.Minute,
 	})
 
-	app.Use(recover.New())
+	// Default recover.New swallows panics without logging; the stack trace is
+	// the only way to debug a panicking handler from docker logs.
+	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
 
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)
