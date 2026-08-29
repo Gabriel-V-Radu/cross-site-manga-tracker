@@ -116,7 +116,7 @@ func TestSourceKeyForURLWithoutARegistry(t *testing.T) {
 
 func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 	lastCheckedAt := time.Now().UTC()
-	h := &DashboardHandler{}
+	h := newCardTestHandler(nil, fakeCoverResolver{}, fakeChapterLinkResolver{})
 	items := []models.Tracker{{
 		ID:            1,
 		Title:         "Sample",
@@ -146,7 +146,7 @@ func TestBuildTrackerCardsDoesNotUseLastCheckedAtAsReleaseDate(t *testing.T) {
 func TestBuildTrackerCardsShowsChapterSeenAtAsApproximateRelease(t *testing.T) {
 	chapter := 20.0
 	seenAt := time.Now().UTC().Add(-48 * time.Hour)
-	h := &DashboardHandler{}
+	h := newCardTestHandler(nil, fakeCoverResolver{}, fakeChapterLinkResolver{})
 	items := []models.Tracker{{
 		ID:                  1,
 		Title:               "Sample",
@@ -179,7 +179,7 @@ func TestBuildTrackerCardsPrefersReportedReleaseDate(t *testing.T) {
 	chapter := 20.0
 	releasedAt := time.Now().UTC().Add(-2 * time.Hour)
 	seenAt := time.Now().UTC().Add(-48 * time.Hour)
-	h := &DashboardHandler{}
+	h := newCardTestHandler(nil, fakeCoverResolver{}, fakeChapterLinkResolver{})
 	items := []models.Tracker{{
 		ID:                  1,
 		Title:               "Sample",

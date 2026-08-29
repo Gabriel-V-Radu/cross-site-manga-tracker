@@ -1,16 +1,11 @@
 package handlers
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gofiber/fiber/v2"
@@ -63,7 +58,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	listOptions.Limit = pageSize
 	listOptions.Offset = offset
 	refreshKey := c.OriginalURL()
-	h.setActiveTrackersPageKey(refreshKey)
+	h.pageKeys.SetActive(refreshKey)
 
 	items, err := h.trackerRepo.List(listOptions)
 	if err != nil {
@@ -306,7 +301,7 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 
 	latestChapter := chapterLinkLookup{Attempted: item.LatestKnownChapter != nil}
 	if latestChapter.Attempted {
-		chapterURL, resolved, waitingChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
+		chapterURL, resolved, waitingChapterURL := h.chapterLinks.Lookup(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
 		latestChapter.URL = chapterURL
 		latestChapter.Resolved = resolved
 		if waitingChapterURL {
@@ -316,7 +311,7 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 
 	lastReadChapter := chapterLinkLookup{Attempted: item.LastReadChapter != nil}
 	if lastReadChapter.Attempted {
-		chapterURL, resolved, waitingChapterURL := h.getCachedOrQueueChapterURL(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
+		chapterURL, resolved, waitingChapterURL := h.chapterLinks.Lookup(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
 		lastReadChapter.URL = chapterURL
 		lastReadChapter.Resolved = resolved
 		if waitingChapterURL {
@@ -327,7 +322,7 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 	// The cover is looked up against the primary source even under a pin: a
 	// pin narrows where the user is sent to read, not which site's art the
 	// card is allowed to show.
-	coverURL, coverSourceKey, waitingCover := h.getCachedOrQueueCover(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
+	coverURL, coverSourceKey, waitingCover := h.covers.Lookup(sourceKey, item.SourceURL, item.SourceItemID, alternates, pageKey)
 	card.CoverURL = coverURL
 	if waitingCover {
 		waiting = true
@@ -656,350 +651,4 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 		return links, nil
 	}
 	return links[:maxVisibleSiteLinks], links[maxVisibleSiteLinks:]
-}
-
-// getCachedOrQueueCover returns the cover URL, the source key that supplied it,
-// and whether a background fetch is still pending. The serving source is empty
-// until a fetch completes, so a first render shows the tracker's primary source
-// and a later one corrects it if a fallback answered instead.
-func (h *DashboardHandler) getCachedOrQueueCover(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (string, string, bool) {
-	trimmedSourceKey := strings.TrimSpace(sourceKey)
-	if trimmedSourceKey == "" {
-		return "", "", false
-	}
-
-	cacheKey := buildCoverCacheKey(trimmedSourceKey, sourceURL, sourceItemID)
-	if cachedURL, servingKey, found, ok := h.getCachedCoverWithSource(cacheKey); ok {
-		if found {
-			return cachedURL, servingKey, false
-		}
-		return "", "", false
-	}
-
-	if strings.TrimSpace(sourceURL) == "" {
-		h.setCachedCover(cacheKey, "", false, jitteredTTL(lookupUnreachableTTL))
-		return "", "", false
-	}
-
-	h.queueCoverFetch(trimmedSourceKey, sourceURL, sourceItemID, alternates, cacheKey, pageKey)
-	return "", "", true
-}
-
-func (h *DashboardHandler) queueCoverFetch(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {
-	h.coverFetchMu.Lock()
-	if h.coverInFlight[cacheKey] {
-		h.coverFetchMu.Unlock()
-		return
-	}
-	h.coverInFlight[cacheKey] = true
-	h.coverFetchMu.Unlock()
-
-	go func() {
-		isMangafire := strings.EqualFold(strings.TrimSpace(sourceKey), "mangafire")
-		if isMangafire {
-			h.mangafireCoverSem <- struct{}{}
-		} else {
-			h.coverFetchSem <- struct{}{}
-		}
-		defer func() {
-			if isMangafire {
-				<-h.mangafireCoverSem
-			} else {
-				<-h.coverFetchSem
-			}
-			h.coverFetchMu.Lock()
-			delete(h.coverInFlight, cacheKey)
-			h.coverFetchMu.Unlock()
-		}()
-
-		if pageKey != "" && !h.isActiveTrackersPageKey(pageKey) {
-			return
-		}
-
-		_, _ = h.fetchCoverURL(context.Background(), sourceKey, sourceURL, sourceItemID, alternates)
-	}()
-}
-
-// getCachedOrQueueChapterURL returns a chapter's reader URL, whether that URL is
-// a resolved chapter link rather than the series page it degrades to, and whether
-// a background resolve is still pending. The caller needs the middle value to tell
-// "this link opens chapter 65 on some site" from "we gave up and pointed at the
-// series page", because only the former says which site is serving the card.
-func (h *DashboardHandler) getCachedOrQueueChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool) {
-	trimmedSourceURL := strings.TrimSpace(sourceURL)
-	if trimmedSourceURL == "" {
-		return "", false, false
-	}
-
-	trimmedSourceKey := strings.TrimSpace(sourceKey)
-	if trimmedSourceKey == "" {
-		return trimmedSourceURL, false, false
-	}
-
-	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
-	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
-		if found {
-			return cachedChapterURL, true, false
-		}
-		return trimmedSourceURL, false, false
-	}
-
-	h.queueChapterURLResolve(trimmedSourceKey, trimmedSourceURL, chapter, alternates, cacheKey, pageKey)
-	return trimmedSourceURL, false, true
-}
-
-func (h *DashboardHandler) queueChapterURLResolve(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, cacheKey string, pageKey string) {
-	h.chapterURLFetchMu.Lock()
-	if h.chapterURLInFlight[cacheKey] {
-		h.chapterURLFetchMu.Unlock()
-		return
-	}
-	h.chapterURLInFlight[cacheKey] = true
-	h.chapterURLFetchMu.Unlock()
-
-	go func() {
-		h.chapterURLFetchSem <- struct{}{}
-		defer func() {
-			<-h.chapterURLFetchSem
-			h.chapterURLFetchMu.Lock()
-			delete(h.chapterURLInFlight, cacheKey)
-			h.chapterURLFetchMu.Unlock()
-		}()
-
-		if pageKey != "" && !h.isActiveTrackersPageKey(pageKey) {
-			return
-		}
-
-		_, _ = h.fetchChapterURL(sourceKey, sourceURL, chapter, alternates)
-	}()
-}
-
-func (h *DashboardHandler) setActiveTrackersPageKey(pageKey string) {
-	h.activePageMu.Lock()
-	h.activePageKey = strings.TrimSpace(pageKey)
-	h.activePageMu.Unlock()
-}
-
-func (h *DashboardHandler) isActiveTrackersPageKey(pageKey string) bool {
-	h.activePageMu.RLock()
-	activePage := h.activePageKey
-	h.activePageMu.RUnlock()
-	return strings.TrimSpace(pageKey) != "" && strings.TrimSpace(pageKey) == strings.TrimSpace(activePage)
-}
-
-// readerCandidateRank orders a tracker's linked sources for chapter-link
-// resolution when no reading pin narrows the choice. Each site's tier is the
-// connector's own (SiteInfo.ReaderRank), so the chain follows the site the
-// connector says it reads rather than a second table here that could disagree
-// with it. Origin scanlator sites go first: for their own series they are where
-// chapters appear before any aggregator mirrors them, and their readers are the
-// best of the chain. Then the fresh aggregators, then the remaining reader
-// sites in their incoming order. The info floor ranks last: those sites always
-// have the chapter page, which makes them the reliable fallback, but their
-// readers are the worst of the chain — see fetchChapterURL for how the floor is
-// only reached after every readable site and every offline-built link had its
-// turn. A source with no connector, or one that publishes no metadata, keeps
-// the default tier it has always had.
-func (h *DashboardHandler) readerCandidateRank(sourceKey string) int {
-	info, ok := h.siteInfoForKey(sourceKey)
-	if !ok {
-		return connectors.ReaderRankDefault
-	}
-	return info.ReaderRank()
-}
-
-// orderReaderCandidates reorders candidates in place by the rank function,
-// keeping the incoming order (primary first, then linked alternates) between
-// sources of equal rank. The ranking is passed in so the ordering can be
-// exercised against any rank table, the handler's included.
-func orderReaderCandidates(candidates []repository.TrackerSourceRef, rank func(sourceKey string) int) {
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return rank(candidates[i].SourceKey) < rank(candidates[j].SourceKey)
-	})
-}
-
-// fetchChapterURL resolves a chapter's reader URL across a tracker's linked
-// sources in three tiers, so a blocked site does not leave every chapter link
-// pointing nowhere useful. First, every readable site in reading-priority
-// order (see orderReaderCandidates) gets to verify it carries the chapter —
-// a resolver that answers ErrChapterNotFound has answered, and cedes its
-// turn for this chapter. Second, a site that could not be asked at all but
-// can construct its reader URL offline (MangaFire behind its challenge)
-// serves the built link — the reader's own browser passes the challenge the
-// server cannot, so an unverified link there beats a verified one on the
-// floor. Third, the info-floor sites (ComicK): they always carry the chapter
-// page, but nobody wants to read there, so they only serve when nothing else
-// could.
-func (h *DashboardHandler) fetchChapterURL(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
-	trimmedSourceURL := strings.TrimSpace(sourceURL)
-	if trimmedSourceURL == "" {
-		return "", fmt.Errorf("missing source url")
-	}
-
-	trimmedSourceKey := strings.TrimSpace(sourceKey)
-	if trimmedSourceKey == "" {
-		return trimmedSourceURL, nil
-	}
-
-	cacheKey := buildChapterURLCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
-	if cachedChapterURL, found, ok := h.getCachedChapterURL(cacheKey); ok {
-		if found {
-			return cachedChapterURL, nil
-		}
-		return trimmedSourceURL, fmt.Errorf("chapter url not found")
-	}
-
-	// Primary source first, then the tracker's other linked sources, reordered
-	// by reading priority.
-	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
-	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: trimmedSourceKey, SourceURL: trimmedSourceURL})
-	candidates = append(candidates, alternates...)
-	orderReaderCandidates(candidates, h.readerCandidateRank)
-
-	// A source that was actually queried and failed may succeed shortly; one with
-	// no usable connector will not, so the two are cached for different spans.
-	attempted := false
-	var lastErr error
-
-	// Sites whose resolver could not be asked (as opposed to answering "not
-	// carried") and that can build their reader URL offline, in chain order.
-	type blockedLinkable struct {
-		linker connectors.OfflineChapterLinker
-		url    string
-	}
-	blocked := make([]blockedLinkable, 0, 1)
-	infoFloor := make([]repository.TrackerSourceRef, 0, 1)
-
-	resolveCandidate := func(candidateKey, candidateURL string) (string, bool) {
-		connector, ok := h.registry.Get(candidateKey)
-		if !ok {
-			lastErr = fmt.Errorf("connector not found")
-			return "", false
-		}
-
-		resolver, ok := connector.(connectors.ChapterURLResolver)
-		if !ok {
-			lastErr = fmt.Errorf("chapter resolver not supported")
-			return "", false
-		}
-
-		attempted = true
-		chapterURL, err := h.resolveChapterURLFromConnector(resolver, candidateURL, chapter)
-		switch {
-		case err != nil:
-			lastErr = err
-			// The site answered "I do not carry this chapter": its turn is
-			// over, a built link would point at a page known not to exist.
-			// Any other failure means the site never answered, so its
-			// offline-built link may still claim a turn in the second tier.
-			if !errors.Is(err, connectors.ErrChapterNotFound) {
-				if linker, ok := connector.(connectors.OfflineChapterLinker); ok {
-					blocked = append(blocked, blockedLinkable{linker: linker, url: candidateURL})
-				}
-			}
-		case chapterURL == "":
-			lastErr = fmt.Errorf("chapter url empty")
-		default:
-			return chapterURL, true
-		}
-		return "", false
-	}
-
-	// Tier 1: readable sites that verify they carry the chapter.
-	for _, candidate := range candidates {
-		candidateKey := strings.TrimSpace(candidate.SourceKey)
-		candidateURL := strings.TrimSpace(candidate.SourceURL)
-		if candidateKey == "" || candidateURL == "" {
-			continue
-		}
-		if h.readerCandidateRank(candidateKey) == connectors.ReaderRankInfoFloor {
-			infoFloor = append(infoFloor, candidate)
-			continue
-		}
-
-		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
-			return chapterURL, nil
-		}
-	}
-
-	// Tier 2: offline-built links from sites that could not be asked. Cached
-	// for the retry span, not the full 12 hours: once the site answers the
-	// server again, a verified resolution should replace the guess soon
-	// rather than a day later.
-	for _, candidate := range blocked {
-		if built, buildOK := candidate.linker.BuildChapterURL(candidate.url, chapter); buildOK && strings.TrimSpace(built) != "" {
-			h.setCachedChapterURL(cacheKey, built, true, jitteredTTL(lookupRetryTTL))
-			return built, nil
-		}
-	}
-
-	// Tier 3: the info floor — typically the site that reported the chapter
-	// number in the first place, so at least its chapter page exists.
-	for _, candidate := range infoFloor {
-		candidateKey := strings.TrimSpace(candidate.SourceKey)
-		candidateURL := strings.TrimSpace(candidate.SourceURL)
-		if candidateKey == "" || candidateURL == "" {
-			continue
-		}
-		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			h.setCachedChapterURL(cacheKey, chapterURL, true, 12*time.Hour)
-			return chapterURL, nil
-		}
-	}
-
-	negativeTTL := lookupUnreachableTTL
-	if attempted {
-		negativeTTL = lookupRetryTTL
-	}
-	h.setCachedChapterURL(cacheKey, "", false, jitteredTTL(negativeTTL))
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no usable source")
-	}
-	return trimmedSourceURL, fmt.Errorf("resolve chapter url: %w", lastErr)
-}
-
-func (h *DashboardHandler) resolveChapterURLFromConnector(resolver connectors.ChapterURLResolver, sourceURL string, chapter float64) (string, error) {
-	// Background work behind the shared per-host throttle: see the cover
-	// resolve timeout for why this is generous.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	chapterURL, err := resolver.ResolveChapterURL(ctx, sourceURL, chapter)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(chapterURL), nil
-}
-
-func buildChapterURLCacheKey(sourceKey, sourceURL string, chapter float64) string {
-	return strings.ToLower(strings.TrimSpace(sourceKey)) + "|" + strings.ToLower(strings.TrimSpace(sourceURL)) + "|" + strconv.FormatFloat(chapter, 'f', -1, 64)
-}
-
-func (h *DashboardHandler) getCachedChapterURL(cacheKey string) (chapterURL string, found bool, ok bool) {
-	h.chapterURLCacheMu.RLock()
-	entry, exists := h.chapterURLCache[cacheKey]
-	h.chapterURLCacheMu.RUnlock()
-	if !exists {
-		return "", false, false
-	}
-
-	if time.Now().UTC().After(entry.ExpiresAt) {
-		h.chapterURLCacheMu.Lock()
-		delete(h.chapterURLCache, cacheKey)
-		h.chapterURLCacheMu.Unlock()
-		return "", false, false
-	}
-
-	return entry.ChapterURL, entry.Found, true
-}
-
-func (h *DashboardHandler) setCachedChapterURL(cacheKey, chapterURL string, found bool, ttl time.Duration) {
-	h.chapterURLCacheMu.Lock()
-	h.chapterURLCache[cacheKey] = chapterURLCacheEntry{
-		ChapterURL: chapterURL,
-		Found:      found,
-		ExpiresAt:  time.Now().UTC().Add(ttl),
-	}
-	h.chapterURLCacheMu.Unlock()
 }

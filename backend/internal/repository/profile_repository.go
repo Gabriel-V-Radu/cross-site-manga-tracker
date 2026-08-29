@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -16,7 +17,11 @@ func NewProfileRepository(db *sql.DB) *ProfileRepository {
 }
 
 func (r *ProfileRepository) List() ([]models.Profile, error) {
-	rows, err := r.db.Query(`
+	return r.ListContext(context.Background())
+}
+
+func (r *ProfileRepository) ListContext(ctx context.Context) ([]models.Profile, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		ORDER BY id ASC
@@ -43,62 +48,68 @@ func (r *ProfileRepository) List() ([]models.Profile, error) {
 }
 
 func (r *ProfileRepository) GetByID(id int64) (*models.Profile, error) {
-	row := r.db.QueryRow(`
+	return r.GetByIDContext(context.Background(), id)
+}
+
+func (r *ProfileRepository) GetByIDContext(ctx context.Context, id int64) (*models.Profile, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		WHERE id = ?
 	`, id)
 
-	var item models.Profile
-	if err := row.Scan(&item.ID, &item.Key, &item.Name, &item.CreatedAt, &item.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get profile by id: %w", err)
-	}
-
-	return &item, nil
+	return scanProfile(row, "get profile by id")
 }
 
 func (r *ProfileRepository) GetByKey(key string) (*models.Profile, error) {
-	row := r.db.QueryRow(`
+	return r.GetByKeyContext(context.Background(), key)
+}
+
+func (r *ProfileRepository) GetByKeyContext(ctx context.Context, key string) (*models.Profile, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		WHERE key = ?
 	`, key)
 
-	var item models.Profile
-	if err := row.Scan(&item.ID, &item.Key, &item.Name, &item.CreatedAt, &item.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get profile by key: %w", err)
-	}
-
-	return &item, nil
+	return scanProfile(row, "get profile by key")
 }
 
 func (r *ProfileRepository) GetDefault() (*models.Profile, error) {
-	row := r.db.QueryRow(`
+	return r.GetDefaultContext(context.Background())
+}
+
+func (r *ProfileRepository) GetDefaultContext(ctx context.Context) (*models.Profile, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		ORDER BY id ASC
 		LIMIT 1
 	`)
 
+	return scanProfile(row, "get default profile")
+}
+
+// scanProfile reads one profile row, reporting a missing row as (nil, nil) the
+// way every lookup here has always done.
+func scanProfile(row rowScanner, operation string) (*models.Profile, error) {
 	var item models.Profile
 	if err := row.Scan(&item.ID, &item.Key, &item.Name, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get default profile: %w", err)
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	return &item, nil
 }
 
 func (r *ProfileRepository) Rename(id int64, name string) (bool, error) {
-	result, err := r.db.Exec(`
+	return r.RenameContext(context.Background(), id, name)
+}
+
+func (r *ProfileRepository) RenameContext(ctx context.Context, id int64, name string) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE profiles
 		SET name = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND name IS NOT ?

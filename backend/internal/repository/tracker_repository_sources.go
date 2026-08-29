@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -9,7 +10,11 @@ import (
 )
 
 func (r *TrackerRepository) ListLinkedSourceIDs(profileID int64) ([]int64, error) {
-	rows, err := r.db.Query(`
+	return r.ListLinkedSourceIDsContext(context.Background(), profileID)
+}
+
+func (r *TrackerRepository) ListLinkedSourceIDsContext(ctx context.Context, profileID int64) ([]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id
 		FROM (
 			SELECT source_id
@@ -49,7 +54,11 @@ func (r *TrackerRepository) ListLinkedSourceIDs(profileID int64) ([]int64, error
 // serves, counting a tracker once per source whether it is the primary or a
 // linked alternate. The dashboard uses it to rank the connector shortcuts.
 func (r *TrackerRepository) CountTrackersBySource(profileID int64) (map[int64]int, error) {
-	rows, err := r.db.Query(`
+	return r.CountTrackersBySourceContext(context.Background(), profileID)
+}
+
+func (r *TrackerRepository) CountTrackersBySourceContext(ctx context.Context, profileID int64) (map[int64]int, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id, COUNT(1)
 		FROM (
 			SELECT id AS tracker_id, source_id FROM trackers WHERE profile_id = ?
@@ -83,7 +92,11 @@ func (r *TrackerRepository) CountTrackersBySource(profileID int64) (map[int64]in
 }
 
 func (r *TrackerRepository) ListTrackerSources(profileID int64, trackerID int64) ([]models.TrackerSource, error) {
-	rows, err := r.db.Query(`
+	return r.ListTrackerSourcesContext(context.Background(), profileID, trackerID)
+}
+
+func (r *TrackerRepository) ListTrackerSourcesContext(ctx context.Context, profileID int64, trackerID int64) ([]models.TrackerSource, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			ts.id,
 			ts.tracker_id,
@@ -135,13 +148,17 @@ func (r *TrackerRepository) ListTrackerSources(profileID int64, trackerID int64)
 }
 
 func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int64, sources []models.TrackerSource) error {
-	tx, err := r.db.Begin()
+	return r.ReplaceTrackerSourcesContext(context.Background(), profileID, trackerID, sources)
+}
+
+func (r *TrackerRepository) ReplaceTrackerSourcesContext(ctx context.Context, profileID int64, trackerID int64, sources []models.TrackerSource) error {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin replace tracker sources tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	if err := replaceTrackerSourcesInTx(tx, profileID, trackerID, sources); err != nil {
+	if err := replaceTrackerSourcesInTx(ctx, tx, profileID, trackerID, sources); err != nil {
 		return err
 	}
 
@@ -155,8 +172,8 @@ func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int
 // replaceTrackerSourcesInTx is ReplaceTrackerSources' body on a caller-owned
 // transaction, so Create can run the tracker INSERT and its source rows as one
 // atomic write. The caller commits or rolls back.
-func replaceTrackerSourcesInTx(tx *sql.Tx, profileID int64, trackerID int64, sources []models.TrackerSource) error {
-	if _, err := tx.Exec(`
+func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64, trackerID int64, sources []models.TrackerSource) error {
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tracker_sources
 		WHERE tracker_id = ?
 		  AND EXISTS (SELECT 1 FROM trackers t WHERE t.id = ? AND t.profile_id = ?)
@@ -168,7 +185,7 @@ func replaceTrackerSourcesInTx(tx *sql.Tx, profileID int64, trackerID int64, sou
 		if strings.TrimSpace(source.SourceURL) == "" || source.SourceID <= 0 {
 			continue
 		}
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
 		`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL)); err != nil {
@@ -180,19 +197,23 @@ func replaceTrackerSourcesInTx(tx *sql.Tx, profileID int64, trackerID int64, sou
 }
 
 func (r *TrackerRepository) UpsertTrackerSource(profileID int64, trackerID int64, source models.TrackerSource) error {
+	return r.UpsertTrackerSourceContext(context.Background(), profileID, trackerID, source)
+}
+
+func (r *TrackerRepository) UpsertTrackerSourceContext(ctx context.Context, profileID int64, trackerID int64, source models.TrackerSource) error {
 	if source.SourceID <= 0 || strings.TrimSpace(source.SourceURL) == "" {
 		return nil
 	}
 
 	var exists int
-	if err := r.db.QueryRow(`SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&exists); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&exists); err != nil {
 		return fmt.Errorf("check tracker ownership: %w", err)
 	}
 	if exists == 0 {
 		return nil
 	}
 
-	_, err := r.db.Exec(`
+	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(tracker_id, source_id, source_url)

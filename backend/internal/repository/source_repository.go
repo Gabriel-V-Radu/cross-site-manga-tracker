@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -17,7 +18,11 @@ func NewSourceRepository(db *sql.DB) *SourceRepository {
 }
 
 func (r *SourceRepository) ListEnabled() ([]models.Source, error) {
-	rows, err := r.db.Query(`
+	return r.ListEnabledContext(context.Background())
+}
+
+func (r *SourceRepository) ListEnabledContext(ctx context.Context) ([]models.Source, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
 		WHERE enabled = 1
@@ -65,51 +70,36 @@ func (r *SourceRepository) ListEnabled() ([]models.Source, error) {
 }
 
 func (r *SourceRepository) GetByID(id int64) (*models.Source, error) {
-	row := r.db.QueryRow(`
+	return r.GetByIDContext(context.Background(), id)
+}
+
+func (r *SourceRepository) GetByIDContext(ctx context.Context, id int64) (*models.Source, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
 		WHERE id = ?
 	`, id)
 
-	var source models.Source
-	var baseURL sql.NullString
-	var configPath sql.NullString
-	var enabled bool
-	if err := row.Scan(
-		&source.ID,
-		&source.Key,
-		&source.Name,
-		&source.ConnectorKind,
-		&baseURL,
-		&configPath,
-		&enabled,
-		&source.CreatedAt,
-		&source.UpdatedAt,
-	); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get source by id: %w", err)
-	}
-
-	source.Enabled = enabled
-	if baseURL.Valid {
-		source.BaseURL = &baseURL.String
-	}
-	if configPath.Valid {
-		source.ConfigPath = &configPath.String
-	}
-
-	return &source, nil
+	return scanSource(row, "get source by id")
 }
 
 func (r *SourceRepository) GetByKey(key string) (*models.Source, error) {
-	row := r.db.QueryRow(`
+	return r.GetByKeyContext(context.Background(), key)
+}
+
+func (r *SourceRepository) GetByKeyContext(ctx context.Context, key string) (*models.Source, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
 		WHERE key = ?
 	`, strings.TrimSpace(strings.ToLower(key)))
 
+	return scanSource(row, "get source by key")
+}
+
+// scanSource reads one source row, reporting a missing row as (nil, nil) the
+// way both lookups have always done.
+func scanSource(row rowScanner, operation string) (*models.Source, error) {
 	var source models.Source
 	var baseURL sql.NullString
 	var configPath sql.NullString
@@ -128,7 +118,7 @@ func (r *SourceRepository) GetByKey(key string) (*models.Source, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get source by key: %w", err)
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	source.Enabled = enabled
@@ -143,7 +133,11 @@ func (r *SourceRepository) GetByKey(key string) (*models.Source, error) {
 }
 
 func (r *SourceRepository) ListProfileSourceLogoURLs(profileID int64) (map[int64]string, error) {
-	rows, err := r.db.Query(`
+	return r.ListProfileSourceLogoURLsContext(context.Background(), profileID)
+}
+
+func (r *SourceRepository) ListProfileSourceLogoURLsContext(ctx context.Context, profileID int64) (map[int64]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id, logo_url
 		FROM profile_source_logos
 		WHERE profile_id = ?
@@ -176,10 +170,15 @@ func (r *SourceRepository) ListProfileSourceLogoURLs(profileID int64) (map[int64
 }
 
 func (r *SourceRepository) UpsertProfileSourceLogoURLs(profileID int64, logoBySourceID map[int64]string) error {
-	tx, err := r.db.Begin()
+	return r.UpsertProfileSourceLogoURLsContext(context.Background(), profileID, logoBySourceID)
+}
+
+func (r *SourceRepository) UpsertProfileSourceLogoURLsContext(ctx context.Context, profileID int64, logoBySourceID map[int64]string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin source logo urls tx: %w", err)
 	}
+	defer tx.Rollback()
 
 	for sourceID, logoURL := range logoBySourceID {
 		if sourceID <= 0 {
@@ -188,17 +187,16 @@ func (r *SourceRepository) UpsertProfileSourceLogoURLs(profileID int64, logoBySo
 
 		trimmedLogoURL := strings.TrimSpace(logoURL)
 		if trimmedLogoURL == "" {
-			if _, err := tx.Exec(`
+			if _, err := tx.ExecContext(ctx, `
 				DELETE FROM profile_source_logos
 				WHERE profile_id = ? AND source_id = ?
 			`, profileID, sourceID); err != nil {
-				tx.Rollback()
 				return fmt.Errorf("delete profile source logo: %w", err)
 			}
 			continue
 		}
 
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO profile_source_logos (profile_id, source_id, logo_url)
 			VALUES (?, ?, ?)
 			ON CONFLICT(profile_id, source_id)
@@ -206,7 +204,6 @@ func (r *SourceRepository) UpsertProfileSourceLogoURLs(profileID int64, logoBySo
 				logo_url = excluded.logo_url,
 				updated_at = CURRENT_TIMESTAMP
 		`, profileID, sourceID, trimmedLogoURL); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("upsert profile source logo: %w", err)
 		}
 	}

@@ -1,4 +1,4 @@
-package handlers
+package resolve
 
 import (
 	"database/sql"
@@ -19,7 +19,7 @@ func openCoverPersistenceTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "..", "migrations")); err != nil {
+	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := database.SeedDefaults(db); err != nil {
@@ -28,19 +28,31 @@ func openCoverPersistenceTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// TestCoverCacheSurvivesHandlerRestart pins why the cover cache is persisted
-// at all: an in-memory-only cache made every container restart re-resolve
-// every card's cover against rate-limited sources.
-func TestCoverCacheSurvivesHandlerRestart(t *testing.T) {
+// newPersistentCoverResolver models the running app's resolver minus the
+// network: it writes through to the store, which is what these tests are about.
+func newPersistentCoverResolver(t *testing.T, db *sql.DB) *CoverResolver {
+	t.Helper()
+	resolver := NewCoverResolver(CoverConfig{
+		Store: repository.NewCoverCacheRepository(db),
+		Dir:   t.TempDir(),
+	})
+	t.Cleanup(resolver.Close)
+	return resolver
+}
+
+// TestCoverCacheSurvivesRestart pins why the cover cache is persisted at all:
+// an in-memory-only cache made every container restart re-resolve every card's
+// cover against rate-limited sources.
+func TestCoverCacheSurvivesRestart(t *testing.T) {
 	db := openCoverPersistenceTestDB(t)
 
-	first := NewDashboardHandler(db, nil)
-	cacheKey := buildCoverCacheKey("comick", "https://comick.dev/comic/kagura-bachi", nil)
-	first.setCachedCoverFromSource(cacheKey, "https://meo.comick.pictures/KrNwor.jpg", "comick", true, 12*time.Hour)
+	first := newPersistentCoverResolver(t, db)
+	cacheKey := coverCacheKey("comick", "https://comick.dev/comic/kagura-bachi", nil)
+	first.cacheResultFromSource(cacheKey, "https://meo.comick.pictures/KrNwor.jpg", "comick", true, 12*time.Hour)
 
-	// A second handler over the same DB models the restarted process.
-	second := NewDashboardHandler(db, nil)
-	coverURL, sourceKey, found, ok := second.getCachedCoverWithSource(cacheKey)
+	// A second resolver over the same DB models the restarted process.
+	second := newPersistentCoverResolver(t, db)
+	coverURL, sourceKey, found, ok := second.cachedWithSource(cacheKey)
 	if !ok || !found {
 		t.Fatalf("expected the cover to survive the restart, got ok=%v found=%v", ok, found)
 	}
@@ -55,19 +67,19 @@ func TestCoverCacheSurvivesHandlerRestart(t *testing.T) {
 func TestNegativeCoverInvalidationClearsStore(t *testing.T) {
 	db := openCoverPersistenceTestDB(t)
 
-	first := NewDashboardHandler(db, nil)
-	negativeKey := buildCoverCacheKey("mangafire", "https://mangafire.to/title/x", nil)
-	first.setCachedCover(negativeKey, "", false, time.Hour)
-	positiveKey := buildCoverCacheKey("comick", "https://comick.dev/comic/y", nil)
-	first.setCachedCoverFromSource(positiveKey, "https://cover", "comick", true, time.Hour)
+	first := newPersistentCoverResolver(t, db)
+	negativeKey := coverCacheKey("mangafire", "https://mangafire.to/title/x", nil)
+	first.cacheResult(negativeKey, "", false, time.Hour)
+	positiveKey := coverCacheKey("comick", "https://comick.dev/comic/y", nil)
+	first.cacheResultFromSource(positiveKey, "https://cover", "comick", true, time.Hour)
 
-	first.invalidateLinkLookups()
+	first.InvalidateNegatives()
 
-	second := NewDashboardHandler(db, nil)
-	if _, _, _, ok := second.getCachedCoverWithSource(negativeKey); ok {
+	second := newPersistentCoverResolver(t, db)
+	if _, _, _, ok := second.cachedWithSource(negativeKey); ok {
 		t.Fatalf("negative entry must not survive invalidation")
 	}
-	if _, _, found, ok := second.getCachedCoverWithSource(positiveKey); !ok || !found {
+	if _, _, found, ok := second.cachedWithSource(positiveKey); !ok || !found {
 		t.Fatalf("positive entry must survive invalidation")
 	}
 }
@@ -78,7 +90,7 @@ func TestExpiredPersistedCoversAreNotServed(t *testing.T) {
 	db := openCoverPersistenceTestDB(t)
 
 	store := repository.NewCoverCacheRepository(db)
-	expiredKey := buildCoverCacheKey("comick", "https://comick.dev/comic/z", nil)
+	expiredKey := coverCacheKey("comick", "https://comick.dev/comic/z", nil)
 	if err := store.Upsert(repository.CoverCacheRow{
 		CacheKey:  expiredKey,
 		CoverURL:  "https://stale",
@@ -89,8 +101,8 @@ func TestExpiredPersistedCoversAreNotServed(t *testing.T) {
 		t.Fatalf("seed expired row: %v", err)
 	}
 
-	handler := NewDashboardHandler(db, nil)
-	if _, _, _, ok := handler.getCachedCoverWithSource(expiredKey); ok {
+	resolver := newPersistentCoverResolver(t, db)
+	if _, _, _, ok := resolver.cachedWithSource(expiredKey); ok {
 		t.Fatalf("expired persisted cover must not be served")
 	}
 }

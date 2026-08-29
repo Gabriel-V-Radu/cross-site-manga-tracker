@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -8,8 +9,12 @@ import (
 )
 
 func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
+	return r.SourceExistsContext(context.Background(), sourceID)
+}
+
+func (r *TrackerRepository) SourceExistsContext(ctx context.Context, sourceID int64) (bool, error) {
 	var count int
-	err := r.db.QueryRow(`SELECT COUNT(1) FROM sources WHERE id = ?`, sourceID).Scan(&count)
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM sources WHERE id = ?`, sourceID).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check source exists: %w", err)
 	}
@@ -17,6 +22,10 @@ func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
 }
 
 func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
+	return r.CreateContext(context.Background(), tracker)
+}
+
+func (r *TrackerRepository) CreateContext(ctx context.Context, tracker *models.Tracker) (*models.Tracker, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
 
 	// The tracker row and its primary source row are one write: committing the
@@ -24,13 +33,13 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 	// no tracker_sources rows behind. With MaxOpenConns(1) everything up to
 	// Commit must run on the tx handle — including GetByID staying AFTER the
 	// commit, since it would otherwise wait on the connection this tx holds.
-	tx, err := r.db.Begin()
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin create tracker tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	result, err := tx.Exec(`
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO trackers (
 			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, latest_chapter_seen_at, last_checked_at, last_read_at
 		)
@@ -45,7 +54,7 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("get tracker last insert id: %w", err)
 	}
 
-	if err := replaceTrackerSourcesInTx(tx, tracker.ProfileID, id, []models.TrackerSource{{
+	if err := replaceTrackerSourcesInTx(ctx, tx, tracker.ProfileID, id, []models.TrackerSource{{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
@@ -57,11 +66,15 @@ func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, er
 		return nil, fmt.Errorf("commit create tracker tx: %w", err)
 	}
 
-	return r.GetByID(tracker.ProfileID, id)
+	return r.GetByIDContext(ctx, tracker.ProfileID, id)
 }
 
 func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker, error) {
-	row := r.db.QueryRow(`
+	return r.GetByIDContext(context.Background(), profileID, id)
+}
+
+func (r *TrackerRepository) GetByIDContext(ctx context.Context, profileID int64, id int64) (*models.Tracker, error) {
+	row := r.db.QueryRowContext(ctx, `
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
 			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
@@ -79,7 +92,7 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 		return nil, fmt.Errorf("get tracker by id: %w", err)
 	}
 
-	tagsByTracker, err := r.ListTagsByTrackerIDs(profileID, []int64{tracker.ID})
+	tagsByTracker, err := r.ListTagsByTrackerIDsContext(ctx, profileID, []int64{tracker.ID})
 	if err != nil {
 		return nil, fmt.Errorf("get tracker tags: %w", err)
 	}
@@ -89,8 +102,12 @@ func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker,
 }
 
 func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
+	return r.UpdateContext(context.Background(), profileID, id, tracker)
+}
+
+func (r *TrackerRepository) UpdateContext(ctx context.Context, profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
-	result, err := r.db.Exec(`
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET
 			title = ?,
@@ -164,10 +181,10 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 		return nil, fmt.Errorf("tracker update rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return r.GetByID(profileID, id)
+		return r.GetByIDContext(ctx, profileID, id)
 	}
 
-	if err := r.UpsertTrackerSource(profileID, id, models.TrackerSource{
+	if err := r.UpsertTrackerSourceContext(ctx, profileID, id, models.TrackerSource{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
@@ -175,7 +192,7 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 		return nil, fmt.Errorf("upsert primary tracker source: %w", err)
 	}
 
-	return r.GetByID(profileID, id)
+	return r.GetByIDContext(ctx, profileID, id)
 }
 
 // SetReadingSource pins (or, with nil, unpins) the source a tracker's reading
@@ -183,9 +200,13 @@ func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tr
 // sources or its primary; anything else clears the preference rather than
 // storing a dangling pointer.
 func (r *TrackerRepository) SetReadingSource(profileID int64, id int64, readingSourceID *int64) error {
+	return r.SetReadingSourceContext(context.Background(), profileID, id, readingSourceID)
+}
+
+func (r *TrackerRepository) SetReadingSourceContext(ctx context.Context, profileID int64, id int64, readingSourceID *int64) error {
 	if readingSourceID != nil {
 		var linked int
-		err := r.db.QueryRow(`
+		err := r.db.QueryRowContext(ctx, `
 			SELECT COUNT(1) FROM trackers t
 			WHERE t.id = ? AND t.profile_id = ?
 			  AND (t.source_id = ? OR EXISTS (
@@ -201,7 +222,7 @@ func (r *TrackerRepository) SetReadingSource(profileID int64, id int64, readingS
 		}
 	}
 
-	if _, err := r.db.Exec(`
+	if _, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET reading_source_id = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND profile_id = ? AND reading_source_id IS NOT ?
@@ -212,7 +233,11 @@ func (r *TrackerRepository) SetReadingSource(profileID int64, id int64, readingS
 }
 
 func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, lastReadChapter *float64) (bool, error) {
-	result, err := r.db.Exec(`
+	return r.UpdateLastReadChapterContext(context.Background(), profileID, id, lastReadChapter)
+}
+
+func (r *TrackerRepository) UpdateLastReadChapterContext(ctx context.Context, profileID int64, id int64, lastReadChapter *float64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET
 			last_read_chapter = ?,
@@ -235,7 +260,11 @@ func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, las
 }
 
 func (r *TrackerRepository) UpdateRating(profileID int64, id int64, rating *float64) (bool, error) {
-	result, err := r.db.Exec(`
+	return r.UpdateRatingContext(context.Background(), profileID, id, rating)
+}
+
+func (r *TrackerRepository) UpdateRatingContext(ctx context.Context, profileID int64, id int64, rating *float64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET
 			rating = ?,
@@ -257,7 +286,11 @@ func (r *TrackerRepository) UpdateRating(profileID int64, id int64, rating *floa
 }
 
 func (r *TrackerRepository) Delete(profileID int64, id int64) (bool, error) {
-	result, err := r.db.Exec(`DELETE FROM trackers WHERE id = ? AND profile_id = ?`, id, profileID)
+	return r.DeleteContext(context.Background(), profileID, id)
+}
+
+func (r *TrackerRepository) DeleteContext(ctx context.Context, profileID int64, id int64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM trackers WHERE id = ? AND profile_id = ?`, id, profileID)
 	if err != nil {
 		return false, fmt.Errorf("delete tracker: %w", err)
 	}

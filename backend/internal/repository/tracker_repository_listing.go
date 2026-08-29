@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -11,6 +12,10 @@ import (
 )
 
 func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, error) {
+	return r.ListContext(context.Background(), options)
+}
+
+func (r *TrackerRepository) ListContext(ctx context.Context, options TrackerListOptions) ([]models.Tracker, error) {
 	validSortFields := map[string]string{
 		"title":           "title",
 		"created_at":      "created_at",
@@ -62,7 +67,32 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		}
 	}
 
-	rows, err := r.db.Query(query, args...)
+	trackers, err := r.queryTrackers(ctx, query, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(trackers) == 0 {
+		return trackers, nil
+	}
+
+	tagsByTracker, err := r.ListTagsByTrackerIDsContext(ctx, options.ProfileID, trackerIDs(trackers))
+	if err != nil {
+		return nil, fmt.Errorf("list tracker tags: %w", err)
+	}
+	for index := range trackers {
+		trackers[index].Tags = tagsByTracker[trackers[index].ID]
+	}
+
+	return trackers, nil
+}
+
+// queryTrackers drains the cursor into a slice and closes it before returning.
+// The tag lookup that follows in ListContext is a second query on the same
+// single-connection pool, so it must not start while this cursor still holds
+// the connection.
+func (r *TrackerRepository) queryTrackers(ctx context.Context, query string, args []any) ([]models.Tracker, error) {
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers: %w", err)
 	}
@@ -81,22 +111,14 @@ func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, 
 		return nil, fmt.Errorf("iterate tracker rows: %w", err)
 	}
 
-	if len(trackers) == 0 {
-		return trackers, nil
-	}
-
-	tagsByTracker, err := r.ListTagsByTrackerIDs(options.ProfileID, trackerIDs(trackers))
-	if err != nil {
-		return nil, fmt.Errorf("list tracker tags: %w", err)
-	}
-	for index := range trackers {
-		trackers[index].Tags = tagsByTracker[trackers[index].ID]
-	}
-
 	return trackers, nil
 }
 
 func (r *TrackerRepository) Count(options TrackerListOptions) (int, error) {
+	return r.CountContext(context.Background(), options)
+}
+
+func (r *TrackerRepository) CountContext(ctx context.Context, options TrackerListOptions) (int, error) {
 	query := `SELECT COUNT(1) FROM trackers`
 	whereClauses, args := buildTrackerListFilters(options)
 	if len(whereClauses) > 0 {
@@ -104,7 +126,7 @@ func (r *TrackerRepository) Count(options TrackerListOptions) (int, error) {
 	}
 
 	var total int
-	if err := r.db.QueryRow(query, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("count trackers: %w", err)
 	}
 
@@ -230,16 +252,37 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 }
 
 func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
-	query := `
+	return r.ListForPollingContext(context.Background())
+}
+
+func (r *TrackerRepository) ListForPollingContext(ctx context.Context) ([]PollingTracker, error) {
+	items, err := r.listPollingTrackers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	alternates, err := r.listPollingAlternateSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].AlternateSources = alternates[items[index].ID]
+	}
+
+	return items, nil
+}
+
+// listPollingTrackers drains its cursor before returning so the alternates
+// query that follows is not issued against a connection this one still holds.
+func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingTracker, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
 			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
 			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
-	`
-
-	rows, err := r.db.Query(query)
+	`)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers for polling: %w", err)
 	}
@@ -297,14 +340,6 @@ func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
 		return nil, fmt.Errorf("iterate polling trackers: %w", err)
 	}
 
-	alternates, err := r.listPollingAlternateSources()
-	if err != nil {
-		return nil, err
-	}
-	for index := range items {
-		items[index].AlternateSources = alternates[items[index].ID]
-	}
-
 	return items, nil
 }
 
@@ -325,8 +360,8 @@ const alternateSourcesOrder = ` ORDER BY ts.tracker_id ASC, s.name ASC, ts.id AS
 // listPollingAlternateSources loads alternates for every tracker in the database,
 // keyed by tracker id. Loaded in one query rather than per tracker to keep polling
 // a two-query operation regardless of library size.
-func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]TrackerSourceRef, error) {
-	rows, err := r.db.Query(alternateSourcesQuery + alternateSourcesOrder)
+func (r *TrackerRepository) listPollingAlternateSources(ctx context.Context) (map[int64][]TrackerSourceRef, error) {
+	rows, err := r.db.QueryContext(ctx, alternateSourcesQuery+alternateSourcesOrder)
 	if err != nil {
 		return nil, fmt.Errorf("list polling alternate sources: %w", err)
 	}
@@ -338,7 +373,11 @@ func (r *TrackerRepository) listPollingAlternateSources() (map[int64][]TrackerSo
 // source; when that source is unreadable it falls back to these, so a blocked site
 // does not leave the whole library without cover art or working chapter links.
 func (r *TrackerRepository) ListAlternateSourcesByTracker(profileID int64) (map[int64][]TrackerSourceRef, error) {
-	rows, err := r.db.Query(alternateSourcesQuery+` AND t.profile_id = ?`+alternateSourcesOrder, profileID)
+	return r.ListAlternateSourcesByTrackerContext(context.Background(), profileID)
+}
+
+func (r *TrackerRepository) ListAlternateSourcesByTrackerContext(ctx context.Context, profileID int64) (map[int64][]TrackerSourceRef, error) {
+	rows, err := r.db.QueryContext(ctx, alternateSourcesQuery+` AND t.profile_id = ?`+alternateSourcesOrder, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list alternate sources by tracker: %w", err)
 	}
@@ -376,7 +415,11 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 // become idle-skippable, and the poller retries it in full every cycle for as
 // long as the outage lasts.
 func (r *TrackerRepository) MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error {
-	if _, err := r.db.Exec(`UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
+	return r.MarkPollCheckedAtContext(context.Background(), trackerID, checkedAt)
+}
+
+func (r *TrackerRepository) MarkPollCheckedAtContext(ctx context.Context, trackerID int64, checkedAt time.Time) error {
+	if _, err := r.db.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
 		return fmt.Errorf("mark poll checked: %w", err)
 	}
 	return nil
@@ -395,6 +438,10 @@ func (r *TrackerRepository) MarkPollCheckedAt(trackerID int64, checkedAt time.Ti
 // the DELETE and the INSERT used to drop the primary-source mirror row
 // permanently.
 func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, error) {
+	return r.UpdatePollingStateContext(context.Background(), update)
+}
+
+func (r *TrackerRepository) UpdatePollingStateContext(ctx context.Context, update PollingUpdate) (bool, error) {
 	var latestReleaseValue any
 	if update.LatestReleaseAt != nil {
 		latestReleaseValue = update.LatestReleaseAt.UTC()
@@ -421,7 +468,7 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, erro
 		latestChapterSourceValue = *update.LatestChapterSourceID
 	}
 
-	tx, err := r.db.Begin()
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin polling state tx: %w", err)
 	}
@@ -437,7 +484,7 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, erro
 	// uses the same trick: it only restarts when the pending number itself
 	// changes, so a value that keeps being reported keeps its original timestamp
 	// and can age into confirmation.
-	result, err := tx.Exec(`
+	result, err := tx.ExecContext(ctx, `
 		UPDATE trackers
 		SET source_item_id = COALESCE(?, source_item_id),
 			source_url = COALESCE(?, source_url),
@@ -486,7 +533,7 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, erro
 
 	if update.SourceID > 0 && trimmedSourceURL != "" {
 		if trimmedCurrentSourceURL != "" && !strings.EqualFold(trimmedCurrentSourceURL, trimmedSourceURL) {
-			if _, err := tx.Exec(`
+			if _, err := tx.ExecContext(ctx, `
 				DELETE FROM tracker_sources
 				WHERE tracker_id = ? AND source_id = ? AND LOWER(source_url) = LOWER(?)
 			`, update.TrackerID, update.SourceID, trimmedCurrentSourceURL); err != nil {
@@ -494,7 +541,7 @@ func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, erro
 			}
 		}
 
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
 			ON CONFLICT(tracker_id, source_id, source_url)

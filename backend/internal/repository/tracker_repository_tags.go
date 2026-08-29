@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -9,7 +10,11 @@ import (
 )
 
 func (r *TrackerRepository) ListProfileTags(profileID int64) ([]models.CustomTag, error) {
-	rows, err := r.db.Query(`
+	return r.ListProfileTagsContext(context.Background(), profileID)
+}
+
+func (r *TrackerRepository) ListProfileTagsContext(ctx context.Context, profileID int64) ([]models.CustomTag, error) {
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE profile_id = ?
@@ -50,6 +55,10 @@ func (r *TrackerRepository) ListProfileTags(profileID int64) ([]models.CustomTag
 }
 
 func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
+	return r.UpsertProfileTagContext(context.Background(), profileID, name, iconKey)
+}
+
+func (r *TrackerRepository) UpsertProfileTagContext(ctx context.Context, profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName == "" {
 		return nil, fmt.Errorf("tag name is required")
@@ -63,7 +72,7 @@ func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconK
 		}
 	}
 
-	_, err := r.db.Exec(`
+	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO custom_tags (profile_id, name, icon_key)
 		VALUES (?, ?, ?)
 		ON CONFLICT(profile_id, name)
@@ -75,7 +84,7 @@ func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconK
 		return nil, fmt.Errorf("upsert profile tag: %w", err)
 	}
 
-	row := r.db.QueryRow(`
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE profile_id = ? AND name = ?
@@ -98,6 +107,10 @@ func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconK
 }
 
 func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
+	return r.CreateProfileTagContext(context.Background(), profileID, name, iconKey)
+}
+
+func (r *TrackerRepository) CreateProfileTagContext(ctx context.Context, profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName == "" {
 		return nil, fmt.Errorf("tag name is required")
@@ -111,7 +124,7 @@ func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconK
 		}
 	}
 
-	result, err := r.db.Exec(`
+	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO custom_tags (profile_id, name, icon_key)
 		VALUES (?, ?, ?)
 	`, profileID, trimmedName, normalizedIconKey)
@@ -124,7 +137,7 @@ func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconK
 		return nil, fmt.Errorf("get created profile tag id: %w", err)
 	}
 
-	row := r.db.QueryRow(`
+	row := r.db.QueryRowContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE id = ? AND profile_id = ?
@@ -147,6 +160,10 @@ func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconK
 }
 
 func (r *TrackerRepository) RenameProfileTag(profileID int64, tagID int64, name string) (bool, error) {
+	return r.RenameProfileTagContext(context.Background(), profileID, tagID, name)
+}
+
+func (r *TrackerRepository) RenameProfileTagContext(ctx context.Context, profileID int64, tagID int64, name string) (bool, error) {
 	if tagID <= 0 {
 		return false, nil
 	}
@@ -156,7 +173,7 @@ func (r *TrackerRepository) RenameProfileTag(profileID int64, tagID int64, name 
 		return false, fmt.Errorf("tag name is required")
 	}
 
-	result, err := r.db.Exec(`
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE custom_tags
 		SET name = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND profile_id = ?
@@ -174,11 +191,15 @@ func (r *TrackerRepository) RenameProfileTag(profileID int64, tagID int64, name 
 }
 
 func (r *TrackerRepository) DeleteProfileTag(profileID int64, tagID int64) (bool, error) {
+	return r.DeleteProfileTagContext(context.Background(), profileID, tagID)
+}
+
+func (r *TrackerRepository) DeleteProfileTagContext(ctx context.Context, profileID int64, tagID int64) (bool, error) {
 	if tagID <= 0 {
 		return false, nil
 	}
 
-	result, err := r.db.Exec(`DELETE FROM custom_tags WHERE id = ? AND profile_id = ?`, tagID, profileID)
+	result, err := r.db.ExecContext(ctx, `DELETE FROM custom_tags WHERE id = ? AND profile_id = ?`, tagID, profileID)
 	if err != nil {
 		return false, fmt.Errorf("delete profile tag: %w", err)
 	}
@@ -192,65 +213,37 @@ func (r *TrackerRepository) DeleteProfileTag(profileID int64, tagID int64) (bool
 }
 
 func (r *TrackerRepository) ReplaceTrackerTags(profileID int64, trackerID int64, tagIDs []int64) error {
-	tx, err := r.db.Begin()
+	return r.ReplaceTrackerTagsContext(context.Background(), profileID, trackerID, tagIDs)
+}
+
+func (r *TrackerRepository) ReplaceTrackerTagsContext(ctx context.Context, profileID int64, trackerID int64, tagIDs []int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin replace tracker tags tx: %w", err)
 	}
+	defer tx.Rollback()
 
 	var trackerExists int
-	if err := tx.QueryRow(`SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&trackerExists); err != nil {
-		tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&trackerExists); err != nil {
 		return fmt.Errorf("check tracker ownership for tags: %w", err)
 	}
 	if trackerExists == 0 {
-		tx.Rollback()
 		return nil
 	}
 
-	if _, err := tx.Exec(`DELETE FROM tracker_tags WHERE tracker_id = ?`, trackerID); err != nil {
-		tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tracker_tags WHERE tracker_id = ?`, trackerID); err != nil {
 		return fmt.Errorf("delete tracker tags: %w", err)
 	}
 
 	uniqueTagIDs := dedupePositiveInt64(tagIDs)
 	if len(uniqueTagIDs) > 0 {
-		lookupArgs := make([]any, 0, len(uniqueTagIDs)+1)
-		lookupArgs = append(lookupArgs, profileID)
-		for _, tagID := range uniqueTagIDs {
-			lookupArgs = append(lookupArgs, tagID)
-		}
-
-		rows, err := tx.Query(`
-			SELECT id
-			FROM custom_tags
-			WHERE profile_id = ?
-			  AND id IN (`+sqlPlaceholders(len(uniqueTagIDs))+`)
-		`, lookupArgs...)
+		validTagIDs, err := profileTagIDsInTx(ctx, tx, profileID, uniqueTagIDs)
 		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("lookup profile tags: %w", err)
+			return err
 		}
 
-		validTagIDs := make(map[int64]struct{}, len(uniqueTagIDs))
-		for rows.Next() {
-			var tagID int64
-			if err := rows.Scan(&tagID); err != nil {
-				rows.Close()
-				tx.Rollback()
-				return fmt.Errorf("scan profile tag id: %w", err)
-			}
-			validTagIDs[tagID] = struct{}{}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			tx.Rollback()
-			return fmt.Errorf("iterate profile tag ids: %w", err)
-		}
-		rows.Close()
-
-		insertStmt, err := tx.Prepare(`INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?)`)
+		insertStmt, err := tx.PrepareContext(ctx, `INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?)`)
 		if err != nil {
-			tx.Rollback()
 			return fmt.Errorf("prepare tracker tag insert: %w", err)
 		}
 		defer insertStmt.Close()
@@ -260,8 +253,7 @@ func (r *TrackerRepository) ReplaceTrackerTags(profileID int64, trackerID int64,
 				continue
 			}
 
-			if _, err := insertStmt.Exec(trackerID, tagID); err != nil {
-				tx.Rollback()
+			if _, err := insertStmt.ExecContext(ctx, trackerID, tagID); err != nil {
 				return fmt.Errorf("insert tracker tag: %w", err)
 			}
 		}
@@ -274,7 +266,48 @@ func (r *TrackerRepository) ReplaceTrackerTags(profileID int64, trackerID int64,
 	return nil
 }
 
+// profileTagIDsInTx narrows the requested tag ids to the ones the profile owns.
+// The cursor is drained and closed inside this function on purpose: the
+// statements the caller runs next share the transaction's single connection,
+// and issuing one while these rows were still streaming would block.
+func profileTagIDsInTx(ctx context.Context, tx *sql.Tx, profileID int64, tagIDs []int64) (map[int64]struct{}, error) {
+	lookupArgs := make([]any, 0, len(tagIDs)+1)
+	lookupArgs = append(lookupArgs, profileID)
+	for _, tagID := range tagIDs {
+		lookupArgs = append(lookupArgs, tagID)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id
+		FROM custom_tags
+		WHERE profile_id = ?
+		  AND id IN (`+sqlPlaceholders(len(tagIDs))+`)
+	`, lookupArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("lookup profile tags: %w", err)
+	}
+	defer rows.Close()
+
+	validTagIDs := make(map[int64]struct{}, len(tagIDs))
+	for rows.Next() {
+		var tagID int64
+		if err := rows.Scan(&tagID); err != nil {
+			return nil, fmt.Errorf("scan profile tag id: %w", err)
+		}
+		validTagIDs[tagID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate profile tag ids: %w", err)
+	}
+
+	return validTagIDs, nil
+}
+
 func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []int64) (map[int64][]models.CustomTag, error) {
+	return r.ListTagsByTrackerIDsContext(context.Background(), profileID, trackerIDs)
+}
+
+func (r *TrackerRepository) ListTagsByTrackerIDsContext(ctx context.Context, profileID int64, trackerIDs []int64) (map[int64][]models.CustomTag, error) {
 	result := make(map[int64][]models.CustomTag, len(trackerIDs))
 	if len(trackerIDs) == 0 {
 		return result, nil
@@ -307,7 +340,7 @@ func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []i
 		ORDER BY tt.tracker_id ASC, ct.name ASC, ct.id ASC
 	`
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list tags by tracker ids: %w", err)
 	}

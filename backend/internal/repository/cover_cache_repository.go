@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -34,12 +35,16 @@ type CoverCacheRow struct {
 // turning the next dashboard render into a resolve storm. Entries with a
 // local copy never expire — the file on disk is the cache.
 func (r *CoverCacheRepository) LoadFresh() ([]CoverCacheRow, error) {
+	return r.LoadFreshContext(context.Background())
+}
+
+func (r *CoverCacheRepository) LoadFreshContext(ctx context.Context) ([]CoverCacheRow, error) {
 	now := time.Now().UTC()
-	if _, err := r.db.Exec(`DELETE FROM cover_cache WHERE expires_at <= ? AND local_path = ''`, now); err != nil {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE expires_at <= ? AND local_path = ''`, now); err != nil {
 		return nil, fmt.Errorf("sweep expired covers: %w", err)
 	}
 
-	rows, err := r.db.Query(`
+	rows, err := r.db.QueryContext(ctx, `
 		SELECT cache_key, cover_url, source_key, found, expires_at, local_path
 		FROM cover_cache
 		WHERE expires_at > ? OR local_path <> ''
@@ -64,7 +69,11 @@ func (r *CoverCacheRepository) LoadFresh() ([]CoverCacheRow, error) {
 }
 
 func (r *CoverCacheRepository) Upsert(entry CoverCacheRow) error {
-	_, err := r.db.Exec(`
+	return r.UpsertContext(context.Background(), entry)
+}
+
+func (r *CoverCacheRepository) UpsertContext(ctx context.Context, entry CoverCacheRow) error {
+	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO cover_cache (cache_key, cover_url, source_key, found, expires_at, local_path, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(cache_key) DO UPDATE SET
@@ -82,7 +91,11 @@ func (r *CoverCacheRepository) Upsert(entry CoverCacheRow) error {
 }
 
 func (r *CoverCacheRepository) Delete(cacheKey string) error {
-	if _, err := r.db.Exec(`DELETE FROM cover_cache WHERE cache_key = ?`, cacheKey); err != nil {
+	return r.DeleteContext(context.Background(), cacheKey)
+}
+
+func (r *CoverCacheRepository) DeleteContext(ctx context.Context, cacheKey string) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE cache_key = ?`, cacheKey); err != nil {
 		return fmt.Errorf("delete cover cache entry: %w", err)
 	}
 	return nil
@@ -91,7 +104,11 @@ func (r *CoverCacheRepository) Delete(cacheKey string) error {
 // DeleteNegatives drops every "no cover found" entry, mirroring the in-memory
 // invalidation that runs when a tracker's linked sources change.
 func (r *CoverCacheRepository) DeleteNegatives() error {
-	if _, err := r.db.Exec(`DELETE FROM cover_cache WHERE found = 0`); err != nil {
+	return r.DeleteNegativesContext(context.Background())
+}
+
+func (r *CoverCacheRepository) DeleteNegativesContext(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE found = 0`); err != nil {
 		return fmt.Errorf("delete negative cover entries: %w", err)
 	}
 	return nil
