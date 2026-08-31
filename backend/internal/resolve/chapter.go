@@ -17,6 +17,12 @@ import (
 // page load cannot put one request per card on a site at the same moment.
 const chapterFetchLimit = 10
 
+// verifiedChapterTTL is how long a chapter link a site confirmed is remembered.
+// A chapter's reader URL does not change once the page exists, so this is long:
+// what bounds it is the site renumbering or re-slugging the chapter, not the
+// answer going stale.
+const verifiedChapterTTL = 12 * time.Hour
+
 // chapterEntry is one remembered chapter-link lookup.
 type chapterEntry struct {
 	ChapterURL string
@@ -203,7 +209,7 @@ func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64
 		}
 
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(cacheKey, chapterURL, true, 12*time.Hour)
+			r.cacheResult(cacheKey, chapterURL, true, verifiedChapterTTL)
 			return chapterURL, nil
 		}
 	}
@@ -219,6 +225,19 @@ func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64
 		}
 	}
 
+	// A floor answer reached past a site that was asked and merely did not carry
+	// the chapter *yet* is provisional: that is what a chapter minutes old looks
+	// like, and the better site indexes it within the hour. Remembering it for
+	// the verified span would pin a whole day of reading to the worst site in the
+	// chain — the same reason tier 2 holds its built link only for the retry
+	// span. Captured before the floor's own resolve, which sets the flag too.
+	// With nothing better ever asked — a tracker carrying only floor sources —
+	// there is no better answer coming, so that one keeps the verified span.
+	floorTTL := verifiedChapterTTL
+	if attempted {
+		floorTTL = jitteredTTL(lookupRetryTTL)
+	}
+
 	// Tier 3: the info floor — typically the site that reported the chapter
 	// number in the first place, so at least its chapter page exists.
 	for _, candidate := range infoFloor {
@@ -228,7 +247,7 @@ func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64
 			continue
 		}
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(cacheKey, chapterURL, true, 12*time.Hour)
+			r.cacheResult(cacheKey, chapterURL, true, floorTTL)
 			return chapterURL, nil
 		}
 	}

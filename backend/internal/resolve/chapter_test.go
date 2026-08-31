@@ -313,6 +313,52 @@ func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
 	}
 }
 
+// TestFetchChapterURLFloorAnswerIsProvisional pins how long the floor is
+// allowed to keep a card. A chapter minutes old is on ComicK before anywhere
+// else, so the chain legitimately lands on the floor — but MangaHub and
+// MangaFire index it within the hour, and remembering the floor's answer for
+// the verified span would leave the card opening the worst site in the chain
+// all day. (That is exactly what happened to a MangaFire-primary tracker whose
+// chapter 115 kept opening ComicK hours after both better sites carried it.)
+func TestFetchChapterURLFloorAnswerIsProvisional(t *testing.T) {
+	resolver, alternates := newReaderPriorityResolver(t, 100)
+
+	// ComicK primary, MangaHub the only alternate and one chapter behind.
+	const sourceURL = "https://comick.example/comic/a"
+	if _, err := resolver.fetch("comick", sourceURL, 101, alternates[1:]); err != nil {
+		t.Fatalf("expected the floor to serve the chapter: %v", err)
+	}
+
+	entry, exists := resolver.cache.get(chapterCacheKey("comick", sourceURL, 101))
+	if !exists {
+		t.Fatalf("expected the floor answer to be cached")
+	}
+	if remaining := time.Until(entry.ExpiresAt); remaining > maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected the floor answer held for the retry span, got %s", remaining)
+	}
+}
+
+// TestFetchChapterURLFloorOnlyChainKeepsTheVerifiedSpan is the other half: with
+// no better-ranked site in the chain, the floor's answer is not provisional —
+// nothing is coming to replace it — so re-resolving it every retry span would
+// be a request per render for an answer that cannot change.
+func TestFetchChapterURLFloorOnlyChainKeepsTheVerifiedSpan(t *testing.T) {
+	resolver, _ := newReaderPriorityResolver(t, 100)
+
+	const sourceURL = "https://comick.example/comic/a"
+	if _, err := resolver.fetch("comick", sourceURL, 101, nil); err != nil {
+		t.Fatalf("expected the floor to serve the chapter: %v", err)
+	}
+
+	entry, exists := resolver.cache.get(chapterCacheKey("comick", sourceURL, 101))
+	if !exists {
+		t.Fatalf("expected the floor answer to be cached")
+	}
+	if remaining := time.Until(entry.ExpiresAt); remaining <= maxJitteredTTL(lookupRetryTTL) {
+		t.Fatalf("expected the verified span when nothing better was asked, got %s", remaining)
+	}
+}
+
 // TestOrderReaderCandidates pins the ranking itself: origin scanlator sites
 // first, then MangaHub, ComicK last, everything else keeps its incoming order.
 // It runs against the connector set the app actually ships, since that is where
