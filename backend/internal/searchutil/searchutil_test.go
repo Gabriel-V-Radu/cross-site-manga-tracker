@@ -122,6 +122,33 @@ func TestAnyCandidateMatches(t *testing.T) {
 	}
 }
 
+func TestRelatedTitles(t *testing.T) {
+	got := RelatedTitles("Nano Machine", []string{
+		"Nano Mashin",
+		"나노마신",         // not Latin: dropped
+		"nano-machine", // the primary under another spelling: dropped
+		"Nano Mashin",  // duplicate: dropped
+		"  ",
+		"NanoMachine",
+	})
+	want := []string{"Nano Mashin", "NanoMachine"}
+	if len(got) != len(want) {
+		t.Fatalf("RelatedTitles = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("RelatedTitles = %v, want %v", got, want)
+		}
+	}
+
+	if RelatedTitles("Nano Machine", []string{"Nano Machine", "나노마신"}) != nil {
+		t.Fatal("nothing left must be nil, not an empty slice")
+	}
+	if RelatedTitles("", []string{"Alpha"}) == nil {
+		t.Fatal("an empty primary excludes nothing")
+	}
+}
+
 func TestUniqueNonEmpty(t *testing.T) {
 	t.Run("nil and empty return nil", func(t *testing.T) {
 		if got := UniqueNonEmpty(nil); got != nil {

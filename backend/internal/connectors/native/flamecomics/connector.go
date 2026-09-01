@@ -6,7 +6,6 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,12 +20,20 @@ const (
 	canonicalBaseURL = "https://" + canonicalHost
 )
 
-// siteHosts is the only place the connector's domains are written down. The
-// constructors' default and the Hosts() the registry routes URLs through read
-// the same list, so the two cannot drift apart and leave the site reachable by
-// one path but not the other. Subdomains (www., cdn.) are covered by
-// connectors.HostAllowed.
-var siteHosts = []string{canonicalHost}
+// site is the connector's identity: the one place its key, name, domains,
+// canonical origin and reading tier are written down. The constructors' default
+// and the Hosts() the registry routes URLs through read the same list, so the
+// two cannot drift apart and leave the site reachable by one path but not the
+// other. Subdomains (www., cdn.) are covered by connectors.HostAllowed. Flame
+// is an origin scanlator: for its own series chapters appear here before any
+// aggregator mirrors them.
+var site = connectors.Site{
+	SiteKey:   "flamecomics",
+	SiteName:  "FlameComics",
+	SiteHosts: []string{canonicalHost},
+	Home:      canonicalBaseURL,
+	Rank:      connectors.ReaderRankOrigin,
+}
 
 // flameDateLayouts are the shapes a release date is printed in on the series
 // page; the time-less variants exist because older entries carry only the day.
@@ -50,44 +57,40 @@ var (
 	trailingRegionCodeTitleSuffix = regexp.MustCompile(`\s+(KR|JP|CN|XX)$`)
 )
 
+// Connector reads flamecomics.xyz by scraping its series pages. The embedded
+// Site supplies Key, Name, Kind, the SiteInfo methods and the URL helpers;
+// baseURL is where requests go (the live site, or a test server).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
 }
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     canonicalBaseURL,
-		allowedHost: siteHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		baseURL:    canonicalBaseURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident;
+// tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = siteHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		httpClient: client,
 	}
-}
-
-func (c *Connector) Key() string {
-	return "flamecomics"
-}
-
-func (c *Connector) Name() string {
-	return "FlameComics"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
@@ -96,44 +99,18 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	seriesID, err := c.parseSeriesURL(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
+		return nil, err
 	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to flamecomics")
-	}
-
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "series" {
-		return nil, fmt.Errorf("flamecomics url must match /series/{id}")
-	}
-
-	seriesID := strings.TrimSpace(segments[1])
-	if !seriesIDPattern.MatchString(seriesID) {
-		return nil, fmt.Errorf("invalid flamecomics series id")
-	}
-
 	return c.resolveBySeriesID(ctx, seriesID)
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
-	}
-
-	limit = connectors.ClampSearchLimit(limit)
 
 	body, err := c.fetchPage(ctx, c.baseURL+"/latest")
 	if err != nil {
@@ -148,10 +125,10 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
-	results := make([]connectors.MangaResult, 0, limit)
+	results := make([]connectors.MangaResult, 0, query.Limit)
 	seen := map[string]struct{}{}
 	for _, entry := range entries {
-		if len(results) >= limit {
+		if len(results) >= query.Limit {
 			break
 		}
 
@@ -163,11 +140,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if resolveErr != nil {
 			continue
 		}
-		if !searchutil.AnyCandidateMatches(
-			append([]string{resolved.Title, entry.Title, resolved.SourceItemID}, resolved.RelatedTitles...),
-			normalizedQuery,
-			queryTokens,
-		) {
+		if !query.Matches(append([]string{resolved.Title, entry.Title, resolved.SourceItemID}, resolved.RelatedTitles...)...) {
 			continue
 		}
 
@@ -183,27 +156,9 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("invalid chapter")
 	}
 
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	seriesID, err := c.parseSeriesURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to flamecomics")
-	}
-
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
-	if len(segments) < 2 || segments[0] != "series" {
-		return "", fmt.Errorf("flamecomics url must match /series/{id}")
-	}
-
-	seriesID := strings.TrimSpace(segments[1])
-	if !seriesIDPattern.MatchString(seriesID) {
-		return "", fmt.Errorf("invalid flamecomics series id")
+		return "", err
 	}
 
 	body, err := c.fetchPage(ctx, c.baseURL+"/series/"+seriesID)
@@ -246,10 +201,30 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 			continue
 		}
 
-		return c.absoluteURL(hrefRaw), nil
+		return c.AbsoluteURL(hrefRaw), nil
 	}
 
 	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
+}
+
+// parseSeriesURL checks the URL is this site's and reads the numeric series id
+// out of its /series/{id} path.
+func (c *Connector) parseSeriesURL(rawURL string) (string, error) {
+	parsed, err := c.ParseOwnedURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	segments := connectors.PathSegments(parsed)
+	if len(segments) < 2 || segments[0] != "series" {
+		return "", fmt.Errorf("flamecomics url must match /series/{id}")
+	}
+
+	seriesID := strings.TrimSpace(segments[1])
+	if !seriesIDPattern.MatchString(seriesID) {
+		return "", fmt.Errorf("invalid flamecomics series id")
+	}
+	return seriesID, nil
 }
 
 type seriesEntry struct {
@@ -301,8 +276,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 	if title == "" {
 		title = "Series " + seriesID
 	}
-	relatedTitles := searchutil.ExtractRelatedTitles(body)
-	relatedTitles = removeMatchingTitle(relatedTitles, title)
+	relatedTitles := searchutil.RelatedTitles(title, searchutil.ExtractRelatedTitles(body))
 
 	coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body)))
 	coverImageURL = normalizeFlameImageURL(coverImageURL)
@@ -327,9 +301,7 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 		return nil, nil
 	}
 
-	var latestChapter *float64
-	var latestReleaseAt *time.Time
-
+	var latest connectors.LatestReading
 	for _, loc := range matches {
 		if len(loc) < 4 {
 			continue
@@ -360,26 +332,10 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 			continue
 		}
 
-		parsedDate := parseFlameDate(fullDateTimePattern.FindString(segment))
-		if latestChapter == nil || parsedChapter > *latestChapter {
-			chapterCopy := parsedChapter
-			latestChapter = &chapterCopy
-			if parsedDate != nil {
-				dateCopy := *parsedDate
-				latestReleaseAt = &dateCopy
-			} else {
-				latestReleaseAt = nil
-			}
-			continue
-		}
-
-		if latestChapter != nil && connectors.SameChapter(parsedChapter, *latestChapter) && latestReleaseAt == nil && parsedDate != nil {
-			dateCopy := *parsedDate
-			latestReleaseAt = &dateCopy
-		}
+		latest.Add(parsedChapter, parseFlameDate(fullDateTimePattern.FindString(segment)))
 	}
 
-	return latestChapter, latestReleaseAt
+	return latest.Result()
 }
 
 func parseFlameDate(raw string) *time.Time {
@@ -421,81 +377,12 @@ func normalizeFlameImageURL(raw string) string {
 	return trimmed
 }
 
-func removeMatchingTitle(values []string, title string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-
-	titleKey := searchutil.Normalize(title)
-	filtered := make([]string, 0, len(values))
-	for _, value := range values {
-		candidateKey := searchutil.Normalize(value)
-		if candidateKey == "" {
-			continue
-		}
-		if titleKey != "" && candidateKey == titleKey {
-			continue
-		}
-		filtered = append(filtered, value)
-	}
-
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	return searchutil.UniqueNonEmpty(filtered)
-}
-
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
 	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
 }
 
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: Flame is an origin scanlator —
-// for its own series chapters appear here before any aggregator mirrors them.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankOrigin
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is deliberately the production host rather than c.baseURL: c.baseURL is
-// where requests go (a test server in tests), while the URLs handed back are
-// stored in trackers and opened in the reader's browser, so they must always
-// point at the real site.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalBaseURL
-}
-
+// seriesURL is the stored, canonical address of a series: always on the real
+// site, never on the base URL requests go to.
 func (c *Connector) seriesURL(seriesID string) string {
-	return c.canonicalBaseURL() + "/series/" + seriesID
-}
-
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return c.canonicalBaseURL() + trimmed
-	}
-	return c.canonicalBaseURL() + "/" + trimmed
+	return c.HomeURL() + "/series/" + seriesID
 }

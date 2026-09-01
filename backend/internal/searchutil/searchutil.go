@@ -187,6 +187,35 @@ func FilterEnglishAlphabetNames(values []string) []string {
 	return filtered
 }
 
+// RelatedTitles reduces the alternate names a source lists for a series to the
+// ones worth storing beside the primary title: Latin-alphabet only (the
+// dashboard search and the link scan compare against these, and a Korean or
+// Japanese original never matches an English query), deduplicated by
+// normalized form, and never the primary title itself under another spelling.
+// Seven connectors carried their own copy of this loop; two were identical
+// and the rest differed only in what they forgot.
+func RelatedTitles(primary string, candidates []string) []string {
+	filtered := FilterEnglishAlphabetNames(candidates)
+	if len(filtered) == 0 {
+		return nil
+	}
+	primaryKey := Normalize(primary)
+	if primaryKey == "" {
+		return filtered
+	}
+	kept := make([]string, 0, len(filtered))
+	for _, candidate := range filtered {
+		if Normalize(candidate) == primaryKey {
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
 func IsEnglishAlphabetName(value string) bool {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
