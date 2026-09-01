@@ -7,8 +7,9 @@
 //
 // Each assignment prints the value it replaces. The pending-lower state is
 // cleared (a manual repair supersedes whatever correction was aging toward
-// confirmation) and latest_chapter_seen_at is reset, since the stored
-// timestamp belonged to the junk number's arrival, not a real release.
+// confirmation), latest_chapter_seen_at falls back to the release date or the
+// tracker's creation (the stored timestamp belonged to the junk number's
+// arrival, not a real release), and the reporting source is cleared.
 package main
 
 import (
@@ -58,9 +59,14 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
-		slog.Error("failed to apply migrations", "error", err)
-		os.Exit(1)
+	// Only when the run is going to write: a dry run from a newer checkout than
+	// the running image must not migrate the live database out from under it
+	// (the same rule cleanup-stale-sources follows).
+	if !*dryRun {
+		if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
+			slog.Error("failed to apply migrations", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	repaired, err := runRepairs(db, assignments, *dryRun)
@@ -151,10 +157,17 @@ func runRepairs(db *sql.DB, assignments []assignment, dryRun bool) (int, error) 
 			continue
 		}
 
+		// latest_chapter_seen_at takes the rule migration 0018 backfilled with,
+		// not NULL: the next poll fills a NULL with its own time (UpdatePollingState
+		// COALESCEs it), which ranks the repaired tracker at the top of the
+		// default sort as if the chapter had just appeared. The source that
+		// reported the junk number is dropped too — the number it is attributed
+		// to no longer exists.
 		if _, err := db.Exec(`
 			UPDATE trackers
 			SET latest_known_chapter = ?,
-				latest_chapter_seen_at = NULL,
+				latest_chapter_seen_at = COALESCE(latest_release_at, created_at),
+				latest_chapter_source_id = NULL,
 				pending_lower_chapter = NULL,
 				pending_lower_first_seen_at = NULL,
 				updated_at = CURRENT_TIMESTAMP

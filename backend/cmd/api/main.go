@@ -16,11 +16,19 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/scheduler"
 )
 
+// main only translates run's verdict into an exit code. Every os.Exit used to
+// sit inside the body, past `defer db.Close()`, which a direct exit skips: the
+// "server stopped unexpectedly" path left SQLite unclosed and its -wal/-shm
+// behind — the case restore.ps1 has to defend against.
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
@@ -30,19 +38,19 @@ func main() {
 	db, err := database.Open(cfg.SQLitePath)
 	if err != nil {
 		slog.Error("failed to open sqlite", "path", cfg.SQLitePath, "error", err)
-		os.Exit(1)
+		return 1
 	}
 	defer db.Close()
 
 	if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
 		slog.Error("failed to apply migrations", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.SeedDefaultData {
 		if err := database.SeedDefaults(db); err != nil {
 			slog.Error("failed to seed defaults", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -54,7 +62,7 @@ func main() {
 	app, err := apihttp.BuildServer(cfg, db, connectorRegistry)
 	if err != nil {
 		slog.Error("failed to build http server", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
@@ -101,7 +109,5 @@ func main() {
 	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	return exitCode
 }

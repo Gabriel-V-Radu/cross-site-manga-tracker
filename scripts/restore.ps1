@@ -40,10 +40,29 @@ if ($Mode -eq "local") {
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $preBackup = Join-Path $dbDir "pre-restore-$stamp.sqlite"
         Copy-Item -Path $LocalDbPath -Destination $preBackup -Force
+        # The sidecars carry whatever has not been checkpointed yet; without
+        # them the safety copy is missing the newest writes.
+        foreach ($suffix in @("-wal", "-shm")) {
+            if (Test-Path "$LocalDbPath$suffix") {
+                Copy-Item -Path "$LocalDbPath$suffix" -Destination "$preBackup$suffix" -Force
+            }
+        }
         Write-Host "Pre-restore backup created: $preBackup"
     }
 
     Copy-Item -Path $BackupFile -Destination $LocalDbPath -Force
+    # Same rule as the docker branch below: the backup's own sidecars travel
+    # with it, and a -wal left over from the database being replaced must not
+    # survive, or SQLite replays it on top of the restored file and mixes two
+    # databases. Locally the leftover can simply be deleted.
+    foreach ($suffix in @("-wal", "-shm")) {
+        if (Test-Path "$BackupFile$suffix") {
+            Copy-Item -Path "$BackupFile$suffix" -Destination "$LocalDbPath$suffix" -Force
+        }
+        else {
+            Remove-Item -Path "$LocalDbPath$suffix" -Force -ErrorAction SilentlyContinue
+        }
+    }
     Write-Host "Restore completed (local): $LocalDbPath"
     exit 0
 }

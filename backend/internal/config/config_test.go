@@ -74,3 +74,29 @@ func TestLoadKeepsRunningOnMalformedValues(t *testing.T) {
 		t.Errorf("polling enabled = false, want the true default")
 	}
 }
+
+// APP_PORT was the one setting that could still crash-loop the container: an
+// out-of-range or misspelled port passed Load and failed in Listen.
+func TestLoadFallsBackOnBadPort(t *testing.T) {
+	for _, bad := range []string{"8O80", "0", "70000", "-1", "http"} {
+		t.Run(bad, func(t *testing.T) {
+			t.Setenv("APP_PORT", bad)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if cfg.Port != "8080" {
+				t.Errorf("port = %q, want the 8080 default", cfg.Port)
+			}
+		})
+	}
+
+	t.Setenv("APP_PORT", " 9090 ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Port != "9090" {
+		t.Errorf("port = %q, want 9090", cfg.Port)
+	}
+}

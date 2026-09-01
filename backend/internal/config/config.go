@@ -63,7 +63,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Environment:        getEnv("APP_ENV", "development"),
 		AppName:            getEnv("APP_NAME", "cross-site-tracker"),
-		Port:               getEnv("APP_PORT", "8080"),
+		Port:               getEnvAsPort("APP_PORT", "8080"),
 		SQLitePath:         getEnv("SQLITE_PATH", "./data/app.sqlite"),
 		MigrationsPath:     getEnv("MIGRATIONS_PATH", "./migrations"),
 		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
@@ -132,6 +132,22 @@ func getEnvAsBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// getEnvAsPort is the same policy for the one setting that could still put the
+// container into a restart loop: a port outside 1-65535 (or "8O80") passed
+// Load, app.Listen failed, main exited 1, and compose restarted it forever.
+func getEnvAsPort(key string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		warnBadEnv(key, value, fallback)
+		return fallback
+	}
+	return strconv.Itoa(port)
 }
 
 func getEnvAsInt(key string, fallback int) int {

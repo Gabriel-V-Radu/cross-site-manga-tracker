@@ -433,6 +433,12 @@ func TestApplyCleanupDeletesExactlyStaleEntities(t *testing.T) {
 	db := openTestDB(t)
 	staleID, activeID, promotable, orphan, bystander := seedCleanupScenario(t, db)
 
+	// The bystander's stored chapter number is credited to the stale source.
+	// The column has no foreign key, so the cleanup has to clear it by hand.
+	if _, err := db.Exec(`UPDATE trackers SET latest_chapter_source_id = ? WHERE id = ?`, staleID, bystander); err != nil {
+		t.Fatalf("seed chapter reporter: %v", err)
+	}
+
 	stale, byID, err := listStaleSources(db, buildActiveSourceKeySet())
 	if err != nil {
 		t.Fatalf("list stale sources: %v", err)
@@ -457,13 +463,17 @@ func TestApplyCleanupDeletesExactlyStaleEntities(t *testing.T) {
 		DeletedLinks:     3, // promotable->stale, orphan->stale, bystander->stale
 		// The orphan's suggestion cascades with the tracker delete; only the
 		// surviving bystander's stale suggestion is counted here.
-		DeletedSuggestions: 1,
-		ClearedReadingPins: 1,
-		DeletedSourceLogos: 1,
-		DeletedSources:     2, // mangabuddy plus the zero-usage weebcentral stray
+		DeletedSuggestions:      1,
+		ClearedReadingPins:      1,
+		ClearedChapterReporters: 1,
+		DeletedSourceLogos:      1,
+		DeletedSources:          2, // mangabuddy plus the zero-usage weebcentral stray
 	}
 	if outcome != want {
 		t.Fatalf("outcome = %+v, want %+v", outcome, want)
+	}
+	if got := countRows(t, db, `SELECT COUNT(1) FROM trackers WHERE latest_chapter_source_id = ?`, staleID); got != 0 {
+		t.Fatalf("a tracker still credits its chapter to the deleted source")
 	}
 
 	// The stale source and everything anchored to it is gone.

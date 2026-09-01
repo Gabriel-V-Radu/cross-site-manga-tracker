@@ -61,8 +61,12 @@ type cleanupOutcome struct {
 	DeletedLinks       int64
 	DeletedSuggestions int64
 	ClearedReadingPins int64
-	DeletedSourceLogos int64
-	DeletedSources     int64
+	// ClearedChapterReporters counts trackers whose latest_chapter_source_id
+	// named a deleted source. The column has no foreign key, so without this
+	// it would keep pointing at a row that no longer exists.
+	ClearedChapterReporters int64
+	DeletedSourceLogos      int64
+	DeletedSources          int64
 }
 
 func main() {
@@ -182,6 +186,7 @@ func main() {
 		"deleted_tracker_sources", outcome.DeletedLinks,
 		"deleted_link_suggestions", outcome.DeletedSuggestions,
 		"cleared_reading_pins", outcome.ClearedReadingPins,
+		"cleared_chapter_reporters", outcome.ClearedChapterReporters,
 		"deleted_profile_source_logos", outcome.DeletedSourceLogos,
 		"deleted_sources", outcome.DeletedSources,
 	)
@@ -514,6 +519,23 @@ func applyCleanup(db *sql.DB, staleSources []sourceUsage, promotions []trackerPr
 	if outcome.ClearedReadingPins, err = pinResult.RowsAffected(); err != nil {
 		rollback()
 		return cleanupOutcome{}, fmt.Errorf("rows affected for reading pin clear: %w", err)
+	}
+
+	// Same for the source credited with the stored chapter number: the card
+	// tolerates a dangling id (it falls back to "no reporter"), but the column
+	// must not lie about a source that is about to be deleted.
+	reporterResult, err := tx.Exec(`
+		UPDATE trackers
+		SET latest_chapter_source_id = NULL
+		WHERE latest_chapter_source_id IN (`+placeholders(len(sourceIDs))+`)
+	`, int64SliceToAny(sourceIDs)...)
+	if err != nil {
+		rollback()
+		return cleanupOutcome{}, fmt.Errorf("clear stale chapter reporters: %w", err)
+	}
+	if outcome.ClearedChapterReporters, err = reporterResult.RowsAffected(); err != nil {
+		rollback()
+		return cleanupOutcome{}, fmt.Errorf("rows affected for chapter reporter clear: %w", err)
 	}
 
 	outcome.DeletedSources, err = deleteBySourceID(tx, "sources", "id", sourceIDs)

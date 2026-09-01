@@ -66,6 +66,9 @@ func (t *publicHostTransport) RoundTrip(req *http.Request) (*http.Response, erro
 // on the answer that would have been used.
 func publicAddressTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// No proxy: with HTTPS_PROXY set the dialer would vet the proxy's address
+	// and the proxy would then fetch whatever target the cover URL named.
+	transport.Proxy = nil
 	transport.DialContext = (&net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -87,10 +90,13 @@ func publicAddressTransport() *http.Transport {
 	return transport
 }
 
-// checkCoverTarget rejects a cover URL that is not https or that names a host
-// with any non-public answer. All answers must be public: a name that resolves
-// to both is a rebind attempt, not a CDN.
-func checkCoverTarget(ctx context.Context, target *url.URL) error {
+// checkCoverTarget rejects a cover URL that is not https or that names a
+// non-public address literally. Names are not resolved here: the dialer's
+// Control refuses the address the connection is actually made to, which is the
+// check that holds against a rebinding name, and resolving the name a second
+// time here only doubled the cover DNS traffic on a host where DNS is the
+// dominant latency.
+func checkCoverTarget(_ context.Context, target *url.URL) error {
 	if target == nil || !strings.EqualFold(target.Scheme, "https") {
 		return fmt.Errorf("cover fetch: refusing non-https url")
 	}
@@ -100,31 +106,30 @@ func checkCoverTarget(ctx context.Context, target *url.URL) error {
 		return fmt.Errorf("cover fetch: url without a host")
 	}
 
-	if literal, err := netip.ParseAddr(host); err == nil {
-		if !isPublicAddr(literal) {
-			return fmt.Errorf("cover fetch: refusing address %s", literal)
-		}
-		return nil
-	}
-
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return fmt.Errorf("cover fetch: resolve %s: %w", host, err)
-	}
-	if len(addrs) == 0 {
-		return fmt.Errorf("cover fetch: %s resolves to nothing", host)
-	}
-	for _, addr := range addrs {
-		if !isPublicAddr(addr) {
-			return fmt.Errorf("cover fetch: %s resolves to %s", host, addr)
-		}
+	if literal, err := netip.ParseAddr(host); err == nil && !isPublicAddr(literal) {
+		return fmt.Errorf("cover fetch: refusing address %s", literal)
 	}
 	return nil
 }
 
+// nonPublicPrefixes are the ranges netip's own predicates do not cover but
+// that are no more the public internet than RFC1918 is: the CGNAT range
+// (100.64/10, which Tailscale hands out, so plausible on this Pi), "this
+// network", the IETF protocol assignments block, the benchmarking range, the
+// former class E block, and NAT64's well-known prefix.
+var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+}
+
 // isPublicAddr reports whether an address is one the public internet routes to.
 // Everything it rejects — loopback, RFC1918 and unique-local, link-local,
-// multicast, unspecified — is this machine or this network.
+// multicast, unspecified, and the prefixes above — is this machine or this
+// network.
 func isPublicAddr(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	if !addr.IsValid() {
@@ -139,6 +144,11 @@ func isPublicAddr(addr netip.Addr) bool {
 		addr.IsInterfaceLocalMulticast(),
 		addr.IsMulticast():
 		return false
+	}
+	for _, prefix := range nonPublicPrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
 	}
 	return true
 }

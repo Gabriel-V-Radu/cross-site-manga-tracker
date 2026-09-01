@@ -1,0 +1,12 @@
+# The Dockerfile copies backend/ wholesale. Without this file the build context
+# carried the live database (app.sqlite and its WAL, mid-write), every cover
+# ever downloaded and the uploaded logos: megabytes shipped into the builder
+# layer on every deploy, and since app.sqlite changes between deploys the COPY
+# layer never cached, so the Pi recompiled every package each time.
+.git
+.backups
+backend/data
+**/*_test.go
+*.md
+scripts
+*.cmd

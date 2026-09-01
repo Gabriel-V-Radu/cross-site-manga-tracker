@@ -80,20 +80,32 @@ func TestRunRepairsSetsChapterAndClearsPendingState(t *testing.T) {
 	var (
 		chapter       sql.NullFloat64
 		seenAt        sql.NullString
+		createdAt     string
+		reporter      sql.NullInt64
 		pending       sql.NullFloat64
 		pendingSeenAt sql.NullString
 	)
 	if err := db.QueryRow(`
-		SELECT latest_known_chapter, latest_chapter_seen_at, pending_lower_chapter, pending_lower_first_seen_at
+		SELECT latest_known_chapter, latest_chapter_seen_at, created_at, latest_chapter_source_id,
+			pending_lower_chapter, pending_lower_first_seen_at
 		FROM trackers WHERE id = ?
-	`, id).Scan(&chapter, &seenAt, &pending, &pendingSeenAt); err != nil {
+	`, id).Scan(&chapter, &seenAt, &createdAt, &reporter, &pending, &pendingSeenAt); err != nil {
 		t.Fatalf("read tracker: %v", err)
 	}
 	if !chapter.Valid || chapter.Float64 != 62 {
 		t.Fatalf("expected chapter 62, got %#v", chapter)
 	}
-	if seenAt.Valid || pending.Valid || pendingSeenAt.Valid {
-		t.Fatalf("expected seen-at and pending state cleared, got seenAt=%#v pending=%#v pendingSeenAt=%#v", seenAt, pending, pendingSeenAt)
+	if pending.Valid || pendingSeenAt.Valid {
+		t.Fatalf("expected pending state cleared, got pending=%#v pendingSeenAt=%#v", pending, pendingSeenAt)
+	}
+	// Not NULL: the next poll would fill a NULL with its own time and rank the
+	// repaired tracker as freshly updated. With no release date on record the
+	// fallback is the tracker's creation, the rule migration 0018 used.
+	if !seenAt.Valid || seenAt.String != createdAt {
+		t.Fatalf("expected latest_chapter_seen_at to fall back to created_at %q, got %#v", createdAt, seenAt)
+	}
+	if reporter.Valid {
+		t.Fatalf("expected the reporting source to be cleared, got %d", reporter.Int64)
 	}
 }
 
