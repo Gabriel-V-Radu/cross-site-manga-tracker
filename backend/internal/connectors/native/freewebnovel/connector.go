@@ -67,13 +67,13 @@ func NewConnector() *Connector {
 	return &Connector{
 		baseURL:     canonicalBaseURL,
 		allowedHost: siteHosts,
-		httpClient:  newChromeHTTPClient(12 * time.Second),
+		httpClient:  newChromeHTTPClient(connectors.MinClientTimeout),
 	}
 }
 
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = newChromeHTTPClient(12 * time.Second)
+		client = newChromeHTTPClient(connectors.MinClientTimeout)
 	}
 	if client.Jar == nil {
 		if jar, err := cookiejar.New(nil); err == nil {
@@ -97,6 +97,12 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 // real Chrome fingerprint clears that check. ALPN is pinned to HTTP/1.1 so the
 // negotiated protocol matches net/http's HTTP/1.1 transport (pinning ALPN does
 // not change the JA3, which keys on extension types, not their values).
+//
+// The timeout has to be the shared throttle's floor, not a per-request figure:
+// the transport paces requests to the host, the wait for a slot counts toward
+// Client.Timeout, and the 12s this used to be cut down any request queued more
+// than a dozen deep behind a burst — while the slot it had claimed stayed
+// claimed. Per-request deadlines are the callers' contexts.
 func newChromeHTTPClient(timeout time.Duration) *http.Client {
 	jar, _ := cookiejar.New(nil)
 	transport := &http.Transport{

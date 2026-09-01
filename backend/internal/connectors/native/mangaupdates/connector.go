@@ -147,7 +147,10 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("fetch mangaupdates series: %w", err)
 	}
 
-	latestChapter, releaseAt := c.latestRelease(ctx, seriesID, record.LatestChapter)
+	latestChapter, releaseAt, err := c.latestRelease(ctx, seriesID, record.LatestChapter)
+	if err != nil {
+		return nil, fmt.Errorf("fetch mangaupdates releases: %w", err)
+	}
 
 	related := make([]string, 0, len(record.Associated))
 	for _, associated := range record.Associated {
@@ -169,15 +172,23 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 // latestRelease reads the newest releases and reduces them to one chapter
 // number and its date, applying the staleness guard. recordLatestChapter is
 // the series record's own counter, trusted only alongside a fresh feed.
-func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLatestChapter float64) (*float64, *time.Time) {
+//
+// A release search that fails is returned as the error it is. It used to be
+// folded into "no releases", which the caller then reported as a series with
+// no chapter — a successful resolve as far as the poller could tell, so a
+// transient 429 skipped the fallback sources and left no trace in the log.
+func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLatestChapter float64) (*float64, *time.Time, error) {
 	var response apiReleasesResponse
 	err := c.postJSON(ctx, "/releases/search", map[string]any{
 		"search":      strconv.FormatInt(seriesID, 10),
 		"search_type": "series",
 		"perpage":     10,
 	}, &response)
-	if err != nil || len(response.Results) == 0 {
-		return nil, nil
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(response.Results) == 0 {
+		return nil, nil, nil
 	}
 
 	var best *float64
@@ -203,7 +214,7 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 	// slow one worth reporting: the series record keeps counting only while
 	// releases keep arriving, so a frozen feed means frozen — and wrong — data.
 	if newest == nil || time.Since(*newest) > staleReleaseCutoff {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// The series record's own counter wins only when it is both plausible and
@@ -214,7 +225,7 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 		best = &value
 		bestDate = newest
 	}
-	return best, bestDate
+	return best, bestDate, nil
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {

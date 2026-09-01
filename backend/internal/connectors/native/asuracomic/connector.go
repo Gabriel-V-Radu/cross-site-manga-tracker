@@ -17,9 +17,10 @@ import (
 )
 
 // defaultAllowedHosts is the one list behind both the constructors' default and
-// Hosts(): asuracomic.net is the current domain and asurascans.com the one
-// trackers were linked on before the move, so URLs stored in either era still
-// resolve to this connector.
+// Hosts(): asurascans.com is the current domain (asuracomic.net answers with a
+// 301 to it, verified 2026-09-01) and the one NewConnector fetches from;
+// asuracomic.net is kept because trackers were linked on it before the move,
+// so URLs stored in either era still resolve to this connector.
 var defaultAllowedHosts = []string{"asurascans.com", "asuracomic.net"}
 
 var (

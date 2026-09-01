@@ -131,3 +131,65 @@ func TestMangaDexConnector(t *testing.T) {
 		t.Fatalf("expected 0 results for non-English alias query, got %d", len(nonEnglishResults))
 	}
 }
+
+// A feed that cannot be read must fail the resolve. It used to be swallowed:
+// the connector answered with the record's own chapter (or none) and no date,
+// which the poller records as a successful check — no fallback to the
+// tracker's other sources, no warning. MangaFire's equivalent
+// (TestMangaFireChapterFetchFailureIsAnError) has always behaved this way.
+func TestMangaDexFeedFailureIsAnError(t *testing.T) {
+	const id = "123e4567-e89b-12d3-a456-426614174000"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/manga/"+id, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"id":         id,
+				"attributes": map[string]any{"title": map[string]string{"en": "Test Title"}, "lastChapter": "42"},
+			},
+		})
+	})
+	mux.HandleFunc("/manga/"+id+"/feed", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangadex.org"}, &http.Client{Timeout: 5 * time.Second})
+	result, err := connector.ResolveByURL(context.Background(), "https://mangadex.org/title/"+id)
+	if err == nil {
+		t.Fatalf("expected the feed failure to fail the resolve, got %+v", result)
+	}
+}
+
+// An empty feed is a legitimate answer (a licensed series whose chapters were
+// pulled, a oneshot), distinct from a feed that could not be read: the resolve
+// succeeds and the record's own chapter counter stands in.
+func TestMangaDexEmptyFeedKeepsRecordChapter(t *testing.T) {
+	const id = "123e4567-e89b-12d3-a456-426614174000"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/manga/"+id, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"id":         id,
+				"attributes": map[string]any{"title": map[string]string{"en": "Test Title"}, "lastChapter": "42"},
+			},
+		})
+	})
+	mux.HandleFunc("/manga/"+id+"/feed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangadex.org"}, &http.Client{Timeout: 5 * time.Second})
+	result, err := connector.ResolveByURL(context.Background(), "https://mangadex.org/title/"+id)
+	if err != nil {
+		t.Fatalf("empty feed must not fail the resolve: %v", err)
+	}
+	if result.LatestChapter == nil || *result.LatestChapter != 42 {
+		t.Fatalf("latest chapter = %v, want the record's 42", result.LatestChapter)
+	}
+	if result.LastUpdatedAt != nil {
+		t.Fatalf("an empty feed has no date to offer, got %v", result.LastUpdatedAt)
+	}
+}

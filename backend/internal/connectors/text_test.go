@@ -178,22 +178,19 @@ func TestPrettifySlug(t *testing.T) {
 	}
 }
 
-// TestPrettifySlugCorruptsNonASCIIFirstRune pins current behavior, which is a
-// bug: capitalization slices the first BYTE of each word, so a word starting
-// with a multi-byte rune loses that rune's lead byte to U+FFFD and leaves its
-// continuation bytes orphaned — the result is not valid UTF-8. A word whose
-// first byte is ASCII is unaffected, which is why the accent inside "siege"
-// survives below. Every site currently linked uses ASCII slugs, so nothing in
-// the app reaches this today.
-func TestPrettifySlugCorruptsNonASCIIFirstRune(t *testing.T) {
-	// The slug is a French title with accents, spelled in escapes here so the
-	// expected mojibake stays readable in the source.
-	got := PrettifySlug("\u00e9tat-de-si\u00e8ge")
-	if want := "\uFFFD\xa9tat De Si\u00e8ge"; got != want {
+// Capitalization works on the first rune, not the first byte: a word starting
+// with a multi-byte character used to lose that rune's lead byte to U+FFFD and
+// leave its continuation bytes orphaned, so a displayed title was not valid
+// UTF-8. Every site currently linked uses ASCII slugs, so nothing in the app
+// reached it; the fix is for the first one that does.
+func TestPrettifySlugCapitalizesNonASCIIFirstRune(t *testing.T) {
+	// A French title with accents, spelled in escapes so the source stays ASCII.
+	got := PrettifySlug("état-de-siège")
+	if want := "État De Siège"; got != want {
 		t.Fatalf("PrettifySlug = %q, want %q", got, want)
 	}
-	if utf8.ValidString(got) {
-		t.Fatal("expected the current byte-slicing behavior to produce invalid UTF-8")
+	if !utf8.ValidString(got) {
+		t.Fatal("result must be valid UTF-8")
 	}
 	if PrettifySlug("nano-machine") != "Nano Machine" {
 		t.Fatal("ASCII slugs must be unaffected")

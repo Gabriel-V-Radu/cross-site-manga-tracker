@@ -132,6 +132,27 @@ func TestEmptyFeedReportsNoChapter(t *testing.T) {
 	}
 }
 
+// A release search that fails must fail the resolve rather than pass as "no
+// releases": the poller treats a result without a chapter as a successful
+// check, so a transient 429 here used to skip the fallback sources silently.
+func TestReleaseSearchFailureIsAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/series/%d", testSeriesID), func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"series_id": 114563652, "title": "Nano Machine", "latest_chapter": 325}`))
+	})
+	mux.HandleFunc("/releases/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	connector := NewConnectorWithOptions(server.URL, []string{"mangaupdates.com"}, &http.Client{Timeout: 5 * time.Second})
+
+	result, err := connector.ResolveByURL(context.Background(), "https://www.mangaupdates.com/series/01w7hvo/nano-machine")
+	if err == nil {
+		t.Fatalf("expected the release search failure to fail the resolve, got %+v", result)
+	}
+}
+
 func TestResolveByURLRejectsForeignHost(t *testing.T) {
 	_, connector := newTestServer(t, recentDate(), true)
 

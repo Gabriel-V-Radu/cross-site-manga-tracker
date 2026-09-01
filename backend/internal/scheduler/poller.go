@@ -222,6 +222,13 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	usedFallback := false
 	reporterSourceID := tracker.SourceID
 	if resolveErr != nil {
+		// Shutdown cancelled the cycle mid-resolve. The error says nothing about
+		// the source, the alternates would fail the same way, and stamping
+		// last_checked_at with a dead context only adds a second warning per
+		// in-flight tracker to the shutdown log.
+		if ctx.Err() != nil {
+			return
+		}
 		if fallbackResult, fallbackSource := p.resolveFromAlternates(ctx, tracker); fallbackResult != nil {
 			p.logger.Info("poll fell back to alternate source",
 				"trackerId", tracker.ID,

@@ -138,7 +138,16 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	// LastUpdatedAt, which is what trackers.latest_chapter_seen_at exists to
 	// cover; attributes.updatedAt is not a substitute, it tracks metadata edits.
 	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
-	feedLatestChapter, latestReleaseAt, _ := c.fetchLatestChapterFromFeed(ctx, titleID)
+	// A feed that could not be read is a failed resolve, not an empty one: a 429
+	// or a timeout here used to come back as a result with no chapter and no
+	// date, which the poller records as a successful check — no fallback to the
+	// tracker's other sources, no warning, the cycle quietly lost. An empty feed
+	// (a licensed series, a oneshot) is still a legitimate answer; that is the
+	// (nil, nil, nil) return below, not an error.
+	feedLatestChapter, latestReleaseAt, err := c.fetchLatestChapterFromFeed(ctx, titleID)
+	if err != nil {
+		return nil, err
+	}
 	if latestChapter == nil {
 		latestChapter = feedLatestChapter
 	}
@@ -434,6 +443,13 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 
 	var payload mangaFeedResponse
 	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(mangaID, latestChapterFeedLimit), &payload); err != nil {
+		// A feed the API says does not exist is an empty feed, not an outage:
+		// the record answered, there is simply nothing to read. Every other
+		// failure — a rate limit, a timeout, a 5xx — is the site not answering
+		// and is returned as such.
+		if connectors.IsNotFound(err) {
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("fetch mangadex feed: %w", err)
 	}
 

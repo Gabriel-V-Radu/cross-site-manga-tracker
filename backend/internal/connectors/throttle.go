@@ -34,12 +34,14 @@ const (
 	// still bounding a runaway queue.
 	maxQueueWait = 60 * time.Second
 
-	// minClientTimeout floors every throttled client's overall timeout. The
+	// MinClientTimeout floors every throttled client's overall timeout. The
 	// pacing wait counts toward http.Client.Timeout, so a burst of background
 	// fetches (a page of covers) needs room to drain the queue; actual request
 	// deadlines are the callers' per-request contexts, which every call path
-	// sets.
-	minClientTimeout = 90 * time.Second
+	// sets. Exported for the one connector that builds its own client around
+	// ThrottleTransport (freewebnovel's TLS-fingerprint dialer): a shorter
+	// client timeout there cut down requests that were merely queued.
+	MinClientTimeout = 90 * time.Second
 )
 
 // hostGapOverrides widens the pacing gap for hosts whose published limits are
@@ -100,11 +102,13 @@ var defaultThrottler = &throttler{
 	hosts:            map[string]*hostState{},
 }
 
-// reserve either admits a request — returning how long the caller must wait to
-// honour the host's pacing gap — or refuses it because the host is cooling
-// down. The slot is claimed under the lock, so concurrent callers queue up at
-// gap-length intervals instead of racing through together.
-func (t *throttler) reserve(host string, now time.Time) (time.Duration, error) {
+// reserve either admits a request — returning the slot it may start at, and so
+// how long the caller must wait to honour the host's pacing gap — or refuses it
+// because the host is cooling down. The slot is claimed under the lock, so
+// concurrent callers queue up at gap-length intervals instead of racing through
+// together. A caller that gives up before its slot arrives must hand it back
+// with release.
+func (t *throttler) reserve(host string, now time.Time) (slot time.Time, wait time.Duration, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -115,7 +119,7 @@ func (t *throttler) reserve(host string, now time.Time) (time.Duration, error) {
 	}
 
 	if state.blockedUntil.After(now) {
-		return 0, &SourceCoolingDownError{Host: host, RetryAfter: state.blockedUntil.Sub(now)}
+		return time.Time{}, 0, &SourceCoolingDownError{Host: host, RetryAfter: state.blockedUntil.Sub(now)}
 	}
 
 	start := state.nextAllowed
@@ -125,10 +129,31 @@ func (t *throttler) reserve(host string, now time.Time) (time.Duration, error) {
 	if wait := start.Sub(now); wait > maxQueueWait {
 		// Refuse without claiming the slot, so the queue cannot grow past the
 		// cap. Not counted as a host failure — the host did nothing wrong.
-		return 0, &SourceCoolingDownError{Host: host, RetryAfter: wait}
+		return time.Time{}, 0, &SourceCoolingDownError{Host: host, RetryAfter: wait}
 	}
 	state.nextAllowed = start.Add(t.gapFor(host))
-	return start.Sub(now), nil
+	return start, start.Sub(now), nil
+}
+
+// release gives back a slot whose request never went out. The queue only ever
+// grows from the tail, so the slot can be reclaimed exactly when it is still
+// the last one claimed: nextAllowed is then rolled back to it. A slot with
+// later requests already queued behind it is left alone — reclaiming it would
+// mean shifting every one of them, and the gap it leaves drains on its own.
+// Without this, a page of cover fetches abandoned by a navigation left a minute
+// of phantom pacing on the host, and the poller's next resolve queued behind
+// requests that never happened.
+func (t *throttler) release(host string, slot time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, ok := t.hosts[host]
+	if !ok {
+		return
+	}
+	if state.nextAllowed.Equal(slot.Add(t.gapFor(host))) {
+		state.nextAllowed = slot
+	}
 }
 
 // observe records a request's outcome. A refused or unreachable host opens the
@@ -163,7 +188,7 @@ type throttledTransport struct {
 func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	host := req.URL.Hostname()
 
-	wait, err := t.throttler.reserve(host, time.Now())
+	slot, wait, err := t.throttler.reserve(host, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +197,7 @@ func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error
 		defer timer.Stop()
 		select {
 		case <-req.Context().Done():
+			t.throttler.release(host, slot)
 			return nil, req.Context().Err()
 		case <-timer.C:
 		}
@@ -216,13 +242,13 @@ func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
 
 // NewThrottledClient is the client every connector's default constructor uses.
 // Tests keep injecting plain clients through the WithOptions constructors and
-// stay unpaced. The client timeout is minClientTimeout for everyone: with
+// stay unpaced. The client timeout is MinClientTimeout for everyone: with
 // pacing in the transport, a shorter timeout would cut down requests that are
 // merely waiting for their slot behind a burst; actual request deadlines are
 // the callers' per-request contexts, which every call path sets.
 func NewThrottledClient() *http.Client {
 	return &http.Client{
-		Timeout:   minClientTimeout,
+		Timeout:   MinClientTimeout,
 		Transport: ThrottleTransport(nil),
 	}
 }

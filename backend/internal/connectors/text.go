@@ -4,6 +4,8 @@ import (
 	"html"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -40,7 +42,11 @@ func PrettifySlug(slug string) string {
 	}
 	parts := strings.Fields(trimmed)
 	for index := range parts {
-		parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
+		// By rune, not by byte: slicing [:1] on a word that starts with a
+		// multibyte character splits the encoding and yields invalid UTF-8 in a
+		// displayed title.
+		first, size := utf8.DecodeRuneInString(parts[index])
+		parts[index] = string(unicode.ToUpper(first)) + parts[index][size:]
 	}
 	return strings.Join(parts, " ")
 }
