@@ -52,6 +52,16 @@ func (e coverEntry) expired(now time.Time) bool {
 	return e.LocalPath == "" && now.After(e.ExpiresAt)
 }
 
+// coverStore is what the resolver needs of the persistent cover cache:
+// repository.CoverCacheRepository in the running app, anything that answers
+// the same four calls in a test.
+type coverStore interface {
+	LoadFreshContext(ctx context.Context) ([]repository.CoverCacheRow, error)
+	UpsertContext(ctx context.Context, entry repository.CoverCacheRow) error
+	DeleteContext(ctx context.Context, cacheKey string) error
+	DeleteNegativesContext(ctx context.Context) error
+}
+
 // CoverConfig wires a CoverResolver. Everything it reaches — the connectors,
 // the persistent store, the directory, the HTTP client — is handed in, so none
 // of this has to be driven through a running server to be exercised.
@@ -61,7 +71,7 @@ type CoverConfig struct {
 	// Store persists cover entries across restarts (nil keeps the cache in
 	// memory only). The map stays the hot path; the store is write-through and
 	// only read once, at construction.
-	Store *repository.CoverCacheRepository
+	Store coverStore
 	// Dir is where resolved covers are downloaded and served from (/covers).
 	// Empty disables the local store and falls back to hotlinking the source
 	// CDNs — the pre-store behavior.
@@ -84,7 +94,7 @@ type CoverConfig struct {
 // resolves one in the background across the tracker's linked sources.
 type CoverResolver struct {
 	registry   *connectors.Registry
-	store      *repository.CoverCacheRepository
+	store      coverStore
 	dir        string
 	client     *http.Client
 	urlChecker func(ctx context.Context, coverURL string) bool
@@ -130,8 +140,11 @@ func NewCoverResolver(cfg CoverConfig) *CoverResolver {
 	return resolver
 }
 
-// Close stops the background expiry sweep.
+// Close cancels the background fetches, waits briefly for them to return, and
+// stops the expiry sweep. After it nothing here touches the store or the
+// network again, which is what lets the caller close the database.
 func (r *CoverResolver) Close() {
+	r.queue.close()
 	r.sweeper.Close()
 }
 
@@ -158,8 +171,8 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 		return "", "", false
 	}
 
-	r.queue.run(cacheKey, r.semFor(trimmedSourceKey), pageKey, func() {
-		_, _ = r.fetch(context.Background(), trimmedSourceKey, sourceURL, sourceItemID, alternates)
+	r.queue.run(cacheKey, r.semFor(trimmedSourceKey), pageKey, func(ctx context.Context) {
+		_, _ = r.fetch(ctx, trimmedSourceKey, sourceURL, sourceItemID, alternates)
 	})
 	return "", "", true
 }
@@ -173,7 +186,7 @@ func (r *CoverResolver) InvalidateNegatives() {
 	r.cache.dropWhere(func(entry coverEntry) bool { return !entry.Found })
 
 	if r.store != nil {
-		if err := r.store.DeleteNegatives(); err != nil {
+		if err := r.store.DeleteNegativesContext(r.queue.lifetime); err != nil {
 			slog.Debug("cover cache negative sweep failed", "error", err)
 		}
 	}
@@ -378,22 +391,28 @@ func (r *CoverResolver) cachedWithSource(cacheKey string) (coverURL string, sour
 		if _, err := os.Stat(filepath.Join(r.dir, entry.LocalPath)); err == nil {
 			return coverLocalURLPrefix + entry.LocalPath, entry.SourceKey, true, true
 		}
-		r.dropCached(cacheKey)
+		lostPath := entry.LocalPath
+		r.dropCached(cacheKey, func(current coverEntry) bool { return current.LocalPath == lostPath })
 		return "", "", false, false
 	}
 
-	if entry.expired(time.Now().UTC()) {
-		r.dropCached(cacheKey)
+	if now := time.Now().UTC(); entry.expired(now) {
+		r.dropCached(cacheKey, func(current coverEntry) bool { return current.expired(now) })
 		return "", "", false, false
 	}
 
 	return entry.CoverURL, entry.SourceKey, entry.Found, true
 }
 
-func (r *CoverResolver) dropCached(cacheKey string) {
-	r.cache.drop(cacheKey)
+// dropCached evicts an entry from the cache and the store, but only while
+// stale still describes what the cache holds: a fetch that landed a fresh
+// answer between the read and this call keeps it.
+func (r *CoverResolver) dropCached(cacheKey string, stale func(coverEntry) bool) {
+	if !r.cache.dropIf(cacheKey, stale) {
+		return
+	}
 	if r.store != nil {
-		if err := r.store.Delete(cacheKey); err != nil {
+		if err := r.store.DeleteContext(r.queue.lifetime, cacheKey); err != nil {
 			slog.Debug("cover cache delete failed", "error", err)
 		}
 	}
@@ -431,7 +450,7 @@ func (r *CoverResolver) putEntry(cacheKey string, entry coverEntry) {
 	// Write-through so the entry survives restarts; best-effort because a
 	// failed persist only costs a re-resolve after the next restart.
 	if r.store != nil {
-		if err := r.store.Upsert(repository.CoverCacheRow{
+		if err := r.store.UpsertContext(r.queue.lifetime, repository.CoverCacheRow{
 			CacheKey:  cacheKey,
 			CoverURL:  entry.CoverURL,
 			SourceKey: entry.SourceKey,
@@ -450,7 +469,7 @@ func (r *CoverResolver) seedFromStore() {
 	if r.store == nil {
 		return
 	}
-	entries, err := r.store.LoadFresh()
+	entries, err := r.store.LoadFreshContext(r.queue.lifetime)
 	if err != nil {
 		slog.Warn("cover cache load failed; starting cold", "error", err)
 		return

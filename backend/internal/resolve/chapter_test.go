@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestFetchChapterURLFallsBackToAlternate(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch("blockedsource", "https://blocked.example/title/a", 440.2, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", 440.2, alternates)
 	if err != nil {
 		t.Fatalf("expected the alternate to resolve the chapter: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestFetchChapterURLPrefersPrimary(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch("primarysource", "https://primary.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestFetchChapterURLNegativeCacheIsShortAfterAnAttempt(t *testing.T) {
 
 	resolver := newChapterTestResolver(t, registry)
 
-	if _, err := resolver.fetch("blockedsource", "https://blocked.example/title/a", 5, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", 5, nil); err == nil {
 		t.Fatalf("expected an error when the only source is blocked")
 	}
 
@@ -87,7 +88,7 @@ func TestFetchChapterURLNegativeCacheIsShortAfterAnAttempt(t *testing.T) {
 func TestFetchChapterURLUnknownConnectorCachesLonger(t *testing.T) {
 	resolver := newChapterTestResolver(t, connectors.NewRegistry())
 
-	if _, err := resolver.fetch("nosuchsource", "https://nowhere.example/title/a", 5, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), "nosuchsource", "https://nowhere.example/title/a", 5, nil); err == nil {
 		t.Fatalf("expected an error for an unregistered connector")
 	}
 
@@ -114,7 +115,7 @@ func TestFetchChapterURLFallsBackToOfflineGuess(t *testing.T) {
 
 	resolver := newChapterTestResolver(t, registry)
 
-	chapterURL, err := resolver.fetch("blockedsource", "https://blocked.example/title/a", 177, nil)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", 177, nil)
 	if err != nil {
 		t.Fatalf("expected the offline guess to be served: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestFetchChapterURLVerifiedReaderBeatsBlockedGuess(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch("blockedsource", "https://blocked.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("expected the verified mirror to be served: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestFetchChapterURLBlockedGuessBeatsInfoFloor(t *testing.T) {
 		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
 	}
 
-	chapterURL, err := resolver.fetch("blockedsource", "https://blocked.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("expected the built url to be served: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
 		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
 	}
 
-	chapterURL, err := resolver.fetch("answeredsource", "https://answered.example/title/a", 82, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "answeredsource", "https://answered.example/title/a", 82, alternates)
 	if err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 		{SourceKey: "asuracomic", SourceURL: "https://asura.example/comics/a"},
 	}
 
-	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 82, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedreader", "https://blocked.example/title/a", 82, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -275,7 +276,7 @@ func newReaderPriorityResolver(t *testing.T, mangahubLatest float64) (*ChapterLi
 func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 99, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedreader", "https://blocked.example/title/a", 99, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -290,7 +291,7 @@ func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 func TestFetchChapterURLStaleMangaHubFallsBackToBlockedGuess(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 101, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), "blockedreader", "https://blocked.example/title/a", 101, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestFetchChapterURLWithoutBlockedGuessFallsBackToComicK(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
 	// The tracker's primary is ComicK here — nothing buildable in the chain.
-	chapterURL, err := resolver.fetch("comick", "https://comick.example/comic/a", 101, alternates[1:])
+	chapterURL, err := resolver.fetch(context.Background(), "comick", "https://comick.example/comic/a", 101, alternates[1:])
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -328,7 +329,7 @@ func TestFetchChapterURLFloorAnswerIsProvisional(t *testing.T) {
 
 	// ComicK primary, MangaHub the only alternate and one chapter behind.
 	const sourceURL = "https://comick.example/comic/a"
-	if _, err := resolver.fetch("comick", sourceURL, 101, alternates[1:]); err != nil {
+	if _, err := resolver.fetch(context.Background(), "comick", sourceURL, 101, alternates[1:]); err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
 
@@ -349,7 +350,7 @@ func TestFetchChapterURLFloorOnlyChainKeepsTheVerifiedSpan(t *testing.T) {
 	resolver, _ := newReaderPriorityResolver(t, 100)
 
 	const sourceURL = "https://comick.example/comic/a"
-	if _, err := resolver.fetch("comick", sourceURL, 101, nil); err != nil {
+	if _, err := resolver.fetch(context.Background(), "comick", sourceURL, 101, nil); err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
 

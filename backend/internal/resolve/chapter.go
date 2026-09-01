@@ -67,8 +67,10 @@ func NewChapterLinkResolver(cfg ChapterConfig) *ChapterLinkResolver {
 	return resolver
 }
 
-// Close stops the background expiry sweep.
+// Close cancels the background resolves, waits briefly for them to return, and
+// stops the expiry sweep.
 func (r *ChapterLinkResolver) Close() {
+	r.queue.close()
 	r.sweeper.Close()
 }
 
@@ -96,8 +98,8 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 		return trimmedSourceURL, false, false
 	}
 
-	r.queue.run(cacheKey, r.sem, pageKey, func() {
-		_, _ = r.fetch(trimmedSourceKey, trimmedSourceURL, chapter, alternates)
+	r.queue.run(cacheKey, r.sem, pageKey, func(ctx context.Context) {
+		_, _ = r.fetch(ctx, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	})
 	return trimmedSourceURL, false, true
 }
@@ -123,7 +125,7 @@ func (r *ChapterLinkResolver) Invalidate() {
 // unverified link there beats a verified one on the floor. Third, the info-floor
 // sites (ComicK): they always carry the chapter page, but nobody wants to read
 // there, so they only serve when nothing else could.
-func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
+func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", fmt.Errorf("missing source url")
@@ -177,7 +179,7 @@ func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64
 		}
 
 		attempted = true
-		chapterURL, err := resolveChapterURLFromConnector(resolver, candidateURL, chapter)
+		chapterURL, err := resolveChapterURLFromConnector(ctx, resolver, candidateURL, chapter)
 		switch {
 		case err != nil:
 			lastErr = err
@@ -265,10 +267,10 @@ func (r *ChapterLinkResolver) fetch(sourceKey, sourceURL string, chapter float64
 	return trimmedSourceURL, fmt.Errorf("resolve chapter url: %w", lastErr)
 }
 
-func resolveChapterURLFromConnector(resolver connectors.ChapterURLResolver, sourceURL string, chapter float64) (string, error) {
+func resolveChapterURLFromConnector(parent context.Context, resolver connectors.ChapterURLResolver, sourceURL string, chapter float64) (string, error) {
 	// Background work behind the shared per-host throttle: see the cover
 	// resolve timeout for why this is generous.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	chapterURL, err := resolver.ResolveChapterURL(ctx, sourceURL, chapter)
@@ -334,8 +336,9 @@ func (r *ChapterLinkResolver) cached(cacheKey string) (chapterURL string, found 
 		return "", false, false
 	}
 
-	if entry.expired(time.Now().UTC()) {
-		r.cache.drop(cacheKey)
+	if now := time.Now().UTC(); entry.expired(now) {
+		// Conditional: a fetch may have refreshed the key since the read above.
+		r.cache.dropIf(cacheKey, func(current chapterEntry) bool { return current.expired(now) })
 		return "", false, false
 	}
 

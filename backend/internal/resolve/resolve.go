@@ -7,6 +7,8 @@
 package resolve
 
 import (
+	"context"
+	"log/slog"
 	"math/rand/v2"
 	"strings"
 	"sync"
@@ -67,10 +69,21 @@ func (c *resultCache[V]) put(key string, entry V) {
 	c.mu.Unlock()
 }
 
-func (c *resultCache[V]) drop(key string) {
+// dropIf removes key only while match still holds for the entry under the
+// write lock, and reports whether it did. Expiry is decided on a read under the
+// read lock; between that read and the delete a background fetch can have put
+// a fresh answer under the same key, and an unconditional delete threw that
+// answer away — one wasted resolve and one more hit on a bot-sensitive site,
+// most likely exactly while a page was rendering as its fetches landed.
+func (c *resultCache[V]) dropIf(key string, match func(V) bool) bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, exists := c.entries[key]
+	if !exists || !match(entry) {
+		return false
+	}
 	delete(c.entries, key)
-	c.mu.Unlock()
+	return true
 }
 
 func (c *resultCache[V]) reset() {
@@ -125,28 +138,53 @@ func (g *PageGate) IsActive(pageKey string) bool {
 	return strings.TrimSpace(pageKey) != "" && strings.TrimSpace(pageKey) == strings.TrimSpace(active)
 }
 
+// closeGrace is how long a resolver's Close waits for in-flight fetches to
+// notice the cancellation and return. Every fetch runs under the queue's
+// lifetime context, so the wait is for goroutines to unwind, not for network
+// calls to finish; the same span linkscan's Close allows.
+const closeGrace = 2 * time.Second
+
 // fetchQueue runs at most one background fetch per cache key, bounded by a
 // semaphore the caller picks. Without the in-flight guard a page rendering the
 // same title twice queues the same fetch twice; without the semaphore a page
 // load opens one connection per card at once, which is how these sites decide
 // they are being scraped.
+//
+// Every fetch hangs off the queue's own lifetime context rather than a
+// request's — a card render returns long before its cover does — and close
+// cancels it. Without that the fetches outlived the process: shutdown ran
+// poller, HTTP server and then db.Close while a cover download was still in
+// flight, and the entry it wrote landed on a closed database, after up to a
+// minute of connector traffic from a process that was already gone.
 type fetchQueue struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	gate     *PageGate
+
+	lifetime context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	once     sync.Once
 }
 
 func newFetchQueue(gate *PageGate) *fetchQueue {
 	if gate == nil {
 		gate = NewPageGate()
 	}
-	return &fetchQueue{inFlight: make(map[string]bool), gate: gate}
+	lifetime, cancel := context.WithCancel(context.Background())
+	return &fetchQueue{inFlight: make(map[string]bool), gate: gate, lifetime: lifetime, cancel: cancel}
 }
 
 // run starts work in the background unless the same key is already being
 // fetched. An empty pageKey means the caller is not tied to a rendered page, so
-// there is nothing to navigate away from and the work always runs.
-func (q *fetchQueue) run(key string, sem chan struct{}, pageKey string, work func()) {
+// there is nothing to navigate away from and the work always runs. The context
+// handed to work is the queue's lifetime: cancelled by close, never by the
+// request that queued it.
+func (q *fetchQueue) run(key string, sem chan struct{}, pageKey string, work func(ctx context.Context)) {
+	if q.lifetime.Err() != nil {
+		return
+	}
+
 	q.mu.Lock()
 	if q.inFlight[key] {
 		q.mu.Unlock()
@@ -155,21 +193,48 @@ func (q *fetchQueue) run(key string, sem chan struct{}, pageKey string, work fun
 	q.inFlight[key] = true
 	q.mu.Unlock()
 
+	q.wg.Add(1)
 	go func() {
-		sem <- struct{}{}
+		defer q.wg.Done()
 		defer func() {
-			<-sem
 			q.mu.Lock()
 			delete(q.inFlight, key)
 			q.mu.Unlock()
 		}()
 
+		// A fetch still waiting for its slot at shutdown has nothing to wait
+		// for: the work it would do is cancelled already.
+		select {
+		case sem <- struct{}{}:
+		case <-q.lifetime.Done():
+			return
+		}
+		defer func() { <-sem }()
+
 		if pageKey != "" && !q.gate.IsActive(pageKey) {
 			return
 		}
 
-		work()
+		work(q.lifetime)
 	}()
+}
+
+// close cancels every fetch and waits up to closeGrace for them to return.
+// Idempotent, for the same reason the sweeper's Close is.
+func (q *fetchQueue) close() {
+	q.once.Do(func() {
+		q.cancel()
+		done := make(chan struct{})
+		go func() {
+			q.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(closeGrace):
+			slog.Warn("background lookups did not stop within the shutdown grace period")
+		}
+	})
 }
 
 // sweepInterval paces the sweep below. Nothing it drops is urgent — those
