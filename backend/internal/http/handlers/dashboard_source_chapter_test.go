@@ -83,7 +83,11 @@ func setupAppForChapterLookup(t *testing.T, connector connectors.Connector) (*fi
 		t.Fatalf("register connector: %v", err)
 	}
 
-	app := apihttp.NewServerWithRegistry(newTestConfig(t), db, registry)
+	app, err := apihttp.BuildServer(newTestConfig(t), db, registry)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("build server: %v", err)
+	}
 	return app, sourceID, func() {
 		_ = db.Close()
 		_ = app.Shutdown()

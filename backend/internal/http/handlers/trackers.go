@@ -13,14 +13,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-var validStatuses = map[string]bool{
-	"reading":      true,
-	"completed":    true,
-	"on_hold":      true,
-	"dropped":      true,
-	"plan_to_read": true,
-}
-
 type createTrackerRequest struct {
 	Title              string   `json:"title"`
 	RelatedTitles      []string `json:"relatedTitles"`
@@ -211,12 +203,13 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 	if req.SourceID <= 0 {
 		return nil, fmt.Errorf("sourceId must be greater than zero")
 	}
-	if strings.TrimSpace(req.SourceURL) == "" {
-		return nil, fmt.Errorf("sourceUrl is required")
+	sourceURL, err := validateSourceURL(req.SourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("sourceUrl: %w", err)
 	}
-	status := strings.TrimSpace(req.Status)
-	if !validStatuses[status] {
-		return nil, fmt.Errorf("invalid status")
+	status, err := validateTrackerStatus(req.Status)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateTrackerRating(req.Rating); err != nil {
 		return nil, err
@@ -228,7 +221,11 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 		if err != nil {
 			return nil, fmt.Errorf("lastCheckedAt must be RFC3339")
 		}
-		lastCheckedAt = &parsed
+		// Normalized here because the store compares timestamps as text: a value
+		// carrying its own offset would sort against the UTC ones by its local
+		// clock face, hours off.
+		utc := parsed.UTC()
+		lastCheckedAt = &utc
 	}
 
 	return &models.Tracker{
@@ -236,7 +233,7 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 		RelatedTitles:      searchutil.FilterEnglishAlphabetNames(req.RelatedTitles),
 		SourceID:           req.SourceID,
 		SourceItemID:       req.SourceItemID,
-		SourceURL:          strings.TrimSpace(req.SourceURL),
+		SourceURL:          sourceURL,
 		Status:             status,
 		LastReadChapter:    req.LastReadChapter,
 		Rating:             req.Rating,

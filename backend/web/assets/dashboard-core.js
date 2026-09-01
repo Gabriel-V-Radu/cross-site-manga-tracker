@@ -173,62 +173,52 @@ window.setDashboardViewMode = function (mode, shouldRefresh) {
     window.dispatchTrackersChanged('user');
 };
 
-window.onProfileSwitch = function (select) {
-    if (!select) {
-        return;
+// A mutation that fails leaves htmx doing nothing: 4xx and 5xx responses are
+// not swapped, so without this the modal stayed open with its "Saving…"
+// indicator gone and no word of what went wrong — a tracker half-saved by a bad
+// pasted URL looked exactly like a hung request. The server answers every
+// refused request with a one-line message written for the reader (see
+// handlers.fail), so that text is what gets shown, inside whatever the request
+// was going to swap into: the modal's form when one is open, else a strip at
+// the top of the trackers zone.
+window.showRequestError = function (message) {
+    var text = String(message || '').trim() || 'The request failed. Please try again.';
+    var form = document.querySelector('#modal-zone .tracker-form, #modal-zone form');
+    var host = form || document.getElementById('trackers-zone') || document.body;
+    var existing = host.querySelector(':scope > .request-error');
+    if (!existing) {
+        existing = document.createElement('p');
+        existing.className = 'request-error';
+        existing.setAttribute('role', 'alert');
+        host.insertBefore(existing, host.firstChild);
     }
-
-    var selectedProfile = (select.value || '').trim();
-    if (!selectedProfile) {
-        return;
-    }
-
-    var hiddenProfile = document.getElementById('profile-filter');
-    if (hiddenProfile) {
-        hiddenProfile.value = selectedProfile;
-    }
-
-    var renameForm = document.getElementById('profile-rename-form');
-    if (renameForm) {
-        renameForm.setAttribute('action', '/dashboard/profile/rename?profile=' + encodeURIComponent(selectedProfile));
-    }
-
-    if (window.history && window.history.replaceState) {
-        var nextURL = '/dashboard?profile=' + encodeURIComponent(selectedProfile);
-        window.history.replaceState({}, '', nextURL);
-    }
-
-    window.dispatchTrackersChanged('user');
+    existing.textContent = text;
 };
 
-window.renameProfileOnce = function () {
-    var select = document.getElementById('profile-switch');
-    var hiddenInput = document.getElementById('profile-rename-value');
-    var form = document.getElementById('profile-rename-form');
-    if (!select || !hiddenInput || !form) {
+document.body.addEventListener('htmx:responseError', function (event) {
+    var xhr = event && event.detail ? event.detail.xhr : null;
+    var body = xhr && typeof xhr.responseText === 'string' ? xhr.responseText.trim() : '';
+    // Only a short plain-text answer is a message; anything else (an HTML
+    // error page from a proxy) is replaced by the status line.
+    var looksLikeMarkup = body.charAt(0) === '<';
+    var message = (!looksLikeMarkup && body.length > 0 && body.length <= 300)
+        ? body
+        : ('Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : ''));
+    window.showRequestError(message);
+});
+
+document.body.addEventListener('htmx:sendError', function () {
+    window.showRequestError('Could not reach the server. Check the connection and try again.');
+});
+
+// A successful swap into the modal or the trackers zone clears any error strip
+// left there by an earlier attempt.
+document.body.addEventListener('htmx:afterSwap', function (event) {
+    var target = event && event.target;
+    if (!target || !target.querySelectorAll) {
         return;
     }
-
-    var currentName = select.options && select.selectedIndex >= 0
-        ? select.options[select.selectedIndex].text
-        : hiddenInput.value;
-
-    var nextName = window.prompt('Rename profile', currentName || '');
-    if (nextName === null) {
-        return;
-    }
-
-    nextName = String(nextName).trim();
-    if (!nextName) {
-        return;
-    }
-
-    hiddenInput.value = nextName;
-
-    var selectedProfile = (select.value || '').trim();
-    if (selectedProfile) {
-        form.setAttribute('action', '/dashboard/profile/rename?profile=' + encodeURIComponent(selectedProfile));
-    }
-
-    form.submit();
-};
+    Array.prototype.forEach.call(target.querySelectorAll('.request-error'), function (node) {
+        node.remove();
+    });
+});

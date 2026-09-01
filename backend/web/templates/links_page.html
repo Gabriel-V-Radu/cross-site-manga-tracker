@@ -13,7 +13,8 @@
     <script src="{{assetURL "htmx.min.js"}}" defer></script>
 </head>
 
-<body>
+{{/* Same header as the dashboard page: every request names this page's profile. */}}
+<body hx-headers='{"X-Profile-Key": "{{.ActiveProfile.Key}}"}'>
     <div class="grain"></div>
     <main class="shell">
         <header class="masthead">

@@ -12,10 +12,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 )
+
+// maxNameRunes bounds profile and tag names. Counted in characters, as the
+// form's maxlength does: the byte count used here before let a 14-character
+// CJK name through the browser and refuse it on the server.
+const maxNameRunes = 40
 
 // The public prefix is fixed — it is the /uploads route plus the subdirectory
 // — while the disk location behind it comes from the config, so the two are
@@ -74,7 +80,7 @@ func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 	if name == "" {
 		return h.fail(c, fiber.StatusBadRequest, "Profile name is required", nil)
 	}
-	if len(name) > 40 {
+	if utf8.RuneCountInString(name) > maxNameRunes {
 		return h.fail(c, fiber.StatusBadRequest, "Profile name must be 40 characters or less", nil)
 	}
 
@@ -156,7 +162,7 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 	if tagName == "" {
 		return h.fail(c, fiber.StatusBadRequest, "Tag name is required", nil)
 	}
-	if len(tagName) > 40 {
+	if utf8.RuneCountInString(tagName) > maxNameRunes {
 		return h.fail(c, fiber.StatusBadRequest, "Tag name must be 40 characters or less", nil)
 	}
 
@@ -197,7 +203,7 @@ func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 	if tagName == "" {
 		return h.fail(c, fiber.StatusBadRequest, "Tag name is required", nil)
 	}
-	if len(tagName) > 40 {
+	if utf8.RuneCountInString(tagName) > maxNameRunes {
 		return h.fail(c, fiber.StatusBadRequest, "Tag name must be 40 characters or less", nil)
 	}
 

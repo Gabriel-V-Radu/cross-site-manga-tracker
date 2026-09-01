@@ -121,11 +121,6 @@ document.body.addEventListener('trackerCreated', function (event) {
 });
 
 document.addEventListener('DOMContentLoaded', function () {
-    var select = document.getElementById('profile-switch');
-    if (select) {
-        window.onProfileSwitch(select);
-    }
-
     var initialViewInput = document.getElementById('view-input');
     window.setDashboardViewMode(initialViewInput && initialViewInput.value ? initialViewInput.value : 'grid', false);
     window.updateFilterTagsSummary();
@@ -598,23 +593,12 @@ document.addEventListener('click', function (event) {
     }
 
     var explicitPage = Number(button.getAttribute('data-page-value') || '0');
-    if (explicitPage > 0) {
-        var explicitPageInput = document.getElementById('page-input');
-        if (explicitPageInput) {
-            explicitPageInput.value = String(explicitPage);
-        }
-
-        window.__scrollTrackersToTop = true;
-        window.dispatchTrackersChanged('user');
+    if (explicitPage <= 0) {
         return;
     }
-
-    var base = Number(button.getAttribute('data-page-target') || '1');
-    var delta = Number(button.getAttribute('data-page-delta') || '0');
-    var nextPage = Math.max(1, base + delta);
-    var pageInput = document.getElementById('page-input');
-    if (pageInput) {
-        pageInput.value = String(nextPage);
+    var explicitPageInput = document.getElementById('page-input');
+    if (explicitPageInput) {
+        explicitPageInput.value = String(explicitPage);
     }
 
     window.__scrollTrackersToTop = true;

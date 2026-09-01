@@ -136,6 +136,19 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	}
 	tracker.ProfileID = activeProfile.ID
 
+	// Everything the form carries is checked before the first write. The tag
+	// selection and the pasted link used to be parsed after the INSERT, so a bad
+	// value answered 400 with the tracker already created — and the natural
+	// retry created it twice.
+	tagIDs, err := parseTagIDsFromForm(c)
+	if err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+	pastedLink, err := h.parsePastedLink(c)
+	if err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+
 	h.enrichTrackerFromSource(c.Context(), tracker)
 
 	now := time.Now().UTC()
@@ -153,30 +166,40 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to create tracker", err)
 	}
-
-	tagIDs, err := parseTagIDsFromForm(c)
-	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
-	}
-
-	if created != nil {
-		if err := h.trackerRepo.ReplaceTrackerTagsContext(c.Context(), activeProfile.ID, created.ID, tagIDs); err != nil {
-			return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
-		}
-	}
 	if created == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
 
-	// Best-effort: the tracker exists either way, and the pasted link is easy
-	// to retry from the edit modal or the review page if the host was a typo.
-	if linkedURL := strings.TrimSpace(c.FormValue("linked_url")); linkedURL != "" {
-		_, _ = h.attachSourceByURL(c.Context(), activeProfile.ID, created.ID, linkedURL)
+	if err := h.trackerRepo.ReplaceTrackerTagsContext(c.Context(), activeProfile.ID, created.ID, tagIDs); err != nil {
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
+	}
+	if pastedLink != nil {
+		if err := h.trackerRepo.UpsertTrackerSourceContext(c.Context(), activeProfile.ID, created.ID, *pastedLink); err != nil {
+			return h.fail(c, fiber.StatusInternalServerError, "Failed to save the pasted link", err)
+		}
+		h.invalidateLinkLookups()
 	}
 
 	c.Set("HX-Trigger", fmt.Sprintf(`{"trackerCreated":{"id":%d}}`, created.ID))
 	return h.render(c, "empty_modal.html", nil)
+}
+
+// parsePastedLink resolves the optional "link another site by URL" field into
+// the row to store, without storing it. It runs before any write so a URL no
+// connector claims refuses the whole save — the same answer on create and on
+// edit, where the two used to differ (silently dropped on create, a 400 after
+// the tracker was already rewritten on edit). Nil means the field was empty.
+func (h *DashboardHandler) parsePastedLink(c *fiber.Ctx) (*models.TrackerSource, error) {
+	linkedURL := strings.TrimSpace(c.FormValue("linked_url"))
+	if linkedURL == "" {
+		return nil, nil
+	}
+	_, link, err := h.resolveSourceLink(c.Context(), linkedURL)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Could not link the pasted URL: "+err.Error())
+	}
+	return &link, nil
 }
 
 type trackerCardFragmentData struct {
@@ -319,6 +342,24 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
 
+	// Parsed up front, like on create: a save is all-or-nothing as far as the
+	// form's own values go. These three used to be read after the UPDATE and
+	// the linked-sources replace had committed, so an invalid tag id or a URL
+	// no connector claims left the title and sources saved, the tags and the
+	// reading pin not, and answered 400.
+	tagIDs, err := parseTagIDsFromForm(c)
+	if err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+	readingSourceID, err := parseReadingSourceFromForm(c)
+	if err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+	pastedLink, err := h.parsePastedLink(c)
+	if err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+
 	primaryFromForm := models.TrackerSource{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
@@ -391,27 +432,18 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked sources", err)
 	}
 
-	tagIDs, err := parseTagIDsFromForm(c)
-	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
-	}
-
 	if err := h.trackerRepo.ReplaceTrackerTagsContext(c.Context(), activeProfile.ID, id, tagIDs); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
 	}
 
 	// After ReplaceTrackerSources, so the freshly pasted link survives the
 	// replace instead of being wiped by it.
-	if linkedURL := strings.TrimSpace(c.FormValue("linked_url")); linkedURL != "" {
-		if _, err := h.attachSourceByURL(c.Context(), activeProfile.ID, id, linkedURL); err != nil {
-			return h.fail(c, fiber.StatusBadRequest, "Could not link the pasted URL: "+err.Error(), err)
+	if pastedLink != nil {
+		if err := h.trackerRepo.UpsertTrackerSourceContext(c.Context(), activeProfile.ID, id, *pastedLink); err != nil {
+			return h.fail(c, fiber.StatusInternalServerError, "Failed to save the pasted link", err)
 		}
 	}
 
-	readingSourceID, err := parseReadingSourceFromForm(c)
-	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
-	}
 	if err := h.trackerRepo.SetReadingSourceContext(c.Context(), activeProfile.ID, id, readingSourceID); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save reading site", err)
 	}
@@ -608,14 +640,22 @@ func parseTrackerFromForm(c *fiber.Ctx) (*models.Tracker, error) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "Valid source is required")
 	}
 
-	sourceURL := strings.TrimSpace(c.FormValue("source_url"))
-	if sourceURL == "" {
-		return nil, fiber.NewError(fiber.StatusBadRequest, "Source URL is required")
+	sourceURL, err := validateSourceURL(c.FormValue("source_url"))
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Source URL must be an absolute http(s) address")
 	}
 
 	status := strings.TrimSpace(c.FormValue("status"))
 	if status == "" {
 		status = "reading"
+	}
+	// The same closed set the JSON API enforces. A junk value used to reach the
+	// database's CHECK constraint and come back as a 500, or — before that
+	// constraint — be stored, styled as an unknown badge and listed under no
+	// status filter.
+	status, err = validateTrackerStatus(status)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid status")
 	}
 
 	var sourceItemID *string

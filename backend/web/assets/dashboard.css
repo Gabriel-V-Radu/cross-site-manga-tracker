@@ -814,7 +814,7 @@ input:focus, select:focus {
     container-type: inline-size;
 }
 
-.tracker-card__cover > img:not(.tracker-card__tag-icon):not(.tracker-card__source-logo-img) {
+.tracker-card__cover > img:not(.tracker-card__source-logo-img) {
     position: absolute;
     top: 14px;
     left: 14px;
@@ -1331,6 +1331,17 @@ input:focus, select:focus {
     color: var(--accent);
 }
 
+/* A refused or failed htmx request, reported where the response would have
+   landed (dashboard-core.js showRequestError). */
+.request-error {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent-soft);
+    background: rgba(18, 28, 43, 0.88);
+    color: var(--accent);
+    font-size: 13px;
+}
+
 /* The chapter number for some sources is only known after a lookup that outlives
    the click, so the field says it is working rather than sitting emptily. */
 input.is-loading {
@@ -1386,17 +1397,6 @@ input.is-loading::placeholder {
     gap: 8px;
 }
 
-.tracker-tag-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px) auto;
-    gap: 8px;
-    align-items: end;
-}
-
-.tracker-tag-row .linked-btn {
-    height: 36px;
-}
-
 .tracker-form .tracker-tags-list {
     display: flex;
     flex-wrap: wrap;
@@ -1436,12 +1436,6 @@ input.is-loading::placeholder {
 .tracker-form .tracker-tag-check .tracker-tag-chip__icon {
     width: 14px;
     height: 14px;
-}
-
-.tracker-tag-check__input-wrap {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
 }
 
 .tracker-form .tracker-tag-check input[type="checkbox"] {
@@ -1569,10 +1563,6 @@ input.is-loading::placeholder {
     justify-content: flex-start;
 }
 
-.profile-menu-section--tags {
-    gap: 10px;
-}
-
 .profile-menu-section--source-logos {
     gap: 8px;
 }
@@ -1607,10 +1597,6 @@ input.is-loading::placeholder {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     align-items: center;
-}
-
-.profile-source-logo-form {
-    gap: 6px;
 }
 
 .profile-source-logo-table {
@@ -2027,11 +2013,6 @@ input.is-loading::placeholder {
 
     .pagination-site-link__text {
         font-size: 9px;
-    }
-
-    .tracker-tag-row {
-        grid-template-columns: 1fr;
-        align-items: stretch;
     }
 
     .profile-tag-row--menu {

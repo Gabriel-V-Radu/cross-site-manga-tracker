@@ -52,7 +52,11 @@ func setupAppForConnectors(t *testing.T) (*sql.DB, *fiber.App, func()) {
 	_ = registry.Register(&fakeConnector{key: "mangadex"})
 	_ = registry.Register(&fakeConnector{key: "mangafire"})
 
-	app := apihttp.NewServerWithRegistry(newTestConfig(t), db, registry)
+	app, err := apihttp.BuildServer(newTestConfig(t), db, registry)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("build server: %v", err)
+	}
 	cleanup := func() {
 		_ = db.Close()
 		_ = app.Shutdown()

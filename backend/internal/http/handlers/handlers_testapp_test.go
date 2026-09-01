@@ -66,13 +66,19 @@ func newTestEnv(t *testing.T, configure func(*connectors.Registry)) testEnv {
 
 	cfg := newTestConfig(t)
 
-	var app *fiber.App
+	// Always an explicit registry, empty unless the test fills it: the default
+	// registry holds the real connectors, and a list render queues a cover and a
+	// chapter lookup per card in the background — so a suite seeded with
+	// mangadex.org URLs was quietly issuing live requests to MangaDex and its
+	// cover CDN on every run, through the shared throttle.
+	registry := connectors.NewRegistry()
 	if configure != nil {
-		registry := connectors.NewRegistry()
 		configure(registry)
-		app = apihttp.NewServerWithRegistry(cfg, db, registry)
-	} else {
-		app = apihttp.NewServer(cfg, db)
+	}
+	app, err := apihttp.BuildServer(cfg, db, registry)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("build server: %v", err)
 	}
 
 	return testEnv{

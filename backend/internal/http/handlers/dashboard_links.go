@@ -665,25 +665,6 @@ func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL stri
 	}, nil
 }
 
-// attachSourceByURL links a pasted series URL to a tracker, outside the Link
-// Review queue (the add and edit forms).
-func (h *DashboardHandler) attachSourceByURL(parent context.Context, profileID int64, trackerID int64, rawURL string) (*models.Source, error) {
-	linkedSource, link, err := h.resolveSourceLink(parent, rawURL)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.trackerRepo.UpsertTrackerSourceContext(parent, profileID, trackerID, link); err != nil {
-		// The edit form prints this error next to the pasted URL, and the
-		// repository's own wording names tables and columns, so it stays in
-		// the log — same split as resolveSourceLink's lookup failure above.
-		slog.Error("attach source by url failed", "tracker", trackerID, "source", linkedSource.ID, "error", err)
-		return nil, fmt.Errorf("that link could not be saved; try again")
-	}
-
-	h.invalidateLinkLookups()
-	return linkedSource, nil
-}
-
 // AcceptExactLinkMatches bulk-accepts every tracker whose single best pending
 // candidate is an unambiguous exact title match.
 func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {

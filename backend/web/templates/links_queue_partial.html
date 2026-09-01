@@ -37,7 +37,7 @@
             {{if .Tracker.LatestReleaseAgo}} · updated {{.Tracker.LatestReleaseAgo}}{{end}}
         </p>
         {{if .Tracker.PrimaryURL}}
-        <a class="link-card__open" href="{{.Tracker.PrimaryURL}}" target="_blank" rel="noopener">
+        <a class="link-card__open" href="{{.Tracker.PrimaryURL}}" target="_blank" rel="noopener noreferrer">
             Open on {{if .Tracker.PrimarySourceName}}{{.Tracker.PrimarySourceName}}{{else}}primary site{{end}}
         </a>
         {{end}}
@@ -48,7 +48,7 @@
         <div class="link-candidate">
             {{if .CoverURL}}<img class="link-candidate__cover" src="{{.CoverURL}}" alt="" loading="lazy">{{end}}
             <div class="link-candidate__body">
-                <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></p>
+                <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></p>
                 <p class="link-candidate__meta">
                     <span class="link-score{{if .Exact}} link-score--exact{{end}}">{{.ScoreLabel}}</span>
                     {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
@@ -91,7 +91,7 @@
             {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
         </p>
         {{if .PrimaryURL}}
-        <a class="link-card__open" href="{{.PrimaryURL}}" target="_blank" rel="noopener">
+        <a class="link-card__open" href="{{.PrimaryURL}}" target="_blank" rel="noopener noreferrer">
             Open on {{if .PrimarySourceName}}{{.PrimarySourceName}}{{else}}primary site{{end}}
         </a>
         {{end}}

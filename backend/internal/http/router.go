@@ -3,8 +3,9 @@ package http
 import (
 	"database/sql"
 	"fmt"
-	"log/slog"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
@@ -15,27 +16,12 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
-func NewServer(cfg config.Config, db *sql.DB) *fiber.App {
-	return NewServerWithRegistry(cfg, db, nil)
-}
-
-// NewServerWithRegistry builds the app and drops a startup defect it has no way
-// to report. It stays for the test harness, which asserts against handlers
-// rather than against startup; a process that is meant to keep running must use
-// BuildServer instead.
-func NewServerWithRegistry(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Registry) *fiber.App {
-	app, err := BuildServer(cfg, db, connectorRegistry)
-	if err != nil {
-		slog.Warn("server built with a startup defect", "error", err)
-	}
-	return app
-}
-
 // BuildServer reports the startup failures a long-lived process must not
 // survive — today a template set that does not parse, which would otherwise
 // deploy "successfully" and answer every dashboard page with a 500 until
 // somebody restarts it. The app is returned either way, so a caller that
-// chooses to carry on still has one.
+// chooses to carry on still has one. A nil registry gets the default
+// connectors; the tests pass an explicit one so nothing reaches the network.
 func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Registry) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		AppName: cfg.AppName,
@@ -50,6 +36,14 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	// Default recover.New swallows panics without logging; the stack trace is
 	// the only way to debug a panicking handler from docker logs.
 	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+
+	// Every dashboard mutation is a plain form POST with no token, and the
+	// profile resolver falls back to the default profile when no cookie comes
+	// along — so a form auto-submitted from any other site the reader has open
+	// could delete or rewrite trackers on the LAN instance. Browsers tell us
+	// where a request came from; refusing the ones from another site is the
+	// whole defence this app needs, since it has no login to protect.
+	app.Use("/dashboard", rejectCrossSiteWrites)
 
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)
@@ -148,4 +142,31 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	}
 
 	return app, nil
+}
+
+// rejectCrossSiteWrites refuses a state-changing request that a browser says
+// originated on another site. Two signals, either one enough: the Sec-Fetch-Site
+// header every current browser sends, and the Origin header sent with every
+// cross-origin POST, compared against the host the request arrived on. A client
+// that sends neither (curl, the test harness, an old browser) is let through —
+// this guards against the reader's own browser being used against them, not
+// against a script that can already reach the port.
+func rejectCrossSiteWrites(c *fiber.Ctx) error {
+	switch c.Method() {
+	case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions:
+		return c.Next()
+	}
+
+	if site := strings.ToLower(strings.TrimSpace(c.Get("Sec-Fetch-Site"))); site == "cross-site" {
+		return c.Status(fiber.StatusForbidden).SendString("Cross-site request refused")
+	}
+
+	if origin := strings.TrimSpace(c.Get(fiber.HeaderOrigin)); origin != "" && !strings.EqualFold(origin, "null") {
+		parsed, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(parsed.Host, c.Hostname()) {
+			return c.Status(fiber.StatusForbidden).SendString("Cross-site request refused")
+		}
+	}
+
+	return c.Next()
 }

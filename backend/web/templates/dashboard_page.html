@@ -17,7 +17,14 @@
     <script src="{{assetURL "dashboard-tags.js"}}" defer></script>
 </head>
 
-<body>
+{{/*
+The profile rides on every htmx request as a header inherited from <body>, so a
+card action, a modal fetch and the list all name the profile this page was
+rendered for. Before this only the list sent it (as a hidden field) and the
+rest relied on the cookie, which any request carrying ?profile= rewrites — so
+two tabs on different profiles kept acting on each other's library.
+*/}}
+<body hx-headers='{"X-Profile-Key": "{{.ActiveProfile.Key}}"}'>
     <div class="grain"></div>
     <main class="shell">
         <header class="masthead">
