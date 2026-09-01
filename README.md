@@ -1,6 +1,8 @@
 # Cross-Site Tracker
 
-Current setup is local-first (single PC) with future-ready architecture for remote access.
+A self-hosted manga and novel tracker: one Go binary polls a set of reading
+sites for new chapters and serves an HTMX dashboard. It runs on a Raspberry Pi
+in Docker and is used from any browser on the same network.
 
 ## Structure
 - `backend/` Go + Fiber API
@@ -76,13 +78,22 @@ Current setup is local-first (single PC) with future-ready architecture for remo
 - Docker restore: `./scripts/restore.ps1 -Mode docker -BackupFile <path-to-backup.sqlite> -RestartContainer`
 - Full runbook: [BACKUP_RESTORE.md](BACKUP_RESTORE.md)
 
-## Backfill Related Titles (Existing Trackers)
-- Existing trackers created before `related_titles` persistence may have empty related-title data.
-- Run from `backend/`:
-  - Preview only: `go run ./cmd/backfill-related-titles --dry-run`
-  - Apply updates: `go run ./cmd/backfill-related-titles`
-  - Single profile: `go run ./cmd/backfill-related-titles --profile-id 1`
-  - Limit batch size: `go run ./cmd/backfill-related-titles --limit 100`
+## Link Review
+- The dashboard's **Link review** page scans a source for series it can serve
+  as a fallback for, and lets you accept, reject or paste the right URL for
+  each match. Accepted links merge the source's alternate titles into the
+  tracker, which is what makes later scans match better.
+
+## Operational Tools
+Three commands ship in the image next to the server (`/usr/local/bin` in the
+container) and can also be run from `backend/` with `go run ./cmd/<name>`:
+- `cleanup-stale-sources`: see below.
+- `repair-latest-chapter --assign "28=271,167=199"`: sets a tracker's latest
+  chapter to a hand-verified value after a source poisoned it with a junk
+  number. `--dry-run` previews without writing or migrating.
+- `poll-once --db <copy-of-app.sqlite>` (not in the image): runs one full poll
+  cycle against a database copy with the real connectors, for rehearsing
+  poller changes. It writes to the copy, so never aim it at the live file.
 
 ## Cleanup Stale Sources (Removed Connectors / Old Custom Sites)
 - Removes source records that no longer exist in the current connector registry.
