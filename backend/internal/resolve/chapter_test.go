@@ -209,7 +209,8 @@ func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
 
 // TestFetchChapterURLOriginSiteOutranksAggregators pins the top of the chain:
 // an origin scanlator site that verified it carries the chapter wins over a
-// fresh MangaHub, a linkable MangaFire, and the ComicK floor all at once.
+// fresh MangaHub, a blocked-but-linkable default-tier site, and the ComicK
+// floor all at once.
 func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 	registry := connectors.NewRegistry()
 	if err := registry.Register(mirrorConnector{key: "asuracomic", siteTier: siteTier{rank: connectors.ReaderRankOrigin}}); err != nil {
@@ -218,8 +219,8 @@ func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 	if err := registry.Register(cappedResolverConnector{mirrorConnector{key: "mangahub", siteTier: siteTier{rank: connectors.ReaderRankFreshAggregator}}, 100}); err != nil {
 		t.Fatalf("register mangahub stub: %v", err)
 	}
-	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
-		t.Fatalf("register mangafire stub: %v", err)
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedreader", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
+		t.Fatalf("register blocked linkable stub: %v", err)
 	}
 	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
@@ -234,7 +235,7 @@ func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 		{SourceKey: "asuracomic", SourceURL: "https://asura.example/comics/a"},
 	}
 
-	chapterURL, err := resolver.fetch("mangafire", "https://mangafire.example/title/a", 82, alternates)
+	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 82, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -244,15 +245,15 @@ func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 }
 
 // newReaderPriorityResolver wires the three sources of the reading chain the
-// way a MangaFire-primary tracker carries them: MangaFire primary
-// (challenge-blocked, offline-linkable), ComicK and MangaHub alternates —
-// deliberately in that linked order, since ComicK was linked first in
-// production and the priority must come from ranking, not row order.
+// way a tracker whose primary is a challenge-blocked, offline-linkable
+// default-tier site carries them: that site primary, ComicK and MangaHub
+// alternates — deliberately in that linked order, since ComicK was linked first
+// in production and the priority must come from ranking, not row order.
 func newReaderPriorityResolver(t *testing.T, mangahubLatest float64) (*ChapterLinkResolver, []repository.TrackerSourceRef) {
 	t.Helper()
 	registry := connectors.NewRegistry()
-	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "mangafire", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
-		t.Fatalf("register mangafire stub: %v", err)
+	if err := registry.Register(blockedLinkableConnector{blockedConnector{key: "blockedreader", siteTier: siteTier{rank: connectors.ReaderRankDefault}}}); err != nil {
+		t.Fatalf("register blocked linkable stub: %v", err)
 	}
 	if err := registry.Register(mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}}); err != nil {
 		t.Fatalf("register comick stub: %v", err)
@@ -270,11 +271,11 @@ func newReaderPriorityResolver(t *testing.T, mangahubLatest float64) (*ChapterLi
 
 // TestFetchChapterURLPrefersFreshMangaHub pins step 1 of the reading chain:
 // when MangaHub carries the requested chapter, reading happens there, even
-// though the MangaFire primary could build a link and ComicK could resolve.
+// though the blocked primary could build a link and ComicK could resolve.
 func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch("mangafire", "https://mangafire.example/title/a", 99, alternates)
+	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 99, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -283,27 +284,29 @@ func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 	}
 }
 
-// TestFetchChapterURLStaleMangaHubFallsBackToMangaFire pins step 2: a chapter
-// MangaHub does not carry yet must open on MangaFire's built link, not on
-// MangaHub's missing page and not on ComicK.
-func TestFetchChapterURLStaleMangaHubFallsBackToMangaFire(t *testing.T) {
+// TestFetchChapterURLStaleMangaHubFallsBackToBlockedGuess pins step 2: a chapter
+// MangaHub does not carry yet must open on the blocked primary's built link, not
+// on MangaHub's missing page and not on ComicK.
+func TestFetchChapterURLStaleMangaHubFallsBackToBlockedGuess(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch("mangafire", "https://mangafire.example/title/a", 101, alternates)
+	chapterURL, err := resolver.fetch("blockedreader", "https://blocked.example/title/a", 101, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
-	if chapterURL != "https://mangafire.example/title/a/read/chapter-101" {
-		t.Fatalf("expected mangafire's built link when mangahub is stale, got %q", chapterURL)
+	if chapterURL != "https://blocked.example/title/a/read/chapter-101" {
+		t.Fatalf("expected the blocked primary's built link when mangahub is stale, got %q", chapterURL)
 	}
 }
 
-// TestFetchChapterURLWithoutMangaFireFallsBackToComicK pins step 3: with no
-// MangaFire link and MangaHub stale, ComicK is the floor.
-func TestFetchChapterURLWithoutMangaFireFallsBackToComicK(t *testing.T) {
+// TestFetchChapterURLWithoutBlockedGuessFallsBackToComicK pins step 3: with no
+// buildable link and MangaHub stale, ComicK is the floor. This is the shape
+// every MangaFire-primary tracker takes now that MangaFire builds no offline
+// links.
+func TestFetchChapterURLWithoutBlockedGuessFallsBackToComicK(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	// The tracker's primary is ComicK here — no MangaFire in the chain.
+	// The tracker's primary is ComicK here — nothing buildable in the chain.
 	chapterURL, err := resolver.fetch("comick", "https://comick.example/comic/a", 101, alternates[1:])
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func newFakeAPIServer(t *testing.T) *httptest.Server {
@@ -259,7 +261,7 @@ func TestMangaFireConnectorResolveChapterURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve chapter url failed for %s: %v", sourceURL, err)
 		}
-		if chapterURL != "https://mangafire.to/title/dkw-one-piece/7462702" {
+		if chapterURL != "https://mangafire.to/title/dkw-one-piece/chapter/7462702" {
 			t.Fatalf("expected english chapter entry to win for %s, got %s", sourceURL, chapterURL)
 		}
 	}
@@ -390,62 +392,20 @@ func TestMangaFireConnectorCoolsDownAfterForbidden(t *testing.T) {
 // relapse-window expiry) is pinned in the shared package the machinery moved
 // to: internal/connectors/breaker_test.go.
 
-// TestBuildChapterURL pins the offline reader-URL construction: the scheme the
-// site serves readers on, derivable from a stored series URL with no network.
-func TestBuildChapterURL(t *testing.T) {
-	connector := NewConnector()
+// TestMangaFireBuildsNoOfflineChapterLink guards the regression that sent every
+// chapter link on a MangaFire-served card to the series page. The connector used
+// to build /read/{slug}.{hid}/en/chapter-{n} from a stored series URL with no
+// network; the site now redirects that path to the series page and drops the
+// chapter, and the reader URL that replaced it keys on a numeric chapter id only
+// the chapters endpoint knows. Implementing OfflineChapterLinker again would
+// hand the resolver's second tier a link that opens the wrong page while
+// claiming to be a confirmed chapter — so the absence is the fix, and it is
+// pinned here rather than left to be re-added by someone reading the old
+// scheme in git history.
+func TestMangaFireBuildsNoOfflineChapterLink(t *testing.T) {
+	var connector any = NewConnector()
 
-	cases := []struct {
-		name    string
-		url     string
-		chapter float64
-		want    string
-		wantOK  bool
-	}{
-		{
-			name:    "current title url",
-			url:     "https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi",
-			chapter: 177,
-			want:    "https://mangafire.to/read/kyou-kara-hajimeru-osananajimi.l3z6m/en/chapter-177",
-			wantOK:  true,
-		},
-		{
-			name:    "decimal chapter",
-			url:     "https://mangafire.to/title/dkw-one-piece",
-			chapter: 1044.5,
-			want:    "https://mangafire.to/read/one-piece.dkw/en/chapter-1044.5",
-			wantOK:  true,
-		},
-		{
-			name:    "legacy url falls back to a cosmetic slug",
-			url:     "https://mangafire.to/manga/one-piece.dkw",
-			chapter: 3,
-			want:    "https://mangafire.to/read/title.dkw/en/chapter-3",
-			wantOK:  true,
-		},
-		{
-			name:    "foreign host refused",
-			url:     "https://example.com/title/dkw-one-piece",
-			chapter: 3,
-			wantOK:  false,
-		},
-		{
-			name:    "invalid chapter refused",
-			url:     "https://mangafire.to/title/dkw-one-piece",
-			chapter: 0,
-			wantOK:  false,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := connector.BuildChapterURL(tc.url, tc.chapter)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if ok && got != tc.want {
-				t.Fatalf("url = %q, want %q", got, tc.want)
-			}
-		})
+	if _, ok := connector.(connectors.OfflineChapterLinker); ok {
+		t.Fatalf("mangafire must not build offline chapter links: the /read/... scheme now redirects to the series page")
 	}
 }

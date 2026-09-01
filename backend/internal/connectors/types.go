@@ -60,10 +60,19 @@ type CooldownReporter interface {
 // not verified to exist, so it ranks below every site that verified it
 // carries the chapter, but above the info-floor sites nobody wants to read
 // on: the human's browser passes the challenge the server cannot, so a built
-// MangaFire link beats ComicK's resolved one. It only stands in for a site
-// that could not be asked — a site whose resolver answered ErrChapterNotFound
-// has ceded its turn, and papering over that refusal would link to a page
-// that is known not to exist.
+// link beats ComicK's resolved one. It only stands in for a site that could
+// not be asked — a site whose resolver answered ErrChapterNotFound has ceded
+// its turn, and papering over that refusal would link to a page that is known
+// not to exist.
+//
+// No connector implements this today. MangaFire did until the site retired the
+// derivable /read/{slug}.{hid}/en/chapter-{n} scheme and started redirecting it
+// to the series page, which turned every built link into a chapter link that
+// opened the wrong page (see that connector's ResolveChapterURL). The interface
+// and the resolver tier that uses it are kept because the situation it answers
+// — a readable site the server cannot query, whose reader URL needs nothing but
+// the series URL — is one this app keeps running into. A site is only eligible
+// if its reader URL carries no identifier that has to be looked up first.
 type OfflineChapterLinker interface {
 	BuildChapterURL(rawURL string, chapter float64) (string, bool)
 }

@@ -88,7 +88,7 @@ func TestMangaFireResolveChapterPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve deep chapter: %v", err)
 	}
-	if want := "https://mangafire.to/title/" + hid + "-some-title/1000010"; chapterURL != want {
+	if want := "https://mangafire.to/title/" + hid + "-some-title/chapter/1000010"; chapterURL != want {
 		t.Fatalf("unexpected chapter url:\n got  %s\n want %s", chapterURL, want)
 	}
 	if got := pageCount(); got < 2 {
@@ -173,7 +173,7 @@ func TestMangaFireResolveChapterCrossesLanguageStraddle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve straddled chapter: %v", err)
 	}
-	if want := "https://mangafire.to/title/" + hid + "-x/100051"; chapterURL != want {
+	if want := "https://mangafire.to/title/" + hid + "-x/chapter/100051"; chapterURL != want {
 		t.Fatalf("expected English variant across page boundary:\n got  %s\n want %s", chapterURL, want)
 	}
 }

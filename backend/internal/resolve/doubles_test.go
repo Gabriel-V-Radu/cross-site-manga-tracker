@@ -67,7 +67,9 @@ func (m mirrorConnector) ResolveChapterURL(_ context.Context, rawURL string, cha
 }
 
 // blockedLinkableConnector is a blocked source that can still construct its
-// reader URLs offline, the way the MangaFire connector can.
+// reader URLs offline, the way a site whose reader URL needs nothing but the
+// series URL and the chapter number can. No live connector qualifies right now
+// (see connectors.OfflineChapterLinker), so the tier below is pinned here.
 type blockedLinkableConnector struct{ blockedConnector }
 
 func (b blockedLinkableConnector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
@@ -90,8 +92,8 @@ func (c cappedResolverConnector) ResolveChapterURL(ctx context.Context, rawURL s
 }
 
 // linkableCappedConnector answers its resolver — refusing chapters beyond its
-// latest with the typed verdict — and can also build reader URLs offline, the
-// way the live MangaFire connector behaves when its site answers.
+// latest with the typed verdict — and can also build reader URLs offline: the
+// combination that must never let a refusal be papered over with a guess.
 type linkableCappedConnector struct {
 	cappedResolverConnector
 }

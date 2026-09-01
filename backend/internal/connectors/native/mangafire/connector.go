@@ -17,8 +17,17 @@ import (
 )
 
 // MangaFire rebuilt their site as a SPA backed by a JSON API under /api.
-// Manga pages moved from /manga/{slug}.{hid} to /title/{hid}-{slug} and
-// reader pages from /read/{slug}.{hid}/{lang}/chapter-{n} to /title/{hid}-{slug}/{chapterId}.
+// Manga pages moved from /manga/{slug}.{hid} to /title/{hid}-{slug} and reader
+// pages from /read/{slug}.{hid}/{lang}/chapter-{n} to
+// /title/{hid}-{slug}/chapter/{chapterId}, which is the form the site's own
+// chapter lists link to. Both path segments are cosmetic: the router keys on
+// the hid and the chapter id, so /title/{hid}/chapter/{chapterId} opens the
+// same page.
+//
+// The legacy /read/... URLs still resolve, but only as a redirect to the series
+// page — the chapter part is dropped (verified 2026-09-01 on several titles).
+// That is why this connector deliberately does not implement
+// connectors.OfflineChapterLinker; see ResolveChapterURL.
 
 // chapterLanguage is the only language this connector reads. MangaFire hosts a
 // title in several languages at once and its title payload describes all of them
@@ -270,33 +279,20 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		slug = detail.Slug
 	}
 
-	return c.canonicalBaseURL() + "/title/" + titleKey(hid, slug) + "/" + strconv.FormatInt(match.ID, 10), nil
+	return c.canonicalBaseURL() + "/title/" + titleKey(hid, slug) + "/chapter/" + strconv.FormatInt(match.ID, 10), nil
 }
 
-// BuildChapterURL constructs the site's reader URL for a chapter without any
-// network access: https://mangafire.to/read/{slug}.{hid}/en/chapter-{n}. The
-// site routes readers on the id after the dot (the slug is cosmetic — the
-// same reason parseTitleURL trusts only the id on legacy URLs), so the link
-// works even when the stored slug drifts from the site's. It is a best-effort
-// guess that the chapter exists: it serves trackers whose fresh chapter came
-// from a tracking-only source while mangafire.to sits behind a browser
-// challenge this server cannot pass but the reader's own browser can.
-func (c *Connector) BuildChapterURL(rawURL string, chapter float64) (string, bool) {
-	if !connectors.ValidChapter(chapter) {
-		return "", false
-	}
-
-	hid, slug, err := c.parseTitleURL(rawURL)
-	if err != nil || hid == "" {
-		return "", false
-	}
-	if slug == "" {
-		slug = "title"
-	}
-
-	return c.canonicalBaseURL() + "/read/" + slug + "." + hid + "/en/chapter-" +
-		connectors.FormatChapter(chapter), true
-}
+// Deliberately NOT a connectors.OfflineChapterLinker. Until the SPA rebuild the
+// reader URL was derivable from a stored series URL alone
+// (/read/{slug}.{hid}/en/chapter-{n}), which let a chapter link be built for a
+// reader whose own browser could pass a Cloudflare challenge this server could
+// not. That scheme is gone: the site now redirects every /read/... URL to the
+// series page and drops the chapter, so a built link silently landed the reader
+// on the title — presented, worse, as a confirmed chapter link that badged the
+// card and moved its open-to-read button to MangaFire. The current reader URL
+// keys on the chapter's numeric id, which only the chapters endpoint knows, so
+// there is nothing left to build offline; a chapter here has to be resolved or
+// not linked at all.
 
 // parseTitleURL extracts the title hid (and slug when present) from both the
 // current /title/{hid}-{slug} URLs and the legacy /manga/{slug}.{hid} and

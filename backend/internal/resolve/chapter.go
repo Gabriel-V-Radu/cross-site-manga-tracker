@@ -116,7 +116,9 @@ func (r *ChapterLinkResolver) Invalidate() {
 // orderReaderCandidates) gets to verify it carries the chapter — a resolver
 // that answers ErrChapterNotFound has answered, and cedes its turn for this
 // chapter. Second, a site that could not be asked at all but can construct its
-// reader URL offline (MangaFire behind its challenge) serves the built link —
+// reader URL offline serves the built link (no connector does today: MangaFire
+// did until its site dropped the derivable reader scheme, and
+// connectors.OfflineChapterLinker records what makes a site eligible) —
 // the reader's own browser passes the challenge the server cannot, so an
 // unverified link there beats a verified one on the floor. Third, the info-floor
 // sites (ComicK): they always carry the chapter page, but nobody wants to read

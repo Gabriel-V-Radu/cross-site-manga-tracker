@@ -75,7 +75,7 @@ func TestDecideTrackerLinksPrefersTheConfirmedChapterSite(t *testing.T) {
 		PrimarySourceKey:  "mangaupdates",
 		PrimarySourceURL:  primarySeriesURL,
 		Alternates:        alternates,
-		LatestChapter:     chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		LatestChapter:     chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/title/abc-sample/chapter/82", Resolved: true},
 		ReporterSourceKey: "comick",
 		CoverSourceKey:    "comick",
 		SourceKeyForURL:   testSourceKeyForURL,
@@ -142,7 +142,7 @@ func TestDecideTrackerLinksKeepsThePrimaryBadgeWhenItServedTheCard(t *testing.T)
 		PrimarySourceKey: "mangafire",
 		PrimarySourceURL: mangafireSeriesURL,
 		Alternates:       sampleAlternates(),
-		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/title/abc-sample/chapter/82", Resolved: true},
 		SourceKeyForURL:  testSourceKeyForURL,
 	})
 
@@ -240,7 +240,7 @@ func TestDecideTrackerLinksPinnedChapterLinkStillSetsTheBadge(t *testing.T) {
 		PrimarySourceURL: primarySeriesURL,
 		Pinned:           &pinned,
 		Alternates:       sampleAlternates(),
-		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/title/abc-sample/chapter/82", Resolved: true},
 		SourceKeyForURL:  testSourceKeyForURL,
 	})
 
@@ -297,10 +297,10 @@ func TestDecideTrackerLinksWithoutASiteLookupNamesNoSite(t *testing.T) {
 		PrimarySourceKey: "mangaupdates",
 		PrimarySourceURL: primarySeriesURL,
 		Alternates:       sampleAlternates(),
-		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/read/sample.abc/en/chapter-82", Resolved: true},
+		LatestChapter:    chapterLinkLookup{Attempted: true, URL: "https://mangafire.to/title/abc-sample/chapter/82", Resolved: true},
 	})
 
-	if decision.LatestChapterURL != "https://mangafire.to/read/sample.abc/en/chapter-82" {
+	if decision.LatestChapterURL != "https://mangafire.to/title/abc-sample/chapter/82" {
 		t.Fatalf("expected the confirmed link to stand, got %q", decision.LatestChapterURL)
 	}
 	if decision.LatestChapterSiteKey != "" {
