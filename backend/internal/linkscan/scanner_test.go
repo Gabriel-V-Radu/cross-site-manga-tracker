@@ -29,18 +29,18 @@ func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
 	}
 }
 
-func (s *stubStore) ListScanTargetsContext(context.Context, int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
+func (s *stubStore) ListScanTargets(context.Context, int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
 	return s.targets, nil
 }
 
-func (s *stubStore) ReplacePendingSuggestionsContext(_ context.Context, trackerID int64, _ int64, suggestions []repository.LinkSuggestion) error {
+func (s *stubStore) ReplacePendingSuggestions(_ context.Context, trackerID int64, _ int64, suggestions []repository.LinkSuggestion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stored[trackerID] = suggestions
 	return nil
 }
 
-func (s *stubStore) MergeRelatedTitlesContext(_ context.Context, trackerID int64, titles []string) error {
+func (s *stubStore) MergeRelatedTitles(_ context.Context, trackerID int64, titles []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mergedTitles[trackerID] = append(s.mergedTitles[trackerID], titles...)

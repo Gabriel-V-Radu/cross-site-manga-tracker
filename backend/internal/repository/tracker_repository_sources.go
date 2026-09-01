@@ -9,55 +9,10 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
 
-func (r *TrackerRepository) ListLinkedSourceIDs(profileID int64) ([]int64, error) {
-	return r.ListLinkedSourceIDsContext(context.Background(), profileID)
-}
-
-func (r *TrackerRepository) ListLinkedSourceIDsContext(ctx context.Context, profileID int64) ([]int64, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT source_id
-		FROM (
-			SELECT source_id
-			FROM trackers
-			WHERE profile_id = ?
-			UNION
-			SELECT ts.source_id
-			FROM tracker_sources ts
-			INNER JOIN trackers t ON t.id = ts.tracker_id
-			WHERE t.profile_id = ?
-		)
-		WHERE source_id > 0
-		ORDER BY source_id ASC
-	`, profileID, profileID)
-	if err != nil {
-		return nil, fmt.Errorf("list linked source ids: %w", err)
-	}
-	defer rows.Close()
-
-	ids := make([]int64, 0)
-	for rows.Next() {
-		var sourceID int64
-		if err := rows.Scan(&sourceID); err != nil {
-			return nil, fmt.Errorf("scan linked source id: %w", err)
-		}
-		ids = append(ids, sourceID)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate linked source ids: %w", err)
-	}
-
-	return ids, nil
-}
-
 // CountTrackersBySource reports how many of a profile's trackers each source
 // serves, counting a tracker once per source whether it is the primary or a
 // linked alternate. The dashboard uses it to rank the connector shortcuts.
-func (r *TrackerRepository) CountTrackersBySource(profileID int64) (map[int64]int, error) {
-	return r.CountTrackersBySourceContext(context.Background(), profileID)
-}
-
-func (r *TrackerRepository) CountTrackersBySourceContext(ctx context.Context, profileID int64) (map[int64]int, error) {
+func (r *TrackerRepository) CountTrackersBySource(ctx context.Context, profileID int64) (map[int64]int, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id, COUNT(1)
 		FROM (
@@ -91,11 +46,7 @@ func (r *TrackerRepository) CountTrackersBySourceContext(ctx context.Context, pr
 	return counts, nil
 }
 
-func (r *TrackerRepository) ListTrackerSources(profileID int64, trackerID int64) ([]models.TrackerSource, error) {
-	return r.ListTrackerSourcesContext(context.Background(), profileID, trackerID)
-}
-
-func (r *TrackerRepository) ListTrackerSourcesContext(ctx context.Context, profileID int64, trackerID int64) ([]models.TrackerSource, error) {
+func (r *TrackerRepository) ListTrackerSources(ctx context.Context, profileID int64, trackerID int64) ([]models.TrackerSource, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			ts.id,
@@ -147,11 +98,7 @@ func (r *TrackerRepository) ListTrackerSourcesContext(ctx context.Context, profi
 	return items, nil
 }
 
-func (r *TrackerRepository) ReplaceTrackerSources(profileID int64, trackerID int64, sources []models.TrackerSource) error {
-	return r.ReplaceTrackerSourcesContext(context.Background(), profileID, trackerID, sources)
-}
-
-func (r *TrackerRepository) ReplaceTrackerSourcesContext(ctx context.Context, profileID int64, trackerID int64, sources []models.TrackerSource) error {
+func (r *TrackerRepository) ReplaceTrackerSources(ctx context.Context, profileID int64, trackerID int64, sources []models.TrackerSource) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin replace tracker sources tx: %w", err)
@@ -196,11 +143,7 @@ func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64,
 	return nil
 }
 
-func (r *TrackerRepository) UpsertTrackerSource(profileID int64, trackerID int64, source models.TrackerSource) error {
-	return r.UpsertTrackerSourceContext(context.Background(), profileID, trackerID, source)
-}
-
-func (r *TrackerRepository) UpsertTrackerSourceContext(ctx context.Context, profileID int64, trackerID int64, source models.TrackerSource) error {
+func (r *TrackerRepository) UpsertTrackerSource(ctx context.Context, profileID int64, trackerID int64, source models.TrackerSource) error {
 	if source.SourceID <= 0 || strings.TrimSpace(source.SourceURL) == "" {
 		return nil
 	}

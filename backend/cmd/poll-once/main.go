@@ -49,7 +49,7 @@ func main() {
 	repo := repository.NewTrackerRepository(db)
 	poller := scheduler.NewPoller(repo, connectordefaults.NewRegistry(), scheduler.PollerConfig{}, logger)
 
-	trackers, err := repo.ListForPolling()
+	trackers, err := repo.ListForPolling(context.Background())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "list trackers:", err)
 		os.Exit(1)

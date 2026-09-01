@@ -56,10 +56,10 @@ func (e coverEntry) expired(now time.Time) bool {
 // repository.CoverCacheRepository in the running app, anything that answers
 // the same four calls in a test.
 type coverStore interface {
-	LoadFreshContext(ctx context.Context) ([]repository.CoverCacheRow, error)
-	UpsertContext(ctx context.Context, entry repository.CoverCacheRow) error
-	DeleteContext(ctx context.Context, cacheKey string) error
-	DeleteNegativesContext(ctx context.Context) error
+	LoadFresh(ctx context.Context) ([]repository.CoverCacheRow, error)
+	Upsert(ctx context.Context, entry repository.CoverCacheRow) error
+	Delete(ctx context.Context, cacheKey string) error
+	DeleteNegatives(ctx context.Context) error
 }
 
 // CoverConfig wires a CoverResolver. Everything it reaches — the connectors,
@@ -186,7 +186,7 @@ func (r *CoverResolver) InvalidateNegatives() {
 	r.cache.dropWhere(func(entry coverEntry) bool { return !entry.Found })
 
 	if r.store != nil {
-		if err := r.store.DeleteNegativesContext(r.queue.lifetime); err != nil {
+		if err := r.store.DeleteNegatives(r.queue.lifetime); err != nil {
 			slog.Debug("cover cache negative sweep failed", "error", err)
 		}
 	}
@@ -412,7 +412,7 @@ func (r *CoverResolver) dropCached(cacheKey string, stale func(coverEntry) bool)
 		return
 	}
 	if r.store != nil {
-		if err := r.store.DeleteContext(r.queue.lifetime, cacheKey); err != nil {
+		if err := r.store.Delete(r.queue.lifetime, cacheKey); err != nil {
 			slog.Debug("cover cache delete failed", "error", err)
 		}
 	}
@@ -450,7 +450,7 @@ func (r *CoverResolver) putEntry(cacheKey string, entry coverEntry) {
 	// Write-through so the entry survives restarts; best-effort because a
 	// failed persist only costs a re-resolve after the next restart.
 	if r.store != nil {
-		if err := r.store.UpsertContext(r.queue.lifetime, repository.CoverCacheRow{
+		if err := r.store.Upsert(r.queue.lifetime, repository.CoverCacheRow{
 			CacheKey:  cacheKey,
 			CoverURL:  entry.CoverURL,
 			SourceKey: entry.SourceKey,
@@ -469,7 +469,7 @@ func (r *CoverResolver) seedFromStore() {
 	if r.store == nil {
 		return
 	}
-	entries, err := r.store.LoadFreshContext(r.queue.lifetime)
+	entries, err := r.store.LoadFresh(r.queue.lifetime)
 	if err != nil {
 		slog.Warn("cover cache load failed; starting cold", "error", err)
 		return

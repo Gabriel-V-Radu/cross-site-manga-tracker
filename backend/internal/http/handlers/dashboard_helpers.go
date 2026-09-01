@@ -288,7 +288,7 @@ func countedAgo(count int, unit string) string {
 // does. A load failure degrades to no fallback rather than failing the render:
 // the card is still useful without cover art.
 func (h *DashboardHandler) trackerAlternatesForProfile(ctx context.Context, profileID int64) map[int64][]repository.TrackerSourceRef {
-	alternates, err := h.trackerRepo.ListAlternateSourcesByTrackerContext(ctx, profileID)
+	alternates, err := h.trackerRepo.ListAlternateSourcesByTracker(ctx, profileID)
 	if err != nil {
 		return nil
 	}

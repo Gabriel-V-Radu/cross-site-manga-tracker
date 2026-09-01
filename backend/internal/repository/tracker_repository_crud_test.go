@@ -1,6 +1,7 @@
 package repository_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
@@ -15,7 +16,7 @@ func TestCreateWritesTrackerAndPrimarySourceTogether(t *testing.T) {
 	repo := repository.NewTrackerRepository(db)
 
 	itemID := "series-item"
-	created, err := repo.Create(&models.Tracker{
+	created, err := repo.Create(context.Background(), &models.Tracker{
 		ProfileID:    1,
 		Title:        "Created Tracker",
 		SourceID:     1,
@@ -49,7 +50,7 @@ func TestCreateLeavesNothingBehindOnFailure(t *testing.T) {
 	db := openPollingTestDB(t)
 	repo := repository.NewTrackerRepository(db)
 
-	if _, err := repo.Create(&models.Tracker{
+	if _, err := repo.Create(context.Background(), &models.Tracker{
 		ProfileID: 1,
 		Title:     "Doomed Tracker",
 		SourceID:  9999,

@@ -13,9 +13,9 @@ import (
 // The pool runs MaxOpenConns(1). A transaction that is never committed or
 // rolled back holds that one connection, and the context-free database/sql
 // calls queue behind it with no deadline — the process stops working with no
-// error and no log line. These tests pin that the ctx-taking variants turn
-// that wait into an error a caller can act on, and that a transaction aborted
-// that way leaves nothing half-written.
+// error and no log line. These tests pin that the context every method takes
+// turns that wait into an error a caller can act on, and that a transaction
+// aborted that way leaves nothing half-written.
 
 // cancellationCeiling bounds every wait below. What is under test here IS a
 // hang, so no assertion may block on an unbounded receive: a regression has to
@@ -59,11 +59,11 @@ func TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction(t *testing.T) 
 		call func(context.Context) error
 	}{
 		{"read", func(ctx context.Context) error {
-			_, err := repo.ListForPollingContext(ctx)
+			_, err := repo.ListForPolling(ctx)
 			return err
 		}},
 		{"write", func(ctx context.Context) error {
-			return repo.MarkPollCheckedAtContext(ctx, trackerID, time.Now().UTC())
+			return repo.MarkPollCheckedAt(ctx, trackerID, time.Now().UTC())
 		}},
 	}
 
@@ -78,10 +78,10 @@ func TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction(t *testing.T) 
 	}
 }
 
-// TestUpdatePollingStateContextAbortsOnACancelledContext covers the poller's
+// TestUpdatePollingStateAbortsOnACancelledContext covers the poller's
 // write: a cancelled cycle must surface an error rather than begin a
 // transaction nobody will finish.
-func TestUpdatePollingStateContextAbortsOnACancelledContext(t *testing.T) {
+func TestUpdatePollingStateAbortsOnACancelledContext(t *testing.T) {
 	db := openPollingTestDB(t)
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 19)
@@ -91,7 +91,7 @@ func TestUpdatePollingStateContextAbortsOnACancelledContext(t *testing.T) {
 
 	newChapter := 20.0
 	err := runBounded(t, func() error {
-		_, err := repo.UpdatePollingStateContext(ctx, repository.PollingUpdate{
+		_, err := repo.UpdatePollingState(ctx, repository.PollingUpdate{
 			TrackerID:          trackerID,
 			SnapshotSourceID:   1,
 			LatestKnownChapter: &newChapter,
@@ -112,17 +112,17 @@ func TestUpdatePollingStateContextAbortsOnACancelledContext(t *testing.T) {
 	}
 }
 
-// TestAcceptSuggestionContextLeavesNothingHalfApplied pins that cancellation
+// TestAcceptSuggestionLeavesNothingHalfApplied pins that cancellation
 // does not turn a multi-statement decision into a partial one: no link row
 // without the accepted status, no accepted status without the link.
-func TestAcceptSuggestionContextLeavesNothingHalfApplied(t *testing.T) {
+func TestAcceptSuggestionLeavesNothingHalfApplied(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
 	trackerID := seedLinkTracker(t, db, "cancelled-accept")
 	comick := sourceIDByKey(t, db, "comick")
 
 	candidateURL := "https://comick.dev/comic/cancelled-accept"
-	if err := repo.ReplacePendingSuggestions(trackerID, comick, []repository.LinkSuggestion{
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
 		pendingSuggestion(trackerID, comick, candidateURL, "Cancelled Accept", 1.0),
 	}); err != nil {
 		t.Fatalf("store the candidate: %v", err)
@@ -133,7 +133,7 @@ func TestAcceptSuggestionContextLeavesNothingHalfApplied(t *testing.T) {
 	cancel()
 
 	err := runBounded(t, func() error {
-		_, err := repo.AcceptSuggestionContext(ctx, 1, suggestionID)
+		_, err := repo.AcceptSuggestion(ctx, 1, suggestionID)
 		return err
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -157,16 +157,16 @@ func TestReplaceTrackerTagsStoresOnlyTheProfilesOwnTags(t *testing.T) {
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 5)
 
-	mine, err := repo.CreateProfileTag(1, "Mine", nil)
+	mine, err := repo.CreateProfileTag(context.Background(), 1, "Mine", nil)
 	if err != nil {
 		t.Fatalf("create the profile's own tag: %v", err)
 	}
-	theirs, err := repo.CreateProfileTag(2, "Theirs", nil)
+	theirs, err := repo.CreateProfileTag(context.Background(), 2, "Theirs", nil)
 	if err != nil {
 		t.Fatalf("create the other profile's tag: %v", err)
 	}
 
-	if err := repo.ReplaceTrackerTagsContext(context.Background(), 1, trackerID, []int64{mine.ID, theirs.ID}); err != nil {
+	if err := repo.ReplaceTrackerTags(context.Background(), 1, trackerID, []int64{mine.ID, theirs.ID}); err != nil {
 		t.Fatalf("replace tracker tags: %v", err)
 	}
 
@@ -186,7 +186,7 @@ func TestReplaceTrackerTagsStoresOnlyTheProfilesOwnTags(t *testing.T) {
 		t.Fatalf("expected tag %d to be the linked one, got %d", mine.ID, linkedTagID)
 	}
 
-	if err := repo.ReplaceTrackerTagsContext(context.Background(), 1, trackerID, nil); err != nil {
+	if err := repo.ReplaceTrackerTags(context.Background(), 1, trackerID, nil); err != nil {
 		t.Fatalf("clear tracker tags: %v", err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(1) FROM tracker_tags WHERE tracker_id = ?`, trackerID).Scan(&linked); err != nil {
@@ -197,23 +197,23 @@ func TestReplaceTrackerTagsStoresOnlyTheProfilesOwnTags(t *testing.T) {
 	}
 }
 
-// TestListContextReturnsTrackersWithTheirTags covers the second half of the
+// TestListReturnsTrackersWithTheirTags covers the second half of the
 // cursor rule: the tag query runs only once the tracker cursor has been
 // drained into a slice, so both statements get the single connection in turn.
-func TestListContextReturnsTrackersWithTheirTags(t *testing.T) {
+func TestListReturnsTrackersWithTheirTags(t *testing.T) {
 	db := openPollingTestDB(t)
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 5)
 
-	tag, err := repo.CreateProfileTag(1, "Favourites", nil)
+	tag, err := repo.CreateProfileTag(context.Background(), 1, "Favourites", nil)
 	if err != nil {
 		t.Fatalf("create tag: %v", err)
 	}
-	if err := repo.ReplaceTrackerTags(1, trackerID, []int64{tag.ID}); err != nil {
+	if err := repo.ReplaceTrackerTags(context.Background(), 1, trackerID, []int64{tag.ID}); err != nil {
 		t.Fatalf("link tag: %v", err)
 	}
 
-	trackers, err := repo.ListContext(context.Background(), repository.TrackerListOptions{ProfileID: 1})
+	trackers, err := repo.List(context.Background(), repository.TrackerListOptions{ProfileID: 1})
 	if err != nil {
 		t.Fatalf("list trackers: %v", err)
 	}

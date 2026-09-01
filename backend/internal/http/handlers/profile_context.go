@@ -44,7 +44,7 @@ func (r *profileContextResolver) Resolve(c *fiber.Ctx) (*models.Profile, error) 
 		return profile, nil
 	}
 
-	profile, err := r.repo.GetDefaultContext(c.Context())
+	profile, err := r.repo.GetDefault(c.Context())
 	if err != nil {
 		return nil, fmt.Errorf("resolve default profile: %w", err)
 	}
@@ -57,7 +57,7 @@ func (r *profileContextResolver) Resolve(c *fiber.Ctx) (*models.Profile, error) 
 }
 
 func (r *profileContextResolver) ListProfiles(ctx context.Context) ([]models.Profile, error) {
-	return r.repo.ListContext(ctx)
+	return r.repo.List(ctx)
 }
 
 func (r *profileContextResolver) resolveFromQuery(c *fiber.Ctx) (*models.Profile, error) {
@@ -120,14 +120,14 @@ func (r *profileContextResolver) resolveFromCookie(c *fiber.Ctx) (*models.Profil
 
 func (r *profileContextResolver) lookup(ctx context.Context, value string) (*models.Profile, error) {
 	if id, err := strconv.ParseInt(value, 10, 64); err == nil && id > 0 {
-		item, lookupErr := r.repo.GetByIDContext(ctx, id)
+		item, lookupErr := r.repo.GetByID(ctx, id)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("lookup profile by id: %w", lookupErr)
 		}
 		return item, nil
 	}
 
-	item, err := r.repo.GetByKeyContext(ctx, value)
+	item, err := r.repo.GetByKey(ctx, value)
 	if err != nil {
 		return nil, fmt.Errorf("lookup profile by key: %w", err)
 	}

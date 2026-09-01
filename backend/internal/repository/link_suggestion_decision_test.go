@@ -1,6 +1,7 @@
 package repository_test
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
@@ -51,7 +52,7 @@ func countLinkRows(t *testing.T, db *sql.DB, trackerID int64, sourceID int64) in
 func seedTwoCandidates(t *testing.T, db *sql.DB, trackerID int64, sourceID int64) {
 	t.Helper()
 	repo := repository.NewLinkSuggestionRepository(db)
-	if err := repo.ReplacePendingSuggestions(trackerID, sourceID, []repository.LinkSuggestion{
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, sourceID, []repository.LinkSuggestion{
 		pendingSuggestion(trackerID, sourceID, bestCandidateURL, "Series", 1.0),
 		pendingSuggestion(trackerID, sourceID, siblingCandidateURL, "Series (Colored)", 0.5),
 	}); err != nil {
@@ -67,7 +68,7 @@ func TestAcceptSuggestionAppliesTheWholeDecision(t *testing.T) {
 	seedTwoCandidates(t, db, trackerID, weebcentral)
 
 	bestID := suggestionIDByURL(t, db, bestCandidateURL)
-	accepted, err := repo.AcceptSuggestion(1, bestID)
+	accepted, err := repo.AcceptSuggestion(context.Background(), 1, bestID)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestAcceptSuggestionAppliesTheWholeDecision(t *testing.T) {
 		t.Fatalf("sibling status = %q, want rejected", got)
 	}
 
-	queue, err := repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
+	queue, err := repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestAcceptSuggestionAppliesTheWholeDecision(t *testing.T) {
 
 	// Double-submitting the same card (or a bulk accept racing the button)
 	// finds nothing pending and must not add a second link row.
-	again, err := repo.AcceptSuggestion(1, bestID)
+	again, err := repo.AcceptSuggestion(context.Background(), 1, bestID)
 	if err != nil {
 		t.Fatalf("re-accept: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestAcceptSuggestionRollsBackEverythingOnFailure(t *testing.T) {
 	}
 
 	bestID := suggestionIDByURL(t, db, bestCandidateURL)
-	_, err := repo.AcceptSuggestion(1, bestID)
+	_, err := repo.AcceptSuggestion(context.Background(), 1, bestID)
 	if err == nil {
 		t.Fatal("accept succeeded despite the forced failure")
 	}
@@ -161,7 +162,7 @@ func TestAcceptSuggestionRollsBackEverythingOnFailure(t *testing.T) {
 		t.Fatalf("sibling status = %q, want pending", got)
 	}
 
-	queue, queueErr := repo.ListReviewQueue(1, weebcentral, repository.LinkScanFilter{})
+	queue, queueErr := repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
 	if queueErr != nil {
 		t.Fatalf("list queue: %v", queueErr)
 	}
@@ -181,7 +182,7 @@ func TestApplyManualLinkSettlesTheReview(t *testing.T) {
 	trackerID := seedLinkTracker(t, db, "series")
 	seedTwoCandidates(t, db, trackerID, weebcentral)
 
-	if err := repo.ApplyManualLink(1, trackerID, models.TrackerSource{
+	if err := repo.ApplyManualLink(context.Background(), 1, trackerID, models.TrackerSource{
 		SourceID:  mangadex,
 		SourceURL: "https://mangadex.org/title/abc",
 	}, weebcentral); err != nil {
@@ -194,7 +195,7 @@ func TestApplyManualLinkSettlesTheReview(t *testing.T) {
 	if got := suggestionStatusByURL(t, db, bestCandidateURL); got != repository.LinkSuggestionRejected {
 		t.Fatalf("candidate status = %q, want rejected", got)
 	}
-	targets, err := repo.ListScanTargets(1, weebcentral, repository.LinkScanFilter{})
+	targets, err := repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list scan targets: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestApplyManualLinkSettlesTheReview(t *testing.T) {
 	if _, err := db.Exec(`UPDATE trackers SET profile_id = 2 WHERE id = ?`, other); err != nil {
 		t.Fatalf("move tracker to another profile: %v", err)
 	}
-	if err := repo.ApplyManualLink(1, other, models.TrackerSource{
+	if err := repo.ApplyManualLink(context.Background(), 1, other, models.TrackerSource{
 		SourceID:  mangadex,
 		SourceURL: "https://mangadex.org/title/def",
 	}, weebcentral); err != nil {
@@ -240,7 +241,7 @@ func TestApplyManualLinkRollsBackEverythingOnFailure(t *testing.T) {
 		t.Fatalf("install failure trigger: %v", err)
 	}
 
-	err := repo.ApplyManualLink(1, trackerID, models.TrackerSource{
+	err := repo.ApplyManualLink(context.Background(), 1, trackerID, models.TrackerSource{
 		SourceID:  mangadex,
 		SourceURL: "https://mangadex.org/title/abc",
 	}, weebcentral)
@@ -280,7 +281,7 @@ func TestDismissTrackerRollsBackEverythingOnFailure(t *testing.T) {
 		t.Fatalf("install failure trigger: %v", err)
 	}
 
-	if err := repo.DismissTracker(1, trackerID, weebcentral); err == nil {
+	if err := repo.DismissTracker(context.Background(), 1, trackerID, weebcentral); err == nil {
 		t.Fatal("dismiss succeeded despite the forced failure")
 	}
 	if got := suggestionStatusByURL(t, db, bestCandidateURL); got != repository.LinkSuggestionPending {

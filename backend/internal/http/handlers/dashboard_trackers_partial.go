@@ -41,7 +41,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		Query:     strings.TrimSpace(c.Query("q")),
 	}
 
-	totalTrackers, err := h.trackerRepo.CountContext(c.Context(), listOptions)
+	totalTrackers, err := h.trackerRepo.Count(c.Context(), listOptions)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load trackers", err)
 	}
@@ -67,7 +67,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	refreshKey := strings.Clone(c.OriginalURL())
 	h.pageKeys.SetActive(refreshKey)
 
-	items, err := h.trackerRepo.ListContext(c.Context(), listOptions)
+	items, err := h.trackerRepo.List(c.Context(), listOptions)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load trackers", err)
 	}
@@ -78,12 +78,12 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLsContext(c.Context(), activeProfile.ID)
+	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
-	sources, err := h.sourceRepo.ListEnabledContext(c.Context())
+	sources, err := h.sourceRepo.ListEnabled(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
@@ -95,7 +95,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 
 	// Covers and chapter links resolve against a tracker's primary source; these
 	// let them fall back when that source is unreadable.
-	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTrackerContext(c.Context(), activeProfile.ID)
+	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTracker(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sources", err)
 	}
@@ -105,7 +105,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	// The connector shortcuts rank by how many trackers each source serves:
 	// with ten registered sources the row would otherwise wrap into a second
 	// line, so only the top few show and the rest fold behind a toggle.
-	trackerCountsBySource, err := h.trackerRepo.CountTrackersBySourceContext(c.Context(), activeProfile.ID)
+	trackerCountsBySource, err := h.trackerRepo.CountTrackersBySource(c.Context(), activeProfile.ID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to count linked sites", err)
 	}

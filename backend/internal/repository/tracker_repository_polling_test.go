@@ -1,6 +1,7 @@
 package repository_test
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -77,7 +78,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 
 	newChapter := 20.0
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -93,7 +94,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 	// re-stamping on every cycle is exactly the drift that made a dateless tracker
 	// look freshly updated forever.
 	laterCheck := discoveredAt.Add(6 * time.Hour)
-	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -115,11 +116,11 @@ func TestUpdatePollingStateKeepsChapterSeenAtWhenReleaseDateIsKnown(t *testing.T
 	newChapter := 20.0
 	releasedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
-	tracker, err := repo.GetByID(1, trackerID)
+	tracker, err := repo.GetByID(context.Background(), 1, trackerID)
 	if err != nil {
 		t.Fatalf("get tracker: %v", err)
 	}
@@ -146,11 +147,11 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 	newChapter := 20.0
 	reporter := int64(3)
 	checkedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
-	tracker, err := repo.GetByID(1, trackerID)
+	tracker, err := repo.GetByID(context.Background(), 1, trackerID)
 	if err != nil || tracker == nil {
 		t.Fatalf("get tracker: %v", err)
 	}
@@ -158,11 +159,11 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 		t.Fatalf("expected reporter source %d to be recorded, got %#v", reporter, tracker.LatestChapterSourceID)
 	}
 
-	if _, err := repo.UpdatePollingState(repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
-	tracker, err = repo.GetByID(1, trackerID)
+	tracker, err = repo.GetByID(context.Background(), 1, trackerID)
 	if err != nil || tracker == nil {
 		t.Fatalf("get tracker again: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestUpdatePollingStateSkipsWhenSourceChangedMidCycle(t *testing.T) {
 	}
 
 	staleChapter := 20.0
-	applied, err := repo.UpdatePollingState(repository.PollingUpdate{
+	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
 		TrackerID:          trackerID,
 		SnapshotSourceID:   1,
 		SourceID:           1,
@@ -249,7 +250,7 @@ func TestUpdatePollingStateUpsertsMirrorRow(t *testing.T) {
 	newChapter := 20.0
 	itemID := "canonical-item"
 	newURL := "https://mangadex.org/title/polling-canonical"
-	applied, err := repo.UpdatePollingState(repository.PollingUpdate{
+	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
 		TrackerID:          trackerID,
 		SnapshotSourceID:   1,
 		SourceID:           1,

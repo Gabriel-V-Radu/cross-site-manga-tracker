@@ -17,11 +17,7 @@ func NewSourceRepository(db *sql.DB) *SourceRepository {
 	return &SourceRepository{db: db}
 }
 
-func (r *SourceRepository) ListEnabled() ([]models.Source, error) {
-	return r.ListEnabledContext(context.Background())
-}
-
-func (r *SourceRepository) ListEnabledContext(ctx context.Context) ([]models.Source, error) {
+func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
@@ -69,11 +65,7 @@ func (r *SourceRepository) ListEnabledContext(ctx context.Context) ([]models.Sou
 	return items, nil
 }
 
-func (r *SourceRepository) GetByID(id int64) (*models.Source, error) {
-	return r.GetByIDContext(context.Background(), id)
-}
-
-func (r *SourceRepository) GetByIDContext(ctx context.Context, id int64) (*models.Source, error) {
+func (r *SourceRepository) GetByID(ctx context.Context, id int64) (*models.Source, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
@@ -83,11 +75,7 @@ func (r *SourceRepository) GetByIDContext(ctx context.Context, id int64) (*model
 	return scanSource(row, "get source by id")
 }
 
-func (r *SourceRepository) GetByKey(key string) (*models.Source, error) {
-	return r.GetByKeyContext(context.Background(), key)
-}
-
-func (r *SourceRepository) GetByKeyContext(ctx context.Context, key string) (*models.Source, error) {
+func (r *SourceRepository) GetByKey(ctx context.Context, key string) (*models.Source, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
 		FROM sources
@@ -132,11 +120,7 @@ func scanSource(row rowScanner, operation string) (*models.Source, error) {
 	return &source, nil
 }
 
-func (r *SourceRepository) ListProfileSourceLogoURLs(profileID int64) (map[int64]string, error) {
-	return r.ListProfileSourceLogoURLsContext(context.Background(), profileID)
-}
-
-func (r *SourceRepository) ListProfileSourceLogoURLsContext(ctx context.Context, profileID int64) (map[int64]string, error) {
+func (r *SourceRepository) ListProfileSourceLogoURLs(ctx context.Context, profileID int64) (map[int64]string, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id, logo_url
 		FROM profile_source_logos
@@ -169,11 +153,7 @@ func (r *SourceRepository) ListProfileSourceLogoURLsContext(ctx context.Context,
 	return logoBySourceID, nil
 }
 
-func (r *SourceRepository) UpsertProfileSourceLogoURLs(profileID int64, logoBySourceID map[int64]string) error {
-	return r.UpsertProfileSourceLogoURLsContext(context.Background(), profileID, logoBySourceID)
-}
-
-func (r *SourceRepository) UpsertProfileSourceLogoURLsContext(ctx context.Context, profileID int64, logoBySourceID map[int64]string) error {
+func (r *SourceRepository) UpsertProfileSourceLogoURLs(ctx context.Context, profileID int64, logoBySourceID map[int64]string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin source logo urls tx: %w", err)

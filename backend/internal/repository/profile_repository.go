@@ -16,11 +16,7 @@ func NewProfileRepository(db *sql.DB) *ProfileRepository {
 	return &ProfileRepository{db: db}
 }
 
-func (r *ProfileRepository) List() ([]models.Profile, error) {
-	return r.ListContext(context.Background())
-}
-
-func (r *ProfileRepository) ListContext(ctx context.Context) ([]models.Profile, error) {
+func (r *ProfileRepository) List(ctx context.Context) ([]models.Profile, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
@@ -47,11 +43,7 @@ func (r *ProfileRepository) ListContext(ctx context.Context) ([]models.Profile, 
 	return items, nil
 }
 
-func (r *ProfileRepository) GetByID(id int64) (*models.Profile, error) {
-	return r.GetByIDContext(context.Background(), id)
-}
-
-func (r *ProfileRepository) GetByIDContext(ctx context.Context, id int64) (*models.Profile, error) {
+func (r *ProfileRepository) GetByID(ctx context.Context, id int64) (*models.Profile, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
@@ -61,11 +53,7 @@ func (r *ProfileRepository) GetByIDContext(ctx context.Context, id int64) (*mode
 	return scanProfile(row, "get profile by id")
 }
 
-func (r *ProfileRepository) GetByKey(key string) (*models.Profile, error) {
-	return r.GetByKeyContext(context.Background(), key)
-}
-
-func (r *ProfileRepository) GetByKeyContext(ctx context.Context, key string) (*models.Profile, error) {
+func (r *ProfileRepository) GetByKey(ctx context.Context, key string) (*models.Profile, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
@@ -75,11 +63,7 @@ func (r *ProfileRepository) GetByKeyContext(ctx context.Context, key string) (*m
 	return scanProfile(row, "get profile by key")
 }
 
-func (r *ProfileRepository) GetDefault() (*models.Profile, error) {
-	return r.GetDefaultContext(context.Background())
-}
-
-func (r *ProfileRepository) GetDefaultContext(ctx context.Context) (*models.Profile, error) {
+func (r *ProfileRepository) GetDefault(ctx context.Context) (*models.Profile, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
@@ -104,11 +88,7 @@ func scanProfile(row rowScanner, operation string) (*models.Profile, error) {
 	return &item, nil
 }
 
-func (r *ProfileRepository) Rename(id int64, name string) (bool, error) {
-	return r.RenameContext(context.Background(), id, name)
-}
-
-func (r *ProfileRepository) RenameContext(ctx context.Context, id int64, name string) (bool, error) {
+func (r *ProfileRepository) Rename(ctx context.Context, id int64, name string) (bool, error) {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE profiles
 		SET name = ?, updated_at = CURRENT_TIMESTAMP

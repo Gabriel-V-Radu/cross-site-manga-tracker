@@ -56,9 +56,9 @@ type Progress struct {
 // left waiting for that connection while the process shuts down would hang
 // with nothing to report it.
 type suggestionStore interface {
-	ListScanTargetsContext(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
-	ReplacePendingSuggestionsContext(ctx context.Context, trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
-	MergeRelatedTitlesContext(ctx context.Context, trackerID int64, titles []string) error
+	ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
+	ReplacePendingSuggestions(ctx context.Context, trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
+	MergeRelatedTitles(ctx context.Context, trackerID int64, titles []string) error
 }
 
 // AidLookup is the metadata aggregator consulted per tracker before searching
@@ -194,7 +194,7 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 		close(done)
 	}()
 
-	targets, err := s.store.ListScanTargetsContext(ctx, profileID, sourceID, filter)
+	targets, err := s.store.ListScanTargets(ctx, profileID, sourceID, filter)
 	if err != nil {
 		s.setError(fmt.Sprintf("load scan targets: %v", err))
 		return
@@ -220,7 +220,7 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 			return
 		}
 
-		if err := s.store.ReplacePendingSuggestionsContext(ctx, target.TrackerID, sourceID, suggestions); err != nil {
+		if err := s.store.ReplacePendingSuggestions(ctx, target.TrackerID, sourceID, suggestions); err != nil {
 			s.logger.Warn("link scan store failed", "trackerId", target.TrackerID, "error", err)
 			s.setError(fmt.Sprintf("store suggestions: %v", err))
 		}
@@ -251,7 +251,7 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 		wanted = searchutil.UniqueNonEmpty(append(wanted, aid.Titles...))
 		// Names learned from a confirmed record outlive this scan: they make
 		// every future scan and dashboard search match better.
-		if err := s.store.MergeRelatedTitlesContext(ctx, target.TrackerID, aid.Titles); err != nil {
+		if err := s.store.MergeRelatedTitles(ctx, target.TrackerID, aid.Titles); err != nil {
 			s.logger.Warn("merge related titles failed", "trackerId", target.TrackerID, "error", err)
 		}
 

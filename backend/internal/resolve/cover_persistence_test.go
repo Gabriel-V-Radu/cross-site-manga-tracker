@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -91,7 +92,7 @@ func TestExpiredPersistedCoversAreNotServed(t *testing.T) {
 
 	store := repository.NewCoverCacheRepository(db)
 	expiredKey := coverCacheKey("comick", "https://comick.dev/comic/z", nil)
-	if err := store.Upsert(repository.CoverCacheRow{
+	if err := store.Upsert(context.Background(), repository.CoverCacheRow{
 		CacheKey:  expiredKey,
 		CoverURL:  "https://stale",
 		SourceKey: "comick",

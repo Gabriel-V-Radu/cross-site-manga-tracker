@@ -11,11 +11,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
-func (r *TrackerRepository) List(options TrackerListOptions) ([]models.Tracker, error) {
-	return r.ListContext(context.Background(), options)
-}
-
-func (r *TrackerRepository) ListContext(ctx context.Context, options TrackerListOptions) ([]models.Tracker, error) {
+func (r *TrackerRepository) List(ctx context.Context, options TrackerListOptions) ([]models.Tracker, error) {
 	validSortFields := map[string]string{
 		"title":           "title",
 		"created_at":      "created_at",
@@ -76,7 +72,7 @@ func (r *TrackerRepository) ListContext(ctx context.Context, options TrackerList
 		return trackers, nil
 	}
 
-	tagsByTracker, err := r.ListTagsByTrackerIDsContext(ctx, options.ProfileID, trackerIDs(trackers))
+	tagsByTracker, err := r.ListTagsByTrackerIDs(ctx, options.ProfileID, trackerIDs(trackers))
 	if err != nil {
 		return nil, fmt.Errorf("list tracker tags: %w", err)
 	}
@@ -88,7 +84,7 @@ func (r *TrackerRepository) ListContext(ctx context.Context, options TrackerList
 }
 
 // queryTrackers drains the cursor into a slice and closes it before returning.
-// The tag lookup that follows in ListContext is a second query on the same
+// The tag lookup that follows in List is a second query on the same
 // single-connection pool, so it must not start while this cursor still holds
 // the connection.
 func (r *TrackerRepository) queryTrackers(ctx context.Context, query string, args []any) ([]models.Tracker, error) {
@@ -114,11 +110,7 @@ func (r *TrackerRepository) queryTrackers(ctx context.Context, query string, arg
 	return trackers, nil
 }
 
-func (r *TrackerRepository) Count(options TrackerListOptions) (int, error) {
-	return r.CountContext(context.Background(), options)
-}
-
-func (r *TrackerRepository) CountContext(ctx context.Context, options TrackerListOptions) (int, error) {
+func (r *TrackerRepository) Count(ctx context.Context, options TrackerListOptions) (int, error) {
 	query := `SELECT COUNT(1) FROM trackers`
 	whereClauses, args := buildTrackerListFilters(options)
 	if len(whereClauses) > 0 {
@@ -251,11 +243,7 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	return whereClauses, args
 }
 
-func (r *TrackerRepository) ListForPolling() ([]PollingTracker, error) {
-	return r.ListForPollingContext(context.Background())
-}
-
-func (r *TrackerRepository) ListForPollingContext(ctx context.Context) ([]PollingTracker, error) {
+func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracker, error) {
 	items, err := r.listPollingTrackers(ctx)
 	if err != nil {
 		return nil, err
@@ -372,11 +360,7 @@ func (r *TrackerRepository) listPollingAlternateSources(ctx context.Context) (ma
 // id. The dashboard resolves covers and chapter links against a tracker's primary
 // source; when that source is unreadable it falls back to these, so a blocked site
 // does not leave the whole library without cover art or working chapter links.
-func (r *TrackerRepository) ListAlternateSourcesByTracker(profileID int64) (map[int64][]TrackerSourceRef, error) {
-	return r.ListAlternateSourcesByTrackerContext(context.Background(), profileID)
-}
-
-func (r *TrackerRepository) ListAlternateSourcesByTrackerContext(ctx context.Context, profileID int64) (map[int64][]TrackerSourceRef, error) {
+func (r *TrackerRepository) ListAlternateSourcesByTracker(ctx context.Context, profileID int64) (map[int64][]TrackerSourceRef, error) {
 	rows, err := r.db.QueryContext(ctx, alternateSourcesQuery+` AND t.profile_id = ?`+alternateSourcesOrder, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list alternate sources by tracker: %w", err)
@@ -414,11 +398,7 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 // changed. Without this stamp a tracker whose sources are all dark can never
 // become idle-skippable, and the poller retries it in full every cycle for as
 // long as the outage lasts.
-func (r *TrackerRepository) MarkPollCheckedAt(trackerID int64, checkedAt time.Time) error {
-	return r.MarkPollCheckedAtContext(context.Background(), trackerID, checkedAt)
-}
-
-func (r *TrackerRepository) MarkPollCheckedAtContext(ctx context.Context, trackerID int64, checkedAt time.Time) error {
+func (r *TrackerRepository) MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time) error {
 	if _, err := r.db.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
 		return fmt.Errorf("mark poll checked: %w", err)
 	}
@@ -437,11 +417,7 @@ func (r *TrackerRepository) MarkPollCheckedAtContext(ctx context.Context, tracke
 // one transaction: they describe a single poll outcome, and a crash between
 // the DELETE and the INSERT used to drop the primary-source mirror row
 // permanently.
-func (r *TrackerRepository) UpdatePollingState(update PollingUpdate) (bool, error) {
-	return r.UpdatePollingStateContext(context.Background(), update)
-}
-
-func (r *TrackerRepository) UpdatePollingStateContext(ctx context.Context, update PollingUpdate) (bool, error) {
+func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update PollingUpdate) (bool, error) {
 	var latestReleaseValue any
 	if update.LatestReleaseAt != nil {
 		latestReleaseValue = update.LatestReleaseAt.UTC()

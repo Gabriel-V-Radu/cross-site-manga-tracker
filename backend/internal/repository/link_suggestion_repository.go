@@ -139,11 +139,7 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 }
 
 // ListScanTargets returns the trackers a scan of sourceID should look up.
-func (r *LinkSuggestionRepository) ListScanTargets(profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
-	return r.ListScanTargetsContext(context.Background(), profileID, sourceID, filter)
-}
-
-func (r *LinkSuggestionRepository) ListScanTargetsContext(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
+func (r *LinkSuggestionRepository) ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
 	query, args := linkableTrackersQuery(profileID, sourceID, filter)
 	rows, err := r.db.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
@@ -185,11 +181,7 @@ func (r *LinkSuggestionRepository) ListScanTargetsContext(ctx context.Context, p
 // ReplacePendingSuggestions swaps a tracker's pending candidates for the given
 // set. Decided rows are untouched, and a candidate that was already rejected
 // stays rejected — the insert skips it rather than resurrecting it.
-func (r *LinkSuggestionRepository) ReplacePendingSuggestions(trackerID int64, sourceID int64, suggestions []LinkSuggestion) error {
-	return r.ReplacePendingSuggestionsContext(context.Background(), trackerID, sourceID, suggestions)
-}
-
-func (r *LinkSuggestionRepository) ReplacePendingSuggestionsContext(ctx context.Context, trackerID int64, sourceID int64, suggestions []LinkSuggestion) error {
+func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context, trackerID int64, sourceID int64, suggestions []LinkSuggestion) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin replace pending suggestions tx: %w", err)
@@ -230,11 +222,7 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestionsContext(ctx context.
 // ListReviewQueue returns every tracker of the profile that still lacks the
 // source, with its pending candidates. Trackers whose Suggestions are empty
 // form the "no candidate found" section of the queue.
-func (r *LinkSuggestionRepository) ListReviewQueue(profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkReviewTracker, error) {
-	return r.ListReviewQueueContext(context.Background(), profileID, sourceID, filter)
-}
-
-func (r *LinkSuggestionRepository) ListReviewQueueContext(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkReviewTracker, error) {
+func (r *LinkSuggestionRepository) ListReviewQueue(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkReviewTracker, error) {
 	queue, byTracker, err := r.listReviewQueueTrackers(ctx, profileID, sourceID, filter)
 	if err != nil {
 		return nil, err
@@ -367,11 +355,7 @@ const pendingSuggestionByIDSQL = `
 
 // GetPendingSuggestion loads one pending suggestion, verifying through the
 // tracker that it belongs to the profile.
-func (r *LinkSuggestionRepository) GetPendingSuggestion(profileID int64, suggestionID int64) (*LinkSuggestion, error) {
-	return r.GetPendingSuggestionContext(context.Background(), profileID, suggestionID)
-}
-
-func (r *LinkSuggestionRepository) GetPendingSuggestionContext(ctx context.Context, profileID int64, suggestionID int64) (*LinkSuggestion, error) {
+func (r *LinkSuggestionRepository) GetPendingSuggestion(ctx context.Context, profileID int64, suggestionID int64) (*LinkSuggestion, error) {
 	suggestion, err := scanLinkSuggestion(r.db.QueryRowContext(ctx, pendingSuggestionByIDSQL, suggestionID, profileID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -383,11 +367,7 @@ func (r *LinkSuggestionRepository) GetPendingSuggestionContext(ctx context.Conte
 }
 
 // DecideSuggestion moves one pending suggestion to accepted or rejected.
-func (r *LinkSuggestionRepository) DecideSuggestion(profileID int64, suggestionID int64, status string) error {
-	return r.DecideSuggestionContext(context.Background(), profileID, suggestionID, status)
-}
-
-func (r *LinkSuggestionRepository) DecideSuggestionContext(ctx context.Context, profileID int64, suggestionID int64, status string) error {
+func (r *LinkSuggestionRepository) DecideSuggestion(ctx context.Context, profileID int64, suggestionID int64, status string) error {
 	if status != LinkSuggestionAccepted && status != LinkSuggestionRejected {
 		return fmt.Errorf("invalid suggestion decision %q", status)
 	}
@@ -399,19 +379,6 @@ func (r *LinkSuggestionRepository) DecideSuggestionContext(ctx context.Context, 
 	`, status, suggestionID, profileID)
 	if err != nil {
 		return fmt.Errorf("decide suggestion: %w", err)
-	}
-	return nil
-}
-
-// RejectPendingSiblings rejects a tracker's other pending candidates once one
-// of them was accepted: a tracker links a source once.
-func (r *LinkSuggestionRepository) RejectPendingSiblings(trackerID int64, sourceID int64, exceptID int64) error {
-	return r.RejectPendingSiblingsContext(context.Background(), trackerID, sourceID, exceptID)
-}
-
-func (r *LinkSuggestionRepository) RejectPendingSiblingsContext(ctx context.Context, trackerID int64, sourceID int64, exceptID int64) error {
-	if _, err := r.db.ExecContext(ctx, rejectPendingSuggestionsSQL, trackerID, sourceID, exceptID); err != nil {
-		return fmt.Errorf("reject pending siblings: %w", err)
 	}
 	return nil
 }
@@ -431,11 +398,7 @@ func (r *LinkSuggestionRepository) RejectPendingSiblingsContext(ctx context.Cont
 // every statement below has to go through tx. A repository call that reaches
 // for r.db while this tx is open waits forever for the connection only this tx
 // can release.
-func (r *LinkSuggestionRepository) AcceptSuggestion(profileID int64, suggestionID int64) (*LinkSuggestion, error) {
-	return r.AcceptSuggestionContext(context.Background(), profileID, suggestionID)
-}
-
-func (r *LinkSuggestionRepository) AcceptSuggestionContext(ctx context.Context, profileID int64, suggestionID int64) (*LinkSuggestion, error) {
+func (r *LinkSuggestionRepository) AcceptSuggestion(ctx context.Context, profileID int64, suggestionID int64) (*LinkSuggestion, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin accept suggestion tx: %w", err)
@@ -486,11 +449,7 @@ func (r *LinkSuggestionRepository) AcceptSuggestionContext(ctx context.Context, 
 // without its review settled leaves the tracker in the queue offering
 // candidates for a series that is already linked. Every statement goes through
 // tx — see the connection note there.
-func (r *LinkSuggestionRepository) ApplyManualLink(profileID int64, trackerID int64, link models.TrackerSource, reviewSourceID int64) error {
-	return r.ApplyManualLinkContext(context.Background(), profileID, trackerID, link, reviewSourceID)
-}
-
-func (r *LinkSuggestionRepository) ApplyManualLinkContext(ctx context.Context, profileID int64, trackerID int64, link models.TrackerSource, reviewSourceID int64) error {
+func (r *LinkSuggestionRepository) ApplyManualLink(ctx context.Context, profileID int64, trackerID int64, link models.TrackerSource, reviewSourceID int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin manual link tx: %w", err)
@@ -586,11 +545,7 @@ func upsertTrackerSourceTx(ctx context.Context, tx *sql.Tx, trackerID int64, sou
 // The link scan calls it when a metadata aggregator confirms a series' other
 // names: those names make every future scan and dashboard search match better,
 // so they are worth keeping once learned.
-func (r *LinkSuggestionRepository) MergeRelatedTitles(trackerID int64, titles []string) error {
-	return r.MergeRelatedTitlesContext(context.Background(), trackerID, titles)
-}
-
-func (r *LinkSuggestionRepository) MergeRelatedTitlesContext(ctx context.Context, trackerID int64, titles []string) error {
+func (r *LinkSuggestionRepository) MergeRelatedTitles(ctx context.Context, trackerID int64, titles []string) error {
 	incoming := searchutil.FilterEnglishAlphabetNames(titles)
 	if len(incoming) == 0 {
 		return nil
@@ -639,11 +594,7 @@ func (r *LinkSuggestionRepository) MergeRelatedTitlesContext(ctx context.Context
 
 // DismissTracker records that the tracker has no match on the source: pending
 // candidates are rejected and a marker row keeps it out of future scans.
-func (r *LinkSuggestionRepository) DismissTracker(profileID int64, trackerID int64, sourceID int64) error {
-	return r.DismissTrackerContext(context.Background(), profileID, trackerID, sourceID)
-}
-
-func (r *LinkSuggestionRepository) DismissTrackerContext(ctx context.Context, profileID int64, trackerID int64, sourceID int64) error {
+func (r *LinkSuggestionRepository) DismissTracker(ctx context.Context, profileID int64, trackerID int64, sourceID int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin dismiss tracker tx: %w", err)

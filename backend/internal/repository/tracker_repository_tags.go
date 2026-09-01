@@ -9,11 +9,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
 
-func (r *TrackerRepository) ListProfileTags(profileID int64) ([]models.CustomTag, error) {
-	return r.ListProfileTagsContext(context.Background(), profileID)
-}
-
-func (r *TrackerRepository) ListProfileTagsContext(ctx context.Context, profileID int64) ([]models.CustomTag, error) {
+func (r *TrackerRepository) ListProfileTags(ctx context.Context, profileID int64) ([]models.CustomTag, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
@@ -54,63 +50,7 @@ func (r *TrackerRepository) ListProfileTagsContext(ctx context.Context, profileI
 	return items, nil
 }
 
-func (r *TrackerRepository) UpsertProfileTag(profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
-	return r.UpsertProfileTagContext(context.Background(), profileID, name, iconKey)
-}
-
-func (r *TrackerRepository) UpsertProfileTagContext(ctx context.Context, profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
-	trimmedName := strings.TrimSpace(name)
-	if trimmedName == "" {
-		return nil, fmt.Errorf("tag name is required")
-	}
-
-	var normalizedIconKey any
-	if iconKey != nil {
-		trimmedIcon := strings.TrimSpace(*iconKey)
-		if trimmedIcon != "" {
-			normalizedIconKey = trimmedIcon
-		}
-	}
-
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO custom_tags (profile_id, name, icon_key)
-		VALUES (?, ?, ?)
-		ON CONFLICT(profile_id, name)
-		DO UPDATE SET
-			icon_key = excluded.icon_key,
-			updated_at = CURRENT_TIMESTAMP
-	`, profileID, trimmedName, normalizedIconKey)
-	if err != nil {
-		return nil, fmt.Errorf("upsert profile tag: %w", err)
-	}
-
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id, profile_id, name, icon_key, created_at, updated_at
-		FROM custom_tags
-		WHERE profile_id = ? AND name = ?
-	`, profileID, trimmedName)
-
-	var tag models.CustomTag
-	var storedIcon sql.NullString
-	if err := row.Scan(&tag.ID, &tag.ProfileID, &tag.Name, &storedIcon, &tag.CreatedAt, &tag.UpdatedAt); err != nil {
-		return nil, fmt.Errorf("get upserted profile tag: %w", err)
-	}
-
-	if storedIcon.Valid {
-		iconValue := strings.TrimSpace(storedIcon.String)
-		if iconValue != "" {
-			tag.IconKey = &iconValue
-		}
-	}
-
-	return &tag, nil
-}
-
-func (r *TrackerRepository) CreateProfileTag(profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
-	return r.CreateProfileTagContext(context.Background(), profileID, name, iconKey)
-}
-
-func (r *TrackerRepository) CreateProfileTagContext(ctx context.Context, profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
+func (r *TrackerRepository) CreateProfileTag(ctx context.Context, profileID int64, name string, iconKey *string) (*models.CustomTag, error) {
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName == "" {
 		return nil, fmt.Errorf("tag name is required")
@@ -159,11 +99,7 @@ func (r *TrackerRepository) CreateProfileTagContext(ctx context.Context, profile
 	return &tag, nil
 }
 
-func (r *TrackerRepository) RenameProfileTag(profileID int64, tagID int64, name string) (bool, error) {
-	return r.RenameProfileTagContext(context.Background(), profileID, tagID, name)
-}
-
-func (r *TrackerRepository) RenameProfileTagContext(ctx context.Context, profileID int64, tagID int64, name string) (bool, error) {
+func (r *TrackerRepository) RenameProfileTag(ctx context.Context, profileID int64, tagID int64, name string) (bool, error) {
 	if tagID <= 0 {
 		return false, nil
 	}
@@ -190,11 +126,7 @@ func (r *TrackerRepository) RenameProfileTagContext(ctx context.Context, profile
 	return rowsAffected > 0, nil
 }
 
-func (r *TrackerRepository) DeleteProfileTag(profileID int64, tagID int64) (bool, error) {
-	return r.DeleteProfileTagContext(context.Background(), profileID, tagID)
-}
-
-func (r *TrackerRepository) DeleteProfileTagContext(ctx context.Context, profileID int64, tagID int64) (bool, error) {
+func (r *TrackerRepository) DeleteProfileTag(ctx context.Context, profileID int64, tagID int64) (bool, error) {
 	if tagID <= 0 {
 		return false, nil
 	}
@@ -212,11 +144,7 @@ func (r *TrackerRepository) DeleteProfileTagContext(ctx context.Context, profile
 	return rowsAffected > 0, nil
 }
 
-func (r *TrackerRepository) ReplaceTrackerTags(profileID int64, trackerID int64, tagIDs []int64) error {
-	return r.ReplaceTrackerTagsContext(context.Background(), profileID, trackerID, tagIDs)
-}
-
-func (r *TrackerRepository) ReplaceTrackerTagsContext(ctx context.Context, profileID int64, trackerID int64, tagIDs []int64) error {
+func (r *TrackerRepository) ReplaceTrackerTags(ctx context.Context, profileID int64, trackerID int64, tagIDs []int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin replace tracker tags tx: %w", err)
@@ -303,11 +231,7 @@ func profileTagIDsInTx(ctx context.Context, tx *sql.Tx, profileID int64, tagIDs 
 	return validTagIDs, nil
 }
 
-func (r *TrackerRepository) ListTagsByTrackerIDs(profileID int64, trackerIDs []int64) (map[int64][]models.CustomTag, error) {
-	return r.ListTagsByTrackerIDsContext(context.Background(), profileID, trackerIDs)
-}
-
-func (r *TrackerRepository) ListTagsByTrackerIDsContext(ctx context.Context, profileID int64, trackerIDs []int64) (map[int64][]models.CustomTag, error) {
+func (r *TrackerRepository) ListTagsByTrackerIDs(ctx context.Context, profileID int64, trackerIDs []int64) (map[int64][]models.CustomTag, error) {
 	result := make(map[int64][]models.CustomTag, len(trackerIDs))
 	if len(trackerIDs) == 0 {
 		return result, nil

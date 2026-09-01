@@ -8,11 +8,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
 
-func (r *TrackerRepository) SourceExists(sourceID int64) (bool, error) {
-	return r.SourceExistsContext(context.Background(), sourceID)
-}
-
-func (r *TrackerRepository) SourceExistsContext(ctx context.Context, sourceID int64) (bool, error) {
+func (r *TrackerRepository) SourceExists(ctx context.Context, sourceID int64) (bool, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM sources WHERE id = ?`, sourceID).Scan(&count)
 	if err != nil {
@@ -21,11 +17,7 @@ func (r *TrackerRepository) SourceExistsContext(ctx context.Context, sourceID in
 	return count > 0, nil
 }
 
-func (r *TrackerRepository) Create(tracker *models.Tracker) (*models.Tracker, error) {
-	return r.CreateContext(context.Background(), tracker)
-}
-
-func (r *TrackerRepository) CreateContext(ctx context.Context, tracker *models.Tracker) (*models.Tracker, error) {
+func (r *TrackerRepository) Create(ctx context.Context, tracker *models.Tracker) (*models.Tracker, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
 
 	// The tracker row and its primary source row are one write: committing the
@@ -66,14 +58,10 @@ func (r *TrackerRepository) CreateContext(ctx context.Context, tracker *models.T
 		return nil, fmt.Errorf("commit create tracker tx: %w", err)
 	}
 
-	return r.GetByIDContext(ctx, tracker.ProfileID, id)
+	return r.GetByID(ctx, tracker.ProfileID, id)
 }
 
-func (r *TrackerRepository) GetByID(profileID int64, id int64) (*models.Tracker, error) {
-	return r.GetByIDContext(context.Background(), profileID, id)
-}
-
-func (r *TrackerRepository) GetByIDContext(ctx context.Context, profileID int64, id int64) (*models.Tracker, error) {
+func (r *TrackerRepository) GetByID(ctx context.Context, profileID int64, id int64) (*models.Tracker, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT
 			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
@@ -92,7 +80,7 @@ func (r *TrackerRepository) GetByIDContext(ctx context.Context, profileID int64,
 		return nil, fmt.Errorf("get tracker by id: %w", err)
 	}
 
-	tagsByTracker, err := r.ListTagsByTrackerIDsContext(ctx, profileID, []int64{tracker.ID})
+	tagsByTracker, err := r.ListTagsByTrackerIDs(ctx, profileID, []int64{tracker.ID})
 	if err != nil {
 		return nil, fmt.Errorf("get tracker tags: %w", err)
 	}
@@ -101,11 +89,7 @@ func (r *TrackerRepository) GetByIDContext(ctx context.Context, profileID int64,
 	return tracker, nil
 }
 
-func (r *TrackerRepository) Update(profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
-	return r.UpdateContext(context.Background(), profileID, id, tracker)
-}
-
-func (r *TrackerRepository) UpdateContext(ctx context.Context, profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
+func (r *TrackerRepository) Update(ctx context.Context, profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
@@ -181,10 +165,10 @@ func (r *TrackerRepository) UpdateContext(ctx context.Context, profileID int64, 
 		return nil, fmt.Errorf("tracker update rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return r.GetByIDContext(ctx, profileID, id)
+		return r.GetByID(ctx, profileID, id)
 	}
 
-	if err := r.UpsertTrackerSourceContext(ctx, profileID, id, models.TrackerSource{
+	if err := r.UpsertTrackerSource(ctx, profileID, id, models.TrackerSource{
 		SourceID:     tracker.SourceID,
 		SourceItemID: tracker.SourceItemID,
 		SourceURL:    tracker.SourceURL,
@@ -192,18 +176,14 @@ func (r *TrackerRepository) UpdateContext(ctx context.Context, profileID int64, 
 		return nil, fmt.Errorf("upsert primary tracker source: %w", err)
 	}
 
-	return r.GetByIDContext(ctx, profileID, id)
+	return r.GetByID(ctx, profileID, id)
 }
 
 // SetReadingSource pins (or, with nil, unpins) the source a tracker's reading
 // links prefer. A non-nil id must belong to one of the tracker's linked
 // sources or its primary; anything else clears the preference rather than
 // storing a dangling pointer.
-func (r *TrackerRepository) SetReadingSource(profileID int64, id int64, readingSourceID *int64) error {
-	return r.SetReadingSourceContext(context.Background(), profileID, id, readingSourceID)
-}
-
-func (r *TrackerRepository) SetReadingSourceContext(ctx context.Context, profileID int64, id int64, readingSourceID *int64) error {
+func (r *TrackerRepository) SetReadingSource(ctx context.Context, profileID int64, id int64, readingSourceID *int64) error {
 	if readingSourceID != nil {
 		var linked int
 		err := r.db.QueryRowContext(ctx, `
@@ -232,11 +212,7 @@ func (r *TrackerRepository) SetReadingSourceContext(ctx context.Context, profile
 	return nil
 }
 
-func (r *TrackerRepository) UpdateLastReadChapter(profileID int64, id int64, lastReadChapter *float64) (bool, error) {
-	return r.UpdateLastReadChapterContext(context.Background(), profileID, id, lastReadChapter)
-}
-
-func (r *TrackerRepository) UpdateLastReadChapterContext(ctx context.Context, profileID int64, id int64, lastReadChapter *float64) (bool, error) {
+func (r *TrackerRepository) UpdateLastReadChapter(ctx context.Context, profileID int64, id int64, lastReadChapter *float64) (bool, error) {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET
@@ -259,11 +235,7 @@ func (r *TrackerRepository) UpdateLastReadChapterContext(ctx context.Context, pr
 	return rowsAffected > 0, nil
 }
 
-func (r *TrackerRepository) UpdateRating(profileID int64, id int64, rating *float64) (bool, error) {
-	return r.UpdateRatingContext(context.Background(), profileID, id, rating)
-}
-
-func (r *TrackerRepository) UpdateRatingContext(ctx context.Context, profileID int64, id int64, rating *float64) (bool, error) {
+func (r *TrackerRepository) UpdateRating(ctx context.Context, profileID int64, id int64, rating *float64) (bool, error) {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE trackers
 		SET
@@ -285,11 +257,7 @@ func (r *TrackerRepository) UpdateRatingContext(ctx context.Context, profileID i
 	return rowsAffected > 0, nil
 }
 
-func (r *TrackerRepository) Delete(profileID int64, id int64) (bool, error) {
-	return r.DeleteContext(context.Background(), profileID, id)
-}
-
-func (r *TrackerRepository) DeleteContext(ctx context.Context, profileID int64, id int64) (bool, error) {
+func (r *TrackerRepository) Delete(ctx context.Context, profileID int64, id int64) (bool, error) {
 	result, err := r.db.ExecContext(ctx, `DELETE FROM trackers WHERE id = ? AND profile_id = ?`, id, profileID)
 	if err != nil {
 		return false, fmt.Errorf("delete tracker: %w", err)

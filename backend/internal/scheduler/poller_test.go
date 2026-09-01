@@ -33,11 +33,11 @@ type fakeRepo struct {
 	updatedSnapshotSourceID int64
 }
 
-func (f *fakeRepo) ListForPollingContext(context.Context) ([]repository.PollingTracker, error) {
+func (f *fakeRepo) ListForPolling(context.Context) ([]repository.PollingTracker, error) {
 	return f.items, nil
 }
 
-func (f *fakeRepo) UpdatePollingStateContext(_ context.Context, update repository.PollingUpdate) (bool, error) {
+func (f *fakeRepo) UpdatePollingState(_ context.Context, update repository.PollingUpdate) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updatedCount++
@@ -54,7 +54,7 @@ func (f *fakeRepo) UpdatePollingStateContext(_ context.Context, update repositor
 	return true, nil
 }
 
-func (f *fakeRepo) MarkPollCheckedAtContext(_ context.Context, trackerID int64, _ time.Time) error {
+func (f *fakeRepo) MarkPollCheckedAt(_ context.Context, trackerID int64, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markedChecked = append(f.markedChecked, trackerID)

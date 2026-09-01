@@ -31,11 +31,11 @@ const pollResolveTimeout = 90 * time.Second
 // connection forever while the process tears down" into an error that gets
 // logged.
 type pollRepository interface {
-	ListForPollingContext(ctx context.Context) ([]repository.PollingTracker, error)
-	// UpdatePollingStateContext reports false when the tracker changed after
-	// the cycle snapshotted it and the write was therefore skipped.
-	UpdatePollingStateContext(ctx context.Context, update repository.PollingUpdate) (bool, error)
-	MarkPollCheckedAtContext(ctx context.Context, trackerID int64, checkedAt time.Time) error
+	ListForPolling(ctx context.Context) ([]repository.PollingTracker, error)
+	// UpdatePollingState reports false when the tracker changed after the
+	// cycle snapshotted it and the write was therefore skipped.
+	UpdatePollingState(ctx context.Context, update repository.PollingUpdate) (bool, error)
+	MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time) error
 }
 
 type Poller struct {
@@ -153,7 +153,7 @@ type cycleStats struct {
 // Fallback resolves do cross into other shards' hosts; the throttle paces
 // those too, which is why pollResolveTimeout budgets for a full queue.
 func (p *Poller) RunOnce(ctx context.Context) error {
-	trackers, err := p.repo.ListForPollingContext(ctx)
+	trackers, err := p.repo.ListForPolling(ctx)
 	if err != nil {
 		return fmt.Errorf("load trackers for polling: %w", err)
 	}
@@ -256,7 +256,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// tracker whose sources are all dark keeps last_checked_at frozen, so
 		// shouldSkipIdle can never defer it and the poller retries it in full
 		// every cycle for as long as the outage lasts.
-		if err := p.repo.MarkPollCheckedAtContext(ctx, tracker.ID, time.Now().UTC()); err != nil {
+		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, time.Now().UTC()); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
 		return
@@ -356,7 +356,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		currentSourceURL = ""
 	}
 
-	applied, err := p.repo.UpdatePollingStateContext(ctx, repository.PollingUpdate{
+	applied, err := p.repo.UpdatePollingState(ctx, repository.PollingUpdate{
 		TrackerID:             tracker.ID,
 		SnapshotSourceID:      tracker.SourceID,
 		SourceID:              sourceID,

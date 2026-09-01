@@ -273,7 +273,7 @@ func (h *DashboardHandler) lastLinkScanScopeValues() map[string]string {
 // scannableSources are the enabled sources that have a registered connector —
 // the ones a scan can actually query.
 func (h *DashboardHandler) scannableSources(ctx context.Context) ([]models.Source, error) {
-	all, err := h.sourceRepo.ListEnabledContext(ctx)
+	all, err := h.sourceRepo.ListEnabled(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func (h *DashboardHandler) linkSourceFromRequest(c *fiber.Ctx) (*models.Source, 
 	if err != nil || id <= 0 {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "source is required")
 	}
-	source, err := h.sourceRepo.GetByIDContext(c.Context(), id)
+	source, err := h.sourceRepo.GetByID(c.Context(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func (h *DashboardHandler) linkSourceFromRequest(c *fiber.Ctx) (*models.Source, 
 }
 
 func (h *DashboardHandler) buildLinkQueue(ctx context.Context, profileID int64, source *models.Source, scope linkScanScope) (linkQueueData, error) {
-	queue, err := h.linkSuggestionRepo.ListReviewQueueContext(ctx, profileID, source.ID, scope.Filter)
+	queue, err := h.linkSuggestionRepo.ListReviewQueue(ctx, profileID, source.ID, scope.Filter)
 	if err != nil {
 		return linkQueueData{}, err
 	}
@@ -507,7 +507,7 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	// The whole decision — link row, accepted status, sibling rejections —
 	// happens in one repository transaction: a half-applied decision leaves
 	// the queue offering a candidate for a tracker it has already linked.
-	accepted, err := h.linkSuggestionRepo.AcceptSuggestionContext(c.Context(), profile.ID, suggestionID)
+	accepted, err := h.linkSuggestionRepo.AcceptSuggestion(c.Context(), profile.ID, suggestionID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the suggestion", err)
 	}
@@ -530,7 +530,7 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "invalid suggestion id", err)
 	}
 
-	suggestion, err := h.linkSuggestionRepo.GetPendingSuggestionContext(c.Context(), profile.ID, suggestionID)
+	suggestion, err := h.linkSuggestionRepo.GetPendingSuggestion(c.Context(), profile.ID, suggestionID)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the suggestion", err)
 	}
@@ -538,7 +538,7 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusNotFound, "suggestion not found", nil)
 	}
 
-	if err := h.linkSuggestionRepo.DecideSuggestionContext(c.Context(), profile.ID, suggestionID, repository.LinkSuggestionRejected); err != nil {
+	if err := h.linkSuggestionRepo.DecideSuggestion(c.Context(), profile.ID, suggestionID, repository.LinkSuggestionRejected); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to reject the suggestion", err)
 	}
 
@@ -560,7 +560,7 @@ func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "invalid tracker id", err)
 	}
 
-	if err := h.linkSuggestionRepo.DismissTrackerContext(c.Context(), profile.ID, trackerID, source.ID); err != nil {
+	if err := h.linkSuggestionRepo.DismissTracker(c.Context(), profile.ID, trackerID, source.ID); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to dismiss the tracker", err)
 	}
 
@@ -602,7 +602,7 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	// the queue, and drops whatever candidates were pending — in the same
 	// transaction as the link, so the queue can never end up holding a
 	// settled tracker's live candidates.
-	if err := h.linkSuggestionRepo.ApplyManualLinkContext(c.Context(), profile.ID, trackerID, link, source.ID); err != nil {
+	if err := h.linkSuggestionRepo.ApplyManualLink(c.Context(), profile.ID, trackerID, link, source.ID); err != nil {
 		// Reported inside the re-rendered row rather than as a status, so the
 		// user can retry the paste; the repository's own wording names tables
 		// and belongs in the log instead of the card.
@@ -634,7 +634,7 @@ func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL stri
 	if !ok {
 		return nil, models.TrackerSource{}, fmt.Errorf("that site has no connector; the poller could not read it")
 	}
-	linkedSource, err := h.sourceRepo.GetByKeyContext(parent, connector.Key())
+	linkedSource, err := h.sourceRepo.GetByKey(parent, connector.Key())
 	if err != nil {
 		// Both callers show this text to the user — in the review card and in
 		// the edit form's error — so the lookup's own wording stays in the log.
@@ -678,7 +678,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 	}
 
 	scope := h.parseLinkScanScope(c)
-	queue, err := h.linkSuggestionRepo.ListReviewQueueContext(c.Context(), profile.ID, source.ID, scope.Filter)
+	queue, err := h.linkSuggestionRepo.ListReviewQueue(c.Context(), profile.ID, source.ID, scope.Filter)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
@@ -693,7 +693,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 				// A nil result means the candidate stopped being pending
 				// between listing the queue and deciding it; nothing to undo,
 				// each accept is its own transaction.
-				accepted, err := h.linkSuggestionRepo.AcceptSuggestionContext(c.Context(), profile.ID, suggestion.ID)
+				accepted, err := h.linkSuggestionRepo.AcceptSuggestion(c.Context(), profile.ID, suggestion.ID)
 				if err != nil {
 					return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the exact matches", err)
 				}
@@ -717,7 +717,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 // mutation — or renders its removal when the tracker left the queue — plus an
 // out-of-band summary refresh so the counters stay honest.
 func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64, sourceID int64, trackerID int64, errorMessage string) error {
-	source, err := h.sourceRepo.GetByIDContext(c.Context(), sourceID)
+	source, err := h.sourceRepo.GetByID(c.Context(), sourceID)
 	if err != nil || source == nil {
 		return h.fail(c, fiber.StatusInternalServerError, "source lookup failed", err)
 	}

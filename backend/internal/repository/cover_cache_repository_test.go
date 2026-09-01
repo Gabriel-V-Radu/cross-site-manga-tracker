@@ -1,6 +1,7 @@
 package repository_test
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -48,12 +49,12 @@ func TestCoverCacheRoundTripAndExpirySweep(t *testing.T) {
 		ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
 	}
 	for _, entry := range []repository.CoverCacheRow{fresh, expired, negative} {
-		if err := repo.Upsert(entry); err != nil {
+		if err := repo.Upsert(context.Background(), entry); err != nil {
 			t.Fatalf("upsert %q: %v", entry.CacheKey, err)
 		}
 	}
 
-	entries, err := repo.LoadFresh()
+	entries, err := repo.LoadFresh(context.Background())
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
@@ -95,12 +96,12 @@ func TestCoverCacheLocalEntriesSurviveTheSweep(t *testing.T) {
 		ExpiresAt: time.Now().UTC().Add(-time.Hour),
 	}
 	for _, entry := range []repository.CoverCacheRow{local, expiredRemote} {
-		if err := repo.Upsert(entry); err != nil {
+		if err := repo.Upsert(context.Background(), entry); err != nil {
 			t.Fatalf("upsert %q: %v", entry.CacheKey, err)
 		}
 	}
 
-	entries, err := repo.LoadFresh()
+	entries, err := repo.LoadFresh(context.Background())
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
@@ -116,20 +117,20 @@ func TestCoverCacheUpsertReplacesAndDeleteNegatives(t *testing.T) {
 	repo := repository.NewCoverCacheRepository(openCoverCacheTestDB(t))
 
 	key := "comick|url:https://comick.dev/comic/x"
-	if err := repo.Upsert(repository.CoverCacheRow{CacheKey: key, Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+	if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: key, Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	if err := repo.Upsert(repository.CoverCacheRow{CacheKey: key, CoverURL: "https://cover", SourceKey: "comick", Found: true, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+	if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: key, CoverURL: "https://cover", SourceKey: "comick", Found: true, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
-	if err := repo.Upsert(repository.CoverCacheRow{CacheKey: "neg", Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+	if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: "neg", Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatalf("negative upsert: %v", err)
 	}
 
-	if err := repo.DeleteNegatives(); err != nil {
+	if err := repo.DeleteNegatives(context.Background()); err != nil {
 		t.Fatalf("delete negatives: %v", err)
 	}
-	entries, err := repo.LoadFresh()
+	entries, err := repo.LoadFresh(context.Background())
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
@@ -137,10 +138,10 @@ func TestCoverCacheUpsertReplacesAndDeleteNegatives(t *testing.T) {
 		t.Fatalf("expected only the upgraded positive entry, got %+v", entries)
 	}
 
-	if err := repo.Delete(key); err != nil {
+	if err := repo.Delete(context.Background(), key); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	entries, err = repo.LoadFresh()
+	entries, err = repo.LoadFresh(context.Background())
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
