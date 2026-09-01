@@ -107,18 +107,3 @@ type TrackerSource struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
-type Chapter struct {
-	ID            int64      `json:"id"`
-	TrackerID     int64      `json:"trackerId"`
-	ChapterNumber *float64   `json:"chapterNumber,omitempty"`
-	ChapterLabel  *string    `json:"chapterLabel,omitempty"`
-	ChapterURL    *string    `json:"chapterUrl,omitempty"`
-	ReleasedAt    *time.Time `json:"releasedAt,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-}
-
-type Setting struct {
-	Key       string    `json:"key"`
-	Value     string    `json:"value"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}

@@ -9,9 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/config"
+	"github.com/gabriel/cross-site-tracker/backend/internal/app"
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
-	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 type sourceUsage struct {
@@ -74,33 +73,19 @@ func main() {
 	flag.BoolVar(&apply, "apply", false, "Apply cleanup changes. Without this flag, the command is a dry-run preview.")
 	flag.Parse()
 
-	cfg, err := config.Load()
+	// Migrations only when the run is going to write. Without -apply this
+	// command is documented as a preview, and a preview that advances the
+	// schema of the database it is pointed at is not one — previewing from a
+	// newer checkout than the running image would migrate the live database out
+	// from under it.
+	level := slog.LevelInfo
+	runtime, err := app.Open(app.Options{Migrate: apply, LogLevel: &level})
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
-
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-
-	db, err := database.Open(cfg.SQLitePath)
-	if err != nil {
-		slog.Error("failed to open sqlite", "path", cfg.SQLitePath, "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	// Only when the run is going to write. Without -apply this command is
-	// documented as a preview, and a preview that advances the schema of the
-	// database it is pointed at is not one — previewing from a newer checkout
-	// than the running image would migrate the live database out from under it.
-	if apply {
-		if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
-			slog.Error("failed to apply migrations", "error", err)
-			os.Exit(1)
-		}
-	}
+	defer runtime.Close()
+	db := runtime.DB
 
 	activeSourceKeys := buildActiveSourceKeySet()
 	slog.Info("loaded active source keys from registry", "count", len(activeSourceKeys), "keys", sortedMapKeys(activeSourceKeys))

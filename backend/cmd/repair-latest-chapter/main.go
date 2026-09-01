@@ -22,8 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/config"
-	"github.com/gabriel/cross-site-tracker/backend/internal/database"
+	"github.com/gabriel/cross-site-tracker/backend/internal/app"
 )
 
 func main() {
@@ -43,33 +42,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := config.Load()
+	// Migrations only when the run is going to write: a dry run from a newer
+	// checkout than the running image must not migrate the live database out
+	// from under it (the same rule cleanup-stale-sources follows).
+	level := slog.LevelInfo
+	runtime, err := app.Open(app.Options{Migrate: !*dryRun, LogLevel: &level})
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
+	defer runtime.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-
-	db, err := database.Open(cfg.SQLitePath)
-	if err != nil {
-		slog.Error("failed to open sqlite", "path", cfg.SQLitePath, "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	// Only when the run is going to write: a dry run from a newer checkout than
-	// the running image must not migrate the live database out from under it
-	// (the same rule cleanup-stale-sources follows).
-	if !*dryRun {
-		if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
-			slog.Error("failed to apply migrations", "error", err)
-			os.Exit(1)
-		}
-	}
-
-	repaired, err := runRepairs(db, assignments, *dryRun)
+	repaired, err := runRepairs(runtime.DB, assignments, *dryRun)
 	if err != nil {
 		slog.Error("repair aborted", "error", err)
 		os.Exit(1)

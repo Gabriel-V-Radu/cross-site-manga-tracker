@@ -5,6 +5,11 @@ import (
 	"fmt"
 )
 
+// SeedDefaults inserts the source rows the compiled connectors need and the two
+// profiles. It is the one list of sources that has to match the connector
+// registry: the per-source migrations under migrations/ are history (they
+// inserted a source when its connector arrived) and are not consulted for the
+// current set. Idempotent, so it runs on every start.
 func SeedDefaults(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -49,16 +54,6 @@ func SeedDefaults(db *sql.DB) error {
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("seed profiles: %w", err)
-	}
-
-	_, err = tx.Exec(`
-		INSERT OR IGNORE INTO settings (key, value)
-		VALUES
-			('polling_minutes', '30');
-	`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("seed settings: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

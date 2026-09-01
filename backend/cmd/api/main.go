@@ -8,9 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gabriel/cross-site-tracker/backend/internal/config"
+	"github.com/gabriel/cross-site-tracker/backend/internal/app"
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
-	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gabriel/cross-site-tracker/backend/internal/scheduler"
@@ -25,34 +24,15 @@ func main() {
 }
 
 func run() int {
-	cfg, err := config.Load()
+	// The server is the one binary that always migrates: it owns the database
+	// and a schema behind the code it runs is not a state it can serve from.
+	runtime, err := app.Open(app.Options{Migrate: true, JSONLogs: true})
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		slog.Error("startup failed", "error", err)
 		return 1
 	}
-
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-
-	db, err := database.Open(cfg.SQLitePath)
-	if err != nil {
-		slog.Error("failed to open sqlite", "path", cfg.SQLitePath, "error", err)
-		return 1
-	}
-	defer db.Close()
-
-	if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
-		slog.Error("failed to apply migrations", "error", err)
-		return 1
-	}
-
-	if cfg.SeedDefaultData {
-		if err := database.SeedDefaults(db); err != nil {
-			slog.Error("failed to seed defaults", "error", err)
-			return 1
-		}
-	}
+	defer runtime.Close()
+	cfg, db := runtime.Config, runtime.DB
 
 	connectorRegistry := connectordefaults.NewRegistry()
 
