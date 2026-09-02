@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": ["-NoProfile", "-Command", "Set-Location backend; $env:POLLING_ENABLED='false'; $env:LOG_LEVEL='DEBUG'; go run ./cmd/api"],
+      "port": 8080
+    }
+  ]
+}

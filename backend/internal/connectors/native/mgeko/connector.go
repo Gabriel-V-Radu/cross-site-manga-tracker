@@ -19,10 +19,6 @@ import (
 
 const canonicalBaseURL = "https://www.mgeko.cc"
 
-// nonBreakingSpace (U+00A0) is what the site pads its timestamps with; it is
-// folded to a plain space before any date text is parsed.
-var nonBreakingSpace = string(rune(0x00A0))
-
 // site is the connector's identity. Mgeko is a readable aggregator in the
 // default tier.
 var site = connectors.Site{
