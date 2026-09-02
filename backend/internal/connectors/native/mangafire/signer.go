@@ -174,7 +174,18 @@ func (s *signer) init() {
 // query params that will be sent alongside the token (excluding vrf itself).
 // getProtectionToken canonicalizes params internally (sorted, values
 // stringified), so the token stays stable regardless of param order.
+//
+// It takes one value per key: the signer object is a plain map, so a repeated
+// key could only be signed under its first value while the request would send
+// all of them — a token the server would reject. Such params are refused here
+// rather than signed wrong.
 func (s *signer) Sign(path string, params url.Values) (string, error) {
+	for key, values := range params {
+		if len(values) > 1 {
+			return "", fmt.Errorf("mangafire signer: query parameter %q has %d values, the signer signs one per key", key, len(values))
+		}
+	}
+
 	s.once.Do(s.init)
 	if s.initErr != nil {
 		return "", s.initErr

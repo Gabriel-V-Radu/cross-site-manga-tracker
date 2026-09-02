@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,9 +35,22 @@ import (
 
 const (
 	canonicalSiteURL = "https://comick.dev"
-	canonicalAPIURL  = "https://api.comick.dev"
+	canonicalAPIHost = "api.comick.dev"
+	canonicalAPIURL  = "https://" + canonicalAPIHost
 	coverCDNURL      = "https://meo.comick.pictures"
 )
+
+// site is the connector's identity. The API host is a subdomain of the primary
+// domain, so listing the site domains covers it (connectors.HostAllowed matches
+// subdomains). ComicK is the info floor — it always has the chapter page, which
+// makes it the reliable fallback, but its reader is the worst of the chain.
+var site = connectors.Site{
+	SiteKey:   "comick",
+	SiteName:  "ComicK",
+	SiteHosts: []string{"comick.dev", "comick.io", "comick.fun"},
+	Home:      canonicalSiteURL,
+	Rank:      connectors.ReaderRankInfoFloor,
+}
 
 // Cloudflare 403 streaks recur site-wide (see the package comment): when one
 // starts, every request is doomed until it lifts, so the connector keeps an
@@ -74,16 +86,15 @@ type comicRecord struct {
 	fetchedAt     time.Time
 }
 
+// Connector reads ComicK through its JSON API. The embedded Site supplies Key,
+// Name, Kind, the SiteInfo methods and the URL helpers; its Home is the reader
+// origin returned/stored URLs are built on, which is distinct from apiURL, the
+// host requests go to (the live API, or a test server).
 type Connector struct {
-	// siteURL is the origin returned/stored URLs are built on. Unlike the
-	// scraping connectors it is configurable rather than hardcoded because the
-	// API host (apiURL) and the reader host are distinct; production uses the
-	// canonical constants for both.
-	siteURL     string
-	apiURL      string
-	allowedHost []string
-	httpClient  *http.Client
-	breaker     *connectors.EscalatingBreaker
+	connectors.Site
+	apiURL     string
+	httpClient *http.Client
+	breaker    *connectors.EscalatingBreaker
 
 	mu     sync.Mutex
 	comics map[string]comicRecord
@@ -91,29 +102,36 @@ type Connector struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		siteURL:     canonicalSiteURL,
-		apiURL:      canonicalAPIURL,
-		allowedHost: []string{"comick.dev", "comick.io", "comick.fun"},
-		httpClient:  connectors.NewThrottledClient(),
-		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
-		comics:      map[string]comicRecord{},
+		Site:       site,
+		apiURL:     canonicalAPIURL,
+		httpClient: connectors.NewThrottledClient(),
+		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		comics:     map[string]comicRecord{},
 	}
 }
 
+// NewConnectorWithOptions points the connector at another API host (a test
+// server), optionally building stored URLs on another site origin and claiming
+// other hosts. A nil client gets the shared throttled one, so no caller can
+// construct an unpaced connector by accident; tests that want to stay unpaced
+// pass their own.
 func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = []string{"comick.dev", "comick.io", "comick.fun"}
+	identity := site
+	if home := strings.TrimRight(strings.TrimSpace(siteURL), "/"); home != "" {
+		identity.Home = home
+	}
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		siteURL:     strings.TrimRight(strings.TrimSpace(siteURL), "/"),
-		apiURL:      strings.TrimRight(strings.TrimSpace(apiURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
-		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
-		comics:      map[string]comicRecord{},
+		Site:       identity,
+		apiURL:     strings.TrimRight(strings.TrimSpace(apiURL), "/"),
+		httpClient: client,
+		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		comics:     map[string]comicRecord{},
 	}
 }
 
@@ -121,18 +139,6 @@ func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string
 // skips ComicK outright while a Cloudflare 403 streak has the breaker open.
 func (c *Connector) CooldownRemaining() (time.Duration, string) {
 	return c.breaker.Remaining()
-}
-
-func (c *Connector) Key() string {
-	return "comick"
-}
-
-func (c *Connector) Name() string {
-	return "ComicK"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 type apiTitle struct {
@@ -219,13 +225,16 @@ func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecor
 		return record, nil
 	}
 
+	endpoint := c.apiURL + "/comic/" + url.PathEscape(slug) + "?tachiyomi=true"
 	var comicResponse apiComicResponse
-	if err := c.fetchJSON(ctx, c.apiURL+"/comic/"+url.PathEscape(slug)+"?tachiyomi=true", &comicResponse); err != nil {
+	if err := c.fetchJSON(ctx, endpoint, &comicResponse); err != nil {
 		return comicRecord{}, fmt.Errorf("fetch comick comic: %w", err)
 	}
 	comic := comicResponse.Comic
 	if strings.TrimSpace(comic.HID) == "" {
-		return comicRecord{}, fmt.Errorf("comick comic %q not found", slug)
+		// A record without a hid is the API's way of saying the slug names no
+		// comic; typed as a 404 so callers classify it with IsNotFound.
+		return comicRecord{}, fmt.Errorf("comick comic %q not found: %w", slug, &connectors.HTTPStatusError{StatusCode: http.StatusNotFound, URL: endpoint})
 	}
 
 	record = recordFromComic(comic)
@@ -246,15 +255,14 @@ func (c *Connector) forgetComic(slug string) {
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
-	limit = connectors.ClampSearchLimit(limit)
 
 	params := url.Values{}
-	params.Set("q", query)
-	params.Set("limit", strconv.Itoa(limit))
+	params.Set("q", query.Raw)
+	params.Set("limit", strconv.Itoa(query.Limit))
 
 	var results []apiComic
 	if err := c.fetchJSON(ctx, c.apiURL+"/v1.0/search?"+params.Encode(), &results); err != nil {
@@ -271,10 +279,13 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		// cache: a resolve right after a search costs one request.
 		record := recordFromComic(comic)
 		c.storeComic(slug, record)
+		if !query.Matches(append([]string{record.title, slug}, record.relatedTitles...)...) {
+			continue
+		}
 		// The search payload's chapter count spans every language, so latest
 		// chapter is left unset; ResolveByURL fills in the English number.
 		mapped = append(mapped, c.resultFromRecord(slug, record))
-		if len(mapped) >= limit {
+		if len(mapped) >= query.Limit {
 			break
 		}
 	}
@@ -311,7 +322,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		if strings.TrimSpace(entry.HID) == "" {
 			continue
 		}
-		return c.siteURL + "/comic/" + url.PathEscape(slug) + "/" + entry.HID + "-chapter-" + formatted + "-en", nil
+		return c.HomeURL() + "/comic/" + url.PathEscape(slug) + "/" + entry.HID + "-chapter-" + formatted + "-en", nil
 	}
 
 	return "", fmt.Errorf("chapter %s: %w", formatted, connectors.ErrChapterNotFound)
@@ -329,22 +340,15 @@ func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*floa
 		return nil, nil, err
 	}
 
-	var (
-		best   *float64
-		bestAt *time.Time
-	)
+	var latest connectors.LatestReading
 	for _, entry := range response.Chapters {
 		number, err := strconv.ParseFloat(strings.TrimSpace(entry.Chap), 64)
 		if err != nil || !connectors.ValidChapter(number) {
 			continue
 		}
-		if best != nil && number <= *best {
-			continue
-		}
-		value := number
-		best = &value
-		bestAt = parseChapterTime(entry.PublishAt, entry.CreatedAt)
+		latest.Add(number, parseChapterTime(entry.PublishAt, entry.CreatedAt))
 	}
+	best, bestAt := latest.Result()
 	return best, bestAt, nil
 }
 
@@ -364,19 +368,11 @@ func recordFromComic(comic apiComic) comicRecord {
 	for _, entry := range comic.MDTitles {
 		related = append(related, entry.Title)
 	}
-	titleKey := searchutil.Normalize(title)
-	filtered := make([]string, 0, len(related))
-	for _, candidate := range searchutil.UniqueNonEmpty(related) {
-		if searchutil.Normalize(candidate) == titleKey {
-			continue
-		}
-		filtered = append(filtered, candidate)
-	}
 
 	record := comicRecord{
 		hid:           strings.TrimSpace(comic.HID),
 		title:         title,
-		relatedTitles: filtered,
+		relatedTitles: searchutil.RelatedTitles(title, related),
 		fetchedAt:     time.Now(),
 	}
 	for _, cover := range comic.MDCovers {
@@ -394,7 +390,7 @@ func (c *Connector) resultFromRecord(slug string, record comicRecord) connectors
 		SourceItemID:  record.hid,
 		Title:         record.title,
 		RelatedTitles: record.relatedTitles,
-		URL:           c.siteURL + "/comic/" + url.PathEscape(slug),
+		URL:           c.HomeURL() + "/comic/" + url.PathEscape(slug),
 		CoverImageURL: record.coverURL,
 	}
 }
@@ -402,20 +398,12 @@ func (c *Connector) resultFromRecord(slug string, record comicRecord) connectors
 // parseSeriesURL extracts the series slug from a comic or chapter URL
 // (/comic/{slug} and /comic/{slug}/{chapterHid}-chapter-N-en).
 func (c *Connector) parseSeriesURL(rawURL string) (string, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	parsed, err := c.ParseOwnedURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to comick")
+		return "", err
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	segments := connectors.PathSegments(parsed)
 	if len(segments) < 2 || segments[0] != "comic" {
 		return "", fmt.Errorf("comick url must look like /comic/{slug}")
 	}
@@ -429,7 +417,9 @@ func (c *Connector) parseSeriesURL(rawURL string) (string, error) {
 
 func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {
 	if remaining, reason := c.breaker.Remaining(); remaining > 0 {
-		return fmt.Errorf("comick %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint})
+		// The same error the shared throttle returns for an open circuit, so
+		// callers classify both breakers identically.
+		return fmt.Errorf("comick %s: %w", reason, &connectors.SourceCoolingDownError{Host: canonicalAPIHost, RetryAfter: remaining})
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -450,26 +440,4 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 	}
 	c.breaker.NoteSuccess()
 	return nil
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo. The API host is a subdomain of the
-// primary domain, so listing the site domains covers it.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.siteURL
-}
-
-// ReaderRank implements connectors.SiteInfo: ComicK is the info floor — it
-// always has the chapter page, which makes it the reliable fallback, but its
-// reader is the worst of the chain.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankInfoFloor
 }

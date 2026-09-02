@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +37,8 @@ import (
 )
 
 const (
-	canonicalSiteURL = "https://mangahub.io"
+	canonicalHost    = "mangahub.io"
+	canonicalSiteURL = "https://" + canonicalHost
 	canonicalAPIURL  = "https://api.mghcdn.com/graphql"
 	coverCDNURL      = "https://thumb.mghcdn.com"
 
@@ -51,22 +52,31 @@ const (
 // against a hostile or runaway response, not a size estimate.
 const maxResponseBytes = 4 << 20
 
-// defaultAllowedHosts gates which URLs parseSeriesURL will read a slug out of.
-// Only the site domain qualifies: the API (api.mghcdn.com) and cover CDN
-// (thumb.mghcdn.com) hosts serve no series pages, so a URL on them is not a
-// MangaHub series URL. The SiteInfo claim (Hosts) is deliberately wider — see
-// apiClaimHost.
-var defaultAllowedHosts = []string{"mangahub.io"}
-
 // apiClaimHost is the API origin, claimed for registry routing only. It sits
 // on a different registrable domain from the site, so HostAllowed's subdomain
 // rule does not cover it the way it covers api.comick.dev or
 // api.mangaupdates.com. The registry used to map it to this connector through
 // a hand-maintained switch and now maps hosts solely through SiteInfo, so
 // leaving it out of the claim would silently stop "api.mghcdn.com" spellings
-// from resolving to MangaHub. Claiming it does not widen parseSeriesURL: that
-// still gates on c.allowedHost.
+// from resolving to MangaHub. Claiming it does not make it a series URL:
+// parseSeriesURL refuses it by name, because the API (like the cover CDN,
+// thumb.mghcdn.com) serves no series pages and a slug read out of one would be
+// fiction.
 const apiClaimHost = "api.mghcdn.com"
+
+// site is the connector's identity: the site domain plus the API origin the
+// registry must keep routing here. Home is purely the reader/site origin the
+// dashboard opens and the tracker stores — requests never go there, they go to
+// the API host (apiURL). MangaHub is a fresh aggregator — English-only and
+// same-day on most series — so it outranks the default tier without displacing
+// the origin scanlators.
+var site = connectors.Site{
+	SiteKey:   "mangahub",
+	SiteName:  "MangaHub",
+	SiteHosts: []string{canonicalHost, apiClaimHost},
+	Home:      canonicalSiteURL,
+	Rank:      connectors.ReaderRankFreshAggregator,
+}
 
 // Search rows are MangaListItem, a slimmer type than Manga: querying
 // alternativeTitle on them is a schema error, so only the manga query asks
@@ -76,51 +86,53 @@ const (
 	mangaFields  = searchFields + " alternativeTitle"
 )
 
+// Connector reads MangaHub through its GraphQL API. The embedded Site supplies
+// Key, Name, Kind, the SiteInfo methods and the URL helpers; apiURL is where
+// requests go (the live API, or a test server).
 type Connector struct {
-	// siteURL is the origin returned/stored URLs are built on. Unlike the
-	// scraping connectors it is configurable rather than hardcoded because the
-	// API host (apiURL) and the reader host are distinct; production uses the
-	// canonical constants for both.
-	siteURL     string
-	apiURL      string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	apiURL     string
+	httpClient *http.Client
 }
 
 func NewConnector() *Connector {
 	return &Connector{
-		siteURL:     canonicalSiteURL,
-		apiURL:      canonicalAPIURL,
-		allowedHost: defaultAllowedHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		apiURL:     canonicalAPIURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another API URL (a test
+// server), optionally claiming other hosts. Unlike the scraping connectors the
+// site origin is configurable too, because the API host and the reader host
+// are distinct; production uses the canonical constants for both. A nil client
+// gets the shared throttled one, so no caller can construct an unpaced
+// connector by accident.
 func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = defaultAllowedHosts
+	identity := site
+	identity.Home = strings.TrimRight(strings.TrimSpace(siteURL), "/")
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = claimHosts(allowedHost)
 	}
 	return &Connector{
-		siteURL:     strings.TrimRight(strings.TrimSpace(siteURL), "/"),
-		apiURL:      strings.TrimSpace(apiURL),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		apiURL:     strings.TrimSpace(apiURL),
+		httpClient: client,
 	}
 }
 
-func (c *Connector) Key() string {
-	return "mangahub"
-}
-
-func (c *Connector) Name() string {
-	return "MangaHub"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
+// claimHosts widens a caller's site host list with the API origin the registry
+// must keep routing here (apiClaimHost), without aliasing the caller's slice.
+func claimHosts(hosts []string) []string {
+	claimed := slices.Clone(hosts)
+	if !connectors.HostAllowed(apiClaimHost, claimed) {
+		claimed = append(claimed, apiClaimHost)
+	}
+	return claimed
 }
 
 type apiManga struct {
@@ -169,7 +181,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 	manga := response.Data.Manga
 	if manga == nil || strings.TrimSpace(manga.Slug) == "" {
-		return nil, fmt.Errorf("mangahub manga %q not found", slug)
+		return nil, c.notFound(slug)
 	}
 
 	result := c.resultFromManga(*manga)
@@ -177,13 +189,12 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
-	limit = connectors.ClampSearchLimit(limit)
 
-	rows, err := c.search(ctx, query, limit)
+	rows, err := c.search(ctx, query.Raw, query.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("search mangahub titles: %w", err)
 	}
@@ -193,8 +204,12 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if strings.TrimSpace(manga.Slug) == "" {
 			continue
 		}
-		mapped = append(mapped, c.resultFromManga(manga))
-		if len(mapped) >= limit {
+		result := c.resultFromManga(manga)
+		if !query.Matches(append([]string{result.Title}, result.RelatedTitles...)...) {
+			continue
+		}
+		mapped = append(mapped, result)
+		if len(mapped) >= query.Limit {
 			break
 		}
 	}
@@ -234,7 +249,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	}
 	manga := response.Data.Manga
 	if manga == nil || strings.TrimSpace(manga.Slug) == "" {
-		return "", fmt.Errorf("mangahub manga %q not found", slug)
+		return "", c.notFound(slug)
 	}
 	if manga.LatestChapter == nil || chapter > *manga.LatestChapter {
 		return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
@@ -243,34 +258,43 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	return c.chapterURL(slug, chapter), nil
 }
 
+// notFound is the verdict for a manga query the API answered cleanly with a
+// null record: there is no series under that slug. It is typed as a 404 so
+// connectors.IsNotFound reads it the way it reads a scraper's missing page; a
+// GraphQL error (a rate limit, a schema complaint) is not this — the API did
+// not say the series is missing, it declined to answer.
+func (c *Connector) notFound(slug string) error {
+	return fmt.Errorf("mangahub manga %q not found: %w", slug, &connectors.HTTPStatusError{
+		StatusCode: http.StatusNotFound,
+		URL:        c.seriesURL(slug),
+	})
+}
+
 // Deliberately NOT an OfflineChapterLinker: that interface makes a built URL
 // win its place in the reader-priority chain, which is meant for sites the
 // server cannot query at all (MangaFire). MangaHub is queryable, so a chapter
 // its own range check refused must fall through to the next site instead of
 // becoming a link to a page that does not exist.
 func (c *Connector) chapterURL(slug string, chapter float64) string {
-	return c.canonicalBaseURL() + "/chapter/" + url.PathEscape(slug) + "/chapter-" + connectors.FormatChapter(chapter)
+	return c.HomeURL() + "/chapter/" + url.PathEscape(slug) + "/chapter-" + connectors.FormatChapter(chapter)
+}
+
+// seriesURL is the stored, canonical address of a series: always on the site
+// origin, never on the API host requests go to.
+func (c *Connector) seriesURL(slug string) string {
+	return c.HomeURL() + "/manga/" + url.PathEscape(slug)
 }
 
 func (c *Connector) resultFromManga(manga apiManga) connectors.MangaResult {
 	slug := strings.TrimSpace(manga.Slug)
 	title := strings.TrimSpace(manga.Title)
 
-	titleKey := searchutil.Normalize(title)
-	related := make([]string, 0, 8)
-	for _, candidate := range searchutil.UniqueNonEmpty(strings.Split(manga.AlternativeTitle, ";")) {
-		if searchutil.Normalize(candidate) == titleKey {
-			continue
-		}
-		related = append(related, candidate)
-	}
-
 	result := connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  strings.TrimSpace(manga.ID.String()),
 		Title:         title,
-		RelatedTitles: related,
-		URL:           c.canonicalBaseURL() + "/manga/" + url.PathEscape(slug),
+		RelatedTitles: searchutil.RelatedTitles(title, strings.Split(manga.AlternativeTitle, ";")),
+		URL:           c.seriesURL(slug),
 	}
 	if image := strings.TrimSpace(manga.Image); image != "" {
 		result.CoverImageURL = coverCDNURL + "/" + strings.TrimLeft(image, "/")
@@ -285,23 +309,20 @@ func (c *Connector) resultFromManga(manga apiManga) connectors.MangaResult {
 	return result
 }
 
-// parseSeriesURL extracts the series slug from a manga or chapter URL
-// (/manga/{slug} and /chapter/{slug}/chapter-{n}).
+// parseSeriesURL checks the URL is this site's and extracts the series slug
+// from a manga or chapter URL (/manga/{slug} and /chapter/{slug}/chapter-{n}).
 func (c *Connector) parseSeriesURL(rawURL string) (string, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	parsed, err := c.ParseOwnedURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
+		return "", err
 	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to mangahub")
+	// The API origin is claimed for routing only (apiClaimHost): a URL on it
+	// is not a series URL.
+	if connectors.HostAllowed(parsed.Hostname(), []string{apiClaimHost}) {
+		return "", fmt.Errorf("url does not belong to %s", c.Key())
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	segments := connectors.PathSegments(parsed)
 	if len(segments) < 2 || (segments[0] != "manga" && segments[0] != "chapter") {
 		return "", fmt.Errorf("mangahub url must look like /manga/{slug}")
 	}
@@ -369,41 +390,4 @@ func (c *Connector) apiHost() string {
 		return ""
 	}
 	return parsed.Hostname()
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo: the site domain plus the API origin,
-// which the registry must keep routing here (apiClaimHost). Wider than
-// c.allowedHost on purpose — routing a URL to this connector and accepting it
-// as a series URL are different questions — and returned as a copy so a caller
-// cannot reach back into the shared default slice.
-func (c *Connector) Hosts() []string {
-	hosts := make([]string, 0, len(c.allowedHost)+1)
-	hosts = append(hosts, c.allowedHost...)
-	if !connectors.HostAllowed(apiClaimHost, hosts) {
-		hosts = append(hosts, apiClaimHost)
-	}
-	return hosts
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: MangaHub is a fresh aggregator —
-// English-only and same-day on most series — so it outranks the default tier
-// without displacing the origin scanlators.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankFreshAggregator
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on.
-// Requests never go here — they go to the API host (c.apiURL) — so this is
-// purely the reader/site origin the dashboard opens and the tracker stores.
-func (c *Connector) canonicalBaseURL() string {
-	return c.siteURL
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,56 +44,62 @@ const (
 	releaseDateLayout = "2006-01-02"
 )
 
-// defaultHosts is the single source of truth for the domains this connector
-// claims — the constructors' fallback and the SiteInfo claim the registry maps
-// URLs through. The API host (api.mangaupdates.com), the cover CDN
-// (cdn.mangaupdates.com) and the www site are all subdomains, which
-// connectors.HostAllowed covers without listing them.
-var defaultHosts = []string{"mangaupdates.com"}
+// site is the connector's identity. The API host (api.mangaupdates.com), the
+// cover CDN (cdn.mangaupdates.com) and the www site are all subdomains of the
+// one claimed domain, which connectors.HostAllowed covers without listing them.
+// Home is the production site rather than the API host: apiBaseURL is where
+// requests go (a test server in tests) and is the API host besides, while the
+// URLs handed back are stored in trackers and opened in a browser. MangaUpdates
+// hosts no chapters and resolves no reader links, so it never actually wins a
+// turn in the reading chain; the default tier is simply where a site that does
+// not claim to be better than the rest belongs.
+var site = connectors.Site{
+	SiteKey:   "mangaupdates",
+	SiteName:  "MangaUpdates",
+	SiteHosts: []string{"mangaupdates.com"},
+	Home:      canonicalSiteURL,
+	Rank:      connectors.ReaderRankDefault,
+}
 
 var (
-	seriesPathPattern = regexp.MustCompile(`(?i)^/series/([0-9a-z]+)(?:/|$)`)
-	numberPattern     = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
+	// seriesIDPattern is the zero-padded base36 id a site URL carries.
+	seriesIDPattern = regexp.MustCompile(`(?i)^[0-9a-z]+$`)
+	numberPattern   = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
 )
 
+// Connector reads MangaUpdates through its JSON API. The embedded Site supplies
+// Key, Name, Kind, the SiteInfo methods and the URL helpers; apiBaseURL is
+// where requests go (the live API, or a test server).
 type Connector struct {
-	apiBaseURL  string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	apiBaseURL string
+	httpClient *http.Client
 }
 
 func NewConnector() *Connector {
 	return &Connector{
-		apiBaseURL:  canonicalAPIBaseURL,
-		allowedHost: defaultHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		apiBaseURL: canonicalAPIBaseURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another API base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident.
 func NewConnectorWithOptions(apiBaseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = defaultHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		apiBaseURL:  strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		apiBaseURL: strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
+		httpClient: client,
 	}
-}
-
-func (c *Connector) Key() string {
-	return "mangaupdates"
-}
-
-func (c *Connector) Name() string {
-	return "MangaUpdates"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 type apiImage struct {
@@ -152,16 +157,17 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("fetch mangaupdates releases: %w", err)
 	}
 
-	related := make([]string, 0, len(record.Associated))
-	for _, associated := range record.Associated {
-		related = append(related, associated.Title)
+	title := strings.TrimSpace(record.Title)
+	associated := make([]string, 0, len(record.Associated))
+	for _, entry := range record.Associated {
+		associated = append(associated, entry.Title)
 	}
 
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  strconv.FormatInt(seriesID, 10),
-		Title:         strings.TrimSpace(record.Title),
-		RelatedTitles: searchutil.FilterEnglishAlphabetNames(related),
+		Title:         title,
+		RelatedTitles: searchutil.RelatedTitles(title, associated),
 		URL:           c.seriesURL(record.URL, seriesID),
 		CoverImageURL: strings.TrimSpace(record.Image.URL.Original),
 		LatestChapter: latestChapter,
@@ -191,8 +197,7 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 		return nil, nil, nil
 	}
 
-	var best *float64
-	var bestDate *time.Time
+	var latest connectors.LatestReading
 	var newest *time.Time
 	for _, result := range response.Results {
 		date := parseReleaseDate(result.Record.ReleaseDate)
@@ -204,10 +209,7 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 		if chapter == nil {
 			continue
 		}
-		if best == nil || *chapter > *best {
-			best = chapter
-			bestDate = date
-		}
+		latest.Add(*chapter, date)
 	}
 
 	// A feed whose newest release is months old is a dropped series, not a
@@ -220,6 +222,7 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 	// The series record's own counter wins only when it is both plausible and
 	// ahead of what the releases say: it is maintained by hand and can carry a
 	// number the release feed has not spelled out yet.
+	best, bestDate := latest.Result()
 	if connectors.ValidChapter(recordLatestChapter) && (best == nil || recordLatestChapter > *best) {
 		value := recordLatestChapter
 		best = &value
@@ -229,27 +232,20 @@ func (c *Connector) latestRelease(ctx context.Context, seriesID int64, recordLat
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
-	}
-
-	limit = connectors.ClampSearchLimit(limit)
 
 	var response apiSearchResponse
-	if err := c.postJSON(ctx, "/series/search", map[string]any{"search": query, "perpage": limit}, &response); err != nil {
+	if err := c.postJSON(ctx, "/series/search", map[string]any{"search": query.Raw, "perpage": query.Limit}, &response); err != nil {
 		return nil, fmt.Errorf("search mangaupdates: %w", err)
 	}
 
 	results := make([]connectors.MangaResult, 0, len(response.Results))
 	for _, item := range response.Results {
 		record := item.Record
-		if !searchutil.MatchesQuery(record.Title, normalizedQuery, queryTokens) {
+		if !query.Matches(record.Title) {
 			continue
 		}
 
@@ -265,72 +261,36 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 	return results, nil
 }
 
+// parseSeriesURL checks the URL is this site's and decodes the series id out of
+// its /series/{id} path.
 func (c *Connector) parseSeriesURL(rawURL string) (int64, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return 0, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	parsed, err := c.ParseOwnedURL(rawURL)
 	if err != nil {
-		return 0, fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return 0, fmt.Errorf("url does not belong to mangaupdates")
+		return 0, err
 	}
 
-	match := seriesPathPattern.FindStringSubmatch(parsed.Path)
-	if len(match) < 2 {
+	segments := connectors.PathSegments(parsed)
+	if len(segments) < 2 || !strings.EqualFold(segments[0], "series") || !seriesIDPattern.MatchString(segments[1]) {
 		return 0, fmt.Errorf("mangaupdates url must match /series/{id}")
 	}
 
 	// Site URLs carry the id in zero-padded base36; old-style URLs carried the
 	// decimal id in a query param, but those have redirected for years.
-	seriesID, err := strconv.ParseInt(strings.ToLower(match[1]), 36, 64)
+	seriesID, err := strconv.ParseInt(strings.ToLower(segments[1]), 36, 64)
 	if err != nil || seriesID <= 0 {
 		return 0, fmt.Errorf("invalid mangaupdates series id")
 	}
 	return seriesID, nil
 }
 
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo. MangaUpdates hosts no chapters
-// and resolves no reader links, so it never actually wins a turn in the
-// reading chain; the default tier is simply where a site that does not claim
-// to be better than the rest belongs.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is the production site rather than c.apiBaseURL: apiBaseURL is where
-// requests go (a test server in tests) and is the API host besides, while the
-// URLs handed back are stored in trackers and opened in a browser.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalSiteURL
-}
-
 // seriesURL prefers the link the API hands out — it carries the zero-padded
 // base36 id and the title slug the site itself uses — and falls back to
-// building one on canonicalBaseURL for a record that omits it.
+// building one on the canonical site origin for a record that omits it.
 func (c *Connector) seriesURL(recordURL string, seriesID int64) string {
 	if trimmed := strings.TrimSpace(recordURL); trimmed != "" {
 		return trimmed
 	}
-	return c.canonicalBaseURL() + "/series/" + strconv.FormatInt(seriesID, 36)
+	return c.HomeURL() + "/series/" + strconv.FormatInt(seriesID, 36)
 }
 
 func (c *Connector) getJSON(ctx context.Context, path string, target any) error {

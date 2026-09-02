@@ -43,7 +43,7 @@ func graphqlHandler(t *testing.T, respond func(query string) string) http.Handle
 
 const onePieceManga = `{"id":20,"title":"One Piece","slug":"one-piece_142","image":"wbctr/one-piece.jpg",
 	"latestChapter":1191,"updatedDate":"2026-08-21T03:53:28.000Z",
-	"alternativeTitle":"ワンピース; One Piece; Vua Hải Tặc"}`
+	"alternativeTitle":"ワンピース; One Piece; Vua Hải Tặc; One Piece Digital Colored"}`
 
 func onePieceHandler(t *testing.T) http.Handler {
 	t.Helper()
@@ -85,9 +85,28 @@ func TestResolveByURLReadsChapterDateAndTitles(t *testing.T) {
 	if result.CoverImageURL != "https://thumb.mghcdn.com/wbctr/one-piece.jpg" {
 		t.Fatalf("unexpected cover %q", result.CoverImageURL)
 	}
-	// The main title is dropped from alternatives; the rest survive.
-	if len(result.RelatedTitles) != 2 || result.RelatedTitles[0] != "ワンピース" || result.RelatedTitles[1] != "Vua Hải Tặc" {
+	// The main title and the non-Latin alternates are dropped (the dashboard
+	// search and the link scan only ever compare English spellings); the
+	// English alternate survives.
+	if len(result.RelatedTitles) != 1 || result.RelatedTitles[0] != "One Piece Digital Colored" {
 		t.Fatalf("unexpected related titles %v", result.RelatedTitles)
+	}
+}
+
+// A clean answer with a null manga record means the series does not exist
+// under that slug; it has to read as a 404 the way a scraper's missing page
+// does, so the poller can tell "gone" from "did not answer".
+func TestResolveByURLNullMangaIsNotFound(t *testing.T) {
+	connector := newTestConnector(t, graphqlHandler(t, func(string) string {
+		return `{"data":{"manga":null}}`
+	}))
+
+	_, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/no-such-slug")
+	if !connectors.IsNotFound(err) {
+		t.Fatalf("expected a not-found verdict, got %v", err)
+	}
+	if _, err := connector.ResolveChapterURL(context.Background(), "https://mangahub.io/manga/no-such-slug", 1); !connectors.IsNotFound(err) {
+		t.Fatalf("expected a not-found verdict from the chapter lookup, got %v", err)
 	}
 }
 
@@ -235,7 +254,25 @@ func TestHostsClaimsAPIOriginWithoutWideningSeriesURLs(t *testing.T) {
 	// Hosts() must not hand out the shared default slice itself.
 	claimed := connector.Hosts()
 	claimed[0] = "tampered.example"
-	if defaultAllowedHosts[0] != "mangahub.io" {
-		t.Fatalf("Hosts() aliased the package default: %v", defaultAllowedHosts)
+	if site.SiteHosts[0] != "mangahub.io" {
+		t.Fatalf("Hosts() aliased the package default: %v", site.SiteHosts)
+	}
+}
+
+// The API's search matches loosely, so its rows are post-filtered against the
+// query the way every other connector's are: a row whose title does not answer
+// the query is dropped, however the site ranked it.
+func TestSearchByTitleDropsRowsThatDoNotMatchTheQuery(t *testing.T) {
+	connector := newTestConnector(t, graphqlHandler(t, func(string) string {
+		return `{"data":{"search":{"rows":[` + onePieceManga + `,
+			{"id":7,"title":"Bleach","slug":"bleach_1","latestChapter":700}]}}}`
+	}))
+
+	results, err := connector.SearchByTitle(context.Background(), "one piece", 5)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "One Piece" {
+		t.Fatalf("expected only the matching row, got %+v", results)
 	}
 }

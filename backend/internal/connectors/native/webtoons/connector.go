@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
-	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
 const (
@@ -26,10 +25,17 @@ const (
 	searchLocale = "en"
 )
 
-// defaultAllowedHosts is the one list of domains this connector claims. The
-// constructors' default and SiteInfo.Hosts() both read it, so the registry's
-// URL routing can never drift from the connector's own ownership check.
-var defaultAllowedHosts = []string{"webtoons.com"}
+// site is the connector's identity. The regional, mobile and www sites are all
+// subdomains of webtoons.com, which connectors.HostAllowed covers; the
+// thumbnail CDN is Naver's shared image host and is deliberately not claimed.
+// WEBTOON is a readable site in the default tier.
+var site = connectors.Site{
+	SiteKey:   "webtoons",
+	SiteName:  "WEBTOON",
+	SiteHosts: []string{"webtoons.com"},
+	Home:      canonicalBaseURL,
+	Rank:      connectors.ReaderRankDefault,
+}
 
 var (
 	canonicalPattern    = regexp.MustCompile(`(?is)<link\s+[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']`)
@@ -41,10 +47,14 @@ var (
 	episodeDatePattern  = regexp.MustCompile(`(?is)<span[^>]*class=["'][^"']*date[^"']*["'][^>]*>([^<]+)</span>`)
 )
 
+// Connector reads webtoons.com through its immediate-search API and its
+// episode-list pages. The embedded Site supplies Key, Name, Kind, the SiteInfo
+// methods and the URL helpers; baseURL is where requests go (the live site, or
+// a test server).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
 }
 
 type immediateSearchResponse struct {
@@ -69,36 +79,29 @@ type episodeEntry struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     canonicalBaseURL,
-		allowedHost: defaultAllowedHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		baseURL:    canonicalBaseURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident;
+// tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = defaultAllowedHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		httpClient: client,
 	}
-}
-
-func (c *Connector) Key() string {
-	return "webtoons"
-}
-
-func (c *Connector) Name() string {
-	return "WEBTOON"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
@@ -110,44 +113,31 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	parsedURL, err := c.validateAndParseURL(rawURL)
+	titleNo, err := c.parseTitleURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
-
-	titleNo, err := extractTitleNo(parsedURL)
-	if err != nil {
-		return nil, err
-	}
-
 	return c.resolveByTitleNo(ctx, titleNo)
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
-	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
-
-	payload, err := c.searchImmediate(ctx, query)
+	payload, err := c.searchImmediate(ctx, query.Raw)
 	if err != nil {
 		return nil, err
 	}
 
 	seen := make(map[int]struct{}, len(payload.Result.SearchedList))
-	results := make([]connectors.MangaResult, 0, min(limit, len(payload.Result.SearchedList)))
+	results := make([]connectors.MangaResult, 0, min(query.Limit, len(payload.Result.SearchedList)))
 	for _, item := range payload.Result.SearchedList {
 		if !strings.EqualFold(strings.TrimSpace(item.SearchMode), "TITLE") {
 			continue
 		}
-		if !searchutil.AnyCandidateMatches([]string{item.Title}, normalizedQuery, queryTokens) {
+		if !query.Matches(item.Title) {
 			continue
 		}
 		if item.TitleNo <= 0 {
@@ -162,7 +152,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceItemID:  strconv.Itoa(item.TitleNo),
 			Title:         strings.TrimSpace(item.Title),
 			URL:           c.canonicalEpisodeListURL(item.TitleNo),
-			CoverImageURL: c.absoluteImageURL(item.ThumbnailMobile),
+			CoverImageURL: absoluteImageURL(item.ThumbnailMobile),
 		}
 
 		// Enrich with latest episode/date to improve tracker auto-fill
@@ -189,7 +179,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		results = append(results, result)
 		seen[item.TitleNo] = struct{}{}
 
-		if len(results) >= limit {
+		if len(results) >= query.Limit {
 			break
 		}
 	}
@@ -203,12 +193,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	parsedURL, err := c.validateAndParseURL(rawURL)
-	if err != nil {
-		return "", err
-	}
-
-	titleNo, err := extractTitleNo(parsedURL)
+	titleNo, err := c.parseTitleURL(rawURL)
 	if err != nil {
 		return "", err
 	}
@@ -247,21 +232,14 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	return "", fmt.Errorf("episode %d not found: %w", episodeNo, connectors.ErrChapterNotFound)
 }
 
-func (c *Connector) validateAndParseURL(rawURL string) (*url.URL, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsedURL, err := url.Parse(trimmed)
+// parseTitleURL checks the URL is this site's and reads the title number out
+// of its query string.
+func (c *Connector) parseTitleURL(rawURL string) (int, error) {
+	parsedURL, err := c.ParseOwnedURL(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
+		return 0, err
 	}
-	if !c.isAllowedHost(parsedURL.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to webtoons")
-	}
-
-	return parsedURL, nil
+	return extractTitleNo(parsedURL)
 }
 
 func (c *Connector) searchImmediate(ctx context.Context, query string) (*immediateSearchResponse, error) {
@@ -312,19 +290,14 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 		title = "WEBTOON " + strconv.Itoa(titleNo)
 	}
 
-	coverImageURL := c.absoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body))))
+	coverImageURL := c.AbsoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body))))
 
-	entries := c.extractEpisodeEntries(body)
-	latestEpisodeNo := findLatestEpisodeNumber(entries)
-	var latestChapter *float64
-	var latestUpdatedAt *time.Time
-	if latestEpisodeNo > 0 {
-		latestValue := float64(latestEpisodeNo)
-		latestChapter = &latestValue
-		if latestEntry := findEpisodeEntry(entries, latestEpisodeNo); latestEntry != nil {
-			latestUpdatedAt = parseWebtoonsDate(latestEntry.DateRaw)
-		}
+	// Episode numbers were validated in extractEpisodeEntries.
+	var latest connectors.LatestReading
+	for _, entry := range c.extractEpisodeEntries(body) {
+		latest.Add(float64(entry.Number), parseWebtoonsDate(entry.DateRaw))
 	}
+	latestChapter, latestUpdatedAt := latest.Result()
 
 	sourceItemID := strconv.Itoa(titleNo)
 	return &connectors.MangaResult{
@@ -364,7 +337,7 @@ func (c *Connector) episodeListURL(titleNo int, page int) string {
 // canonicalEpisodeListURL is the stored form of a series page: only page one,
 // because a stored link is where the reader lands, not where a scrape paged to.
 func (c *Connector) canonicalEpisodeListURL(titleNo int) string {
-	return c.canonicalBaseURL() + episodeListPath(titleNo, 1)
+	return c.HomeURL() + episodeListPath(titleNo, 1)
 }
 
 // fetchPage returns the page body together with the URL the request finished
@@ -385,40 +358,10 @@ func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, str
 	return string(body), finalURL, nil
 }
 
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return c.canonicalBaseURL() + trimmed
-	}
-	return c.canonicalBaseURL() + "/" + trimmed
-}
-
 // absoluteImageURL resolves a search thumbnail, which the API spells relative
 // to the image CDN rather than to the site.
-func (c *Connector) absoluteImageURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return imageCDNURL + trimmed
-	}
-	return imageCDNURL + "/" + trimmed
+func absoluteImageURL(raw string) string {
+	return connectors.AbsoluteURL(imageCDNURL, raw)
 }
 
 func extractTitleNo(parsedURL *url.URL) (int, error) {
@@ -487,7 +430,7 @@ func (c *Connector) extractEpisodeEntries(body string) []episodeEntry {
 
 		entry := episodeEntry{
 			Number:  number,
-			URL:     c.absoluteURL(href),
+			URL:     c.AbsoluteURL(href),
 			DateRaw: dateRaw,
 		}
 		entries = append(entries, entry)
@@ -524,35 +467,4 @@ func parseWebtoonsDate(raw string) *time.Time {
 		"January 2, 2006",
 		"2006-01-02",
 	)
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo. The regional, mobile and www sites are
-// all subdomains of webtoons.com, which HostAllowed covers; the thumbnail CDN
-// is Naver's shared image host and is deliberately not claimed.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: WEBTOON is a readable site in the
-// default tier.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is deliberately the production host rather than c.baseURL: c.baseURL is
-// where requests go (a test server in tests), while the URLs handed back are
-// stored in trackers and opened by the reader's browser, so they must always
-// point at the real site.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalBaseURL
 }

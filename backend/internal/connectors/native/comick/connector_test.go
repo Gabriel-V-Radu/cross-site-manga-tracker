@@ -2,10 +2,13 @@ package comick
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func newTestConnector(t *testing.T, handler http.Handler) *Connector {
@@ -80,10 +83,64 @@ func TestResolveByURLReadsEnglishChapterAndTitles(t *testing.T) {
 	if result.CoverImageURL != "https://meo.comick.pictures/KrNwor.jpg" {
 		t.Fatalf("unexpected cover %q", result.CoverImageURL)
 	}
-	// The main title is excluded; the non-latin one is kept here and filtered
-	// downstream where related titles are persisted.
-	if len(result.RelatedTitles) != 2 || result.RelatedTitles[0] != "Kagura Bowl" {
+	// The main title is excluded, and so is the non-latin alternate: related
+	// titles are what the dashboard search and the link scan compare English
+	// queries against.
+	if len(result.RelatedTitles) != 1 || result.RelatedTitles[0] != "Kagura Bowl" {
 		t.Fatalf("unexpected related titles %v", result.RelatedTitles)
+	}
+}
+
+// TestSearchByTitleDropsUnrelatedResults pins the shared post-filter: the API
+// answers a query loosely, and a result that matches neither the title, the
+// slug nor an alternate title is not what the user asked for.
+func TestSearchByTitleDropsUnrelatedResults(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1.0/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi","md_titles":[{"title":"Kagura Bowl"}]},
+			{"hid":"altOnly","slug":"sword-saga","title":"Sword Saga","md_titles":[{"title":"Kagurabachi Gaiden"}]},
+			{"hid":"noise","slug":"one-piece","title":"One Piece"}
+		]`))
+	})
+	connector := newTestConnector(t, mux)
+
+	results, err := connector.SearchByTitle(context.Background(), "kagurabachi", 5)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected the title match and the alternate-title match only, got %d results", len(results))
+	}
+	if results[0].SourceItemID != "10ZRNmsG" || results[1].SourceItemID != "altOnly" {
+		t.Fatalf("unexpected results %v", results)
+	}
+}
+
+// TestCooldownIsReportedAsCoolingDown: while the breaker is open the connector
+// refuses without a request, and the refusal must be the same typed error the
+// shared throttle returns for its own open circuit — the poller classifies the
+// two together.
+func TestCooldownIsReportedAsCoolingDown(t *testing.T) {
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusForbidden)
+	})
+	connector := newTestConnector(t, mux)
+
+	if err := connector.HealthCheck(context.Background()); err == nil {
+		t.Fatalf("expected the 403 to fail the health check")
+	}
+	_, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi")
+	var cooling *connectors.SourceCoolingDownError
+	if !errors.As(err, &cooling) {
+		t.Fatalf("expected a SourceCoolingDownError while the breaker is open, got %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected no request while cooling down, got %d", requests)
 	}
 }
 

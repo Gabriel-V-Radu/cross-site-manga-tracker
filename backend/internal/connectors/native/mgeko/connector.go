@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,6 +18,20 @@ import (
 )
 
 const canonicalBaseURL = "https://www.mgeko.cc"
+
+// nonBreakingSpace (U+00A0) is what the site pads its timestamps with; it is
+// folded to a plain space before any date text is parsed.
+var nonBreakingSpace = string(rune(0x00A0))
+
+// site is the connector's identity. Mgeko is a readable aggregator in the
+// default tier.
+var site = connectors.Site{
+	SiteKey:   "mgeko",
+	SiteName:  "Mgeko",
+	SiteHosts: []string{"mgeko.cc"},
+	Home:      canonicalBaseURL,
+	Rank:      connectors.ReaderRankDefault,
+}
 
 var (
 	novelItemPattern         = regexp.MustCompile(`(?is)<li[^>]*class=["'][^"']*novel-item[^"']*["'][^>]*>(.*?)</li>`)
@@ -42,10 +55,14 @@ var (
 	allChaptersSuffixPattern = regexp.MustCompile(`(?i)\s*\[all\s+chapters?\]\s*$`)
 )
 
+// Connector reads mgeko.cc by scraping its search, manga and all-chapters
+// pages. The embedded Site supplies Key, Name, Kind, the SiteInfo methods and
+// the URL helpers; baseURL is where requests go (the live site, or a test
+// server).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
 }
 
 type searchEntry struct {
@@ -64,36 +81,29 @@ type chapterEntry struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     canonicalBaseURL,
-		allowedHost: []string{"mgeko.cc"},
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		baseURL:    canonicalBaseURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident;
+// tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = []string{"mgeko.cc"}
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		httpClient: client,
 	}
-}
-
-func (c *Connector) Key() string {
-	return "mgeko"
-}
-
-func (c *Connector) Name() string {
-	return "Mgeko"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
@@ -102,41 +112,20 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	slug, err := c.parseMangaURL(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
+		return nil, err
 	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to mgeko")
-	}
-
-	slug := extractMangaSlugFromPath(parsed.Path)
-	if slug == "" {
-		return nil, fmt.Errorf("mgeko url must match /manga/{id}")
-	}
-
 	return c.resolveBySlug(ctx, slug)
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
-	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
-
-	body, err := c.fetchPage(ctx, c.baseURL+"/search/?search="+url.QueryEscape(query))
+	body, err := c.fetchPage(ctx, c.baseURL+"/search/?search="+url.QueryEscape(query.Raw))
 	if err != nil {
 		return nil, fmt.Errorf("fetch mgeko search page: %w", err)
 	}
@@ -146,9 +135,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
-	results := make([]connectors.MangaResult, 0, min(limit, len(entries)))
+	results := make([]connectors.MangaResult, 0, min(query.Limit, len(entries)))
 	for _, entry := range entries {
-		if !searchutil.AnyCandidateMatches([]string{entry.Title, entry.Slug}, normalizedQuery, queryTokens) {
+		if !query.Matches(entry.Title, entry.Slug) {
 			continue
 		}
 
@@ -157,7 +146,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceItemID:  entry.Slug,
 			Title:         entry.Title,
 			URL:           c.mangaURL(entry.Slug),
-			CoverImageURL: c.absoluteURL(entry.CoverImage),
+			CoverImageURL: c.AbsoluteURL(entry.CoverImage),
 		}
 
 		if entry.LatestChapter != nil {
@@ -170,7 +159,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		}
 
 		results = append(results, result)
-		if len(results) >= limit {
+		if len(results) >= query.Limit {
 			break
 		}
 	}
@@ -183,22 +172,9 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("invalid chapter")
 	}
 
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	slug, err := c.parseMangaURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to mgeko")
-	}
-
-	slug := extractMangaSlugFromPath(parsed.Path)
-	if slug == "" {
-		return "", fmt.Errorf("mgeko url must match /manga/{id}")
+		return "", err
 	}
 
 	entries, err := c.fetchChapterEntries(ctx, slug)
@@ -215,6 +191,21 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 }
 
+// parseMangaURL checks the URL is this site's and reads the slug out of its
+// /manga/{id} path.
+func (c *Connector) parseMangaURL(rawURL string) (string, error) {
+	parsed, err := c.ParseOwnedURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	slug := mangaSlugFromSegments(connectors.PathSegments(parsed))
+	if slug == "" {
+		return "", fmt.Errorf("mgeko url must match /manga/{id}")
+	}
+	return slug, nil
+}
+
 func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
 	body, err := c.fetchPage(ctx, c.baseURL+"/manga/"+url.PathEscape(slug)+"/")
 	if err != nil {
@@ -228,7 +219,7 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	if coverImageURL == "" {
 		coverImageURL = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(coverDataSrcPattern, body)))
 	}
-	coverImageURL = c.absoluteURL(coverImageURL)
+	coverImageURL = c.AbsoluteURL(coverImageURL)
 
 	latestChapter, lastUpdatedAt, chapterErr := c.fetchLatestChapterFromAllChapters(ctx, slug)
 	if chapterErr != nil || latestChapter == nil {
@@ -266,7 +257,7 @@ func (c *Connector) fetchChapterEntries(ctx context.Context, slug string) ([]cha
 	}
 
 	for index := range entries {
-		entries[index].URL = c.absoluteURL(entries[index].URL)
+		entries[index].URL = c.AbsoluteURL(entries[index].URL)
 	}
 
 	return entries, nil
@@ -413,37 +404,14 @@ func parseChapterEntries(body string, now time.Time) []chapterEntry {
 	return entries
 }
 
+// selectLatestChapter folds the chapter list (already validated by
+// parseMgekoChapterToken) into the highest chapter and its date.
 func selectLatestChapter(entries []chapterEntry) (*float64, *time.Time) {
-	if len(entries) == 0 {
-		return nil, nil
-	}
-
-	var latestChapter *float64
-	var latestUpdatedAt *time.Time
-
+	var latest connectors.LatestReading
 	for _, entry := range entries {
-		if latestChapter == nil || entry.Chapter > *latestChapter {
-			chapterValue := entry.Chapter
-			latestChapter = &chapterValue
-
-			if entry.UpdatedAt != nil {
-				updatedAtValue := *entry.UpdatedAt
-				latestUpdatedAt = &updatedAtValue
-			} else {
-				latestUpdatedAt = nil
-			}
-			continue
-		}
-
-		if latestChapter != nil && connectors.SameChapter(entry.Chapter, *latestChapter) && entry.UpdatedAt != nil {
-			if latestUpdatedAt == nil || entry.UpdatedAt.After(*latestUpdatedAt) {
-				updatedAtValue := *entry.UpdatedAt
-				latestUpdatedAt = &updatedAtValue
-			}
-		}
+		latest.Add(entry.Chapter, entry.UpdatedAt)
 	}
-
-	return latestChapter, latestUpdatedAt
+	return latest.Result()
 }
 
 func extractTitle(body string, slug string) string {
@@ -462,13 +430,15 @@ func extractTitle(body string, slug string) string {
 	return connectors.PrettifySlug(slug)
 }
 
+// extractRelatedTitles gathers the alternate names the manga page lists — the
+// comma-separated alternative-title heading first, then whatever the shared
+// extractor finds — and keeps the ones worth storing beside the primary title.
 func extractRelatedTitles(body string, primaryTitle string) []string {
 	candidates := make([]string, 0, 16)
 
 	altRaw := connectors.CleanText(connectors.FirstSubmatch(altTitleHeadingPattern, body))
 	if altRaw != "" {
-		parts := strings.Split(altRaw, ",")
-		for _, part := range parts {
+		for _, part := range strings.Split(altRaw, ",") {
 			candidate := strings.TrimSpace(part)
 			if candidate == "" {
 				continue
@@ -478,24 +448,7 @@ func extractRelatedTitles(body string, primaryTitle string) []string {
 	}
 
 	candidates = append(candidates, searchutil.ExtractRelatedTitles(body)...)
-	filtered := searchutil.FilterEnglishAlphabetNames(candidates)
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	primaryKey := searchutil.Normalize(primaryTitle)
-	related := make([]string, 0, len(filtered))
-	for _, candidate := range filtered {
-		if searchutil.Normalize(candidate) == primaryKey {
-			continue
-		}
-		related = append(related, candidate)
-	}
-	if len(related) == 0 {
-		return nil
-	}
-
-	return searchutil.UniqueNonEmpty(related)
+	return searchutil.RelatedTitles(primaryTitle, candidates)
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
@@ -543,7 +496,7 @@ func parseMgekoChapterToken(raw string) *float64 {
 }
 
 func parseRelativeTime(raw string, now time.Time) *time.Time {
-	normalized := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(raw, "\u00a0", " ")))
+	normalized := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(raw, " ", " ")))
 	if normalized == "" {
 		return nil
 	}
@@ -595,7 +548,7 @@ func parseMgekoDatetime(raw string) *time.Time {
 	}
 
 	replacer := strings.NewReplacer(
-		"\u00a0", " ",
+		" ", " ",
 		"a.m.", "AM",
 		"p.m.", "PM",
 		"a.m", "AM",
@@ -657,66 +610,21 @@ func parseMgekoDatetime(raw string) *time.Time {
 	return nil
 }
 
+// extractMangaSlugFromPath reads the slug out of a /manga/{id}/ href as it
+// appears in a search result block.
 func extractMangaSlugFromPath(rawPath string) string {
-	segments := strings.Split(strings.Trim(path.Clean(strings.TrimSpace(rawPath)), "/"), "/")
+	return mangaSlugFromSegments(connectors.PathSegments(&url.URL{Path: strings.TrimSpace(rawPath)}))
+}
+
+func mangaSlugFromSegments(segments []string) string {
 	if len(segments) < 2 || segments[0] != "manga" {
 		return ""
 	}
-
-	slug := strings.TrimSpace(segments[1])
-	if slug == "" {
-		return ""
-	}
-
-	return slug
+	return strings.TrimSpace(segments[1])
 }
 
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: Mgeko is a readable aggregator in
-// the default tier.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is deliberately the production host rather than c.baseURL: c.baseURL is
-// where requests go (a test server in tests), while the URLs handed back are
-// stored in trackers and opened by the reader's browser, so they must always
-// point at the real site.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalBaseURL
-}
-
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return c.canonicalBaseURL() + trimmed
-	}
-	return c.canonicalBaseURL() + "/" + trimmed
-}
-
+// mangaURL is the stored, canonical address of a series: always on the real
+// site, never on the base URL requests go to.
 func (c *Connector) mangaURL(slug string) string {
-	return c.canonicalBaseURL() + "/manga/" + slug + "/"
+	return c.HomeURL() + "/manga/" + slug + "/"
 }

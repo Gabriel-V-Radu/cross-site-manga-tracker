@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,12 +36,22 @@ const (
 	coverCDNURL = "https://uploads.mangadex.org"
 )
 
-// defaultHosts is the single list of hosts this connector claims, shared by the
-// constructors and by Hosts() so the registry's URL routing can never drift
-// from the URL-ownership check. One entry covers the whole site: the API
+// site is the connector's identity. One host covers the whole site: the API
 // (api.mangadex.org) and the cover CDN (uploads.mangadex.org) are subdomains,
-// which HostAllowed matches, and mangadex.org has never moved domain.
-var defaultHosts = []string{"mangadex.org"}
+// which connectors.HostAllowed matches, and mangadex.org has never moved
+// domain. Home is the production site rather than the API host: the API is
+// where requests go (a test server in tests) and never serves pages, while the
+// URLs handed back are stored in trackers and opened by the reader's browser.
+// MangaDex sits in the default reading tier — its own reader is fine, but
+// scanlations reach it after the origin sites and it freezes on licensed
+// series.
+var site = connectors.Site{
+	SiteKey:   "mangadex",
+	SiteName:  "MangaDex",
+	SiteHosts: []string{"mangadex.org"},
+	Home:      canonicalSiteURL,
+	Rank:      connectors.ReaderRankDefault,
+}
 
 var titleIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
@@ -54,40 +63,39 @@ const (
 	latestChapterFeedLimit = 100
 )
 
+// Connector reads MangaDex through its JSON API. The embedded Site supplies
+// Key, Name, Kind, the SiteInfo methods and the URL helpers; apiBaseURL is
+// where requests go (the live API, or a test server).
 type Connector struct {
-	apiBaseURL  string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	apiBaseURL string
+	httpClient *http.Client
 }
 
 func NewConnector() *Connector {
 	return &Connector{
-		apiBaseURL:  canonicalAPIURL,
-		allowedHost: defaultHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		apiBaseURL: canonicalAPIURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another API base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident.
 func NewConnectorWithOptions(apiBaseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = defaultHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
-	return &Connector{apiBaseURL: strings.TrimRight(apiBaseURL, "/"), allowedHost: allowedHost, httpClient: client}
-}
-
-func (c *Connector) Key() string {
-	return "mangadex"
-}
-
-func (c *Connector) Name() string {
-	return "MangaDex"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
+	return &Connector{
+		Site:       identity,
+		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
+		httpClient: client,
+	}
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
@@ -120,16 +128,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("fetch mangadex manga: %w", err)
 	}
 
-	title := pickBestTitle(payload.Data.Attributes.Title)
-	relatedTitles := collectEnglishRelatedTitles(title, payload.Data.Attributes.Title, payload.Data.Attributes.AltTitles)
-	if title == "" {
-		if len(relatedTitles) > 0 {
-			title = relatedTitles[0]
-		} else {
-			title = "Untitled"
-		}
-	}
-	relatedTitles = removePrimaryTitle(relatedTitles, title)
+	title, relatedTitles := pickTitles(payload.Data.Attributes.Title, payload.Data.Attributes.AltTitles)
 
 	// lastChapter outlives the English feed: a licensed series whose chapters
 	// were pulled, and a oneshot whose only chapter has a null number, keep
@@ -169,24 +168,18 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
-	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
 	// The API is asked for a wider page than the caller wants because results
 	// are filtered against the query afterwards: MangaDex matches loosely, so a
 	// 1:1 page comes back short. 50 is the API's own per-page ceiling.
-	requestLimit := min(limit*4, 50)
+	requestLimit := min(query.Limit*4, 50)
 
 	values := url.Values{}
-	values.Set("title", query)
+	values.Set("title", query.Raw)
 	values.Set("limit", strconv.Itoa(requestLimit))
 	values.Add("includes[]", "cover_art")
 
@@ -195,23 +188,10 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("search mangadex titles: %w", err)
 	}
 
-	items := make([]connectors.MangaResult, 0, min(limit, len(payload.Data)))
+	items := make([]connectors.MangaResult, 0, min(query.Limit, len(payload.Data)))
 	for _, item := range payload.Data {
-		bestTitle := pickBestTitle(item.Attributes.Title)
-		englishRelatedTitles := collectEnglishRelatedTitles(bestTitle, item.Attributes.Title, item.Attributes.AltTitles)
-		if bestTitle == "" {
-			if len(englishRelatedTitles) > 0 {
-				bestTitle = englishRelatedTitles[0]
-			} else {
-				bestTitle = "Untitled"
-			}
-		}
-		englishRelatedTitles = removePrimaryTitle(englishRelatedTitles, bestTitle)
-
-		searchNames := make([]string, 0, 1+len(englishRelatedTitles))
-		searchNames = append(searchNames, bestTitle)
-		searchNames = append(searchNames, englishRelatedTitles...)
-		if !searchutil.AnyCandidateMatches(searchNames, normalizedQuery, queryTokens) {
+		bestTitle, englishRelatedTitles := pickTitles(item.Attributes.Title, item.Attributes.AltTitles)
+		if !query.Matches(append([]string{bestTitle}, englishRelatedTitles...)...) {
 			continue
 		}
 
@@ -225,12 +205,12 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceItemID:  item.ID,
 			Title:         bestTitle,
 			RelatedTitles: englishRelatedTitles,
-			URL:           c.canonicalBaseURL() + "/title/" + item.ID,
+			URL:           c.HomeURL() + "/title/" + item.ID,
 			CoverImageURL: pickCoverImageURL(item.ID, item.Relationships),
 			LatestChapter: latestChapter,
 		})
 
-		if len(items) >= limit {
+		if len(items) >= query.Limit {
 			break
 		}
 	}
@@ -267,29 +247,21 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 			continue
 		}
 
-		return c.canonicalBaseURL() + "/chapter/" + chapterID, nil
+		return c.HomeURL() + "/chapter/" + chapterID, nil
 	}
 
 	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 }
 
-// parseTitleURL extracts the title id from a series URL (/title/{id} with an
-// optional trailing slug segment).
+// parseTitleURL checks the URL is this site's and extracts the title id from
+// its /title/{id} path (an optional trailing slug segment is ignored).
 func (c *Connector) parseTitleURL(rawURL string) (string, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	parsed, err := c.ParseOwnedURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to mangadex")
+		return "", err
 	}
 
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	segments := connectors.PathSegments(parsed)
 	if len(segments) < 2 || segments[0] != "title" {
 		return "", fmt.Errorf("mangadex url must match /title/{id}")
 	}
@@ -300,36 +272,6 @@ func (c *Connector) parseTitleURL(rawURL string) (string, error) {
 	}
 
 	return titleID, nil
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo. The API and cover hosts are subdomains
-// of the site domain, so the one entry covers them.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: MangaDex is a readable site in the
-// default tier — its own reader is fine, but scanlations reach it after the
-// origin sites and it freezes on licensed series.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is deliberately the production site rather than c.apiBaseURL: the API host is
-// where requests go (a test server in tests) and never serves pages, while the
-// URLs handed back are stored in trackers and opened by the reader's browser.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalSiteURL
 }
 
 func pickBestTitle(titleMap map[string]string) string {
@@ -349,7 +291,11 @@ func pickBestTitle(titleMap map[string]string) string {
 	return ""
 }
 
-func collectEnglishRelatedTitles(primaryTitle string, titleMap map[string]string, altTitles []map[string]string) []string {
+// pickTitles chooses the display title and the English alternates worth
+// storing beside it, out of the record's title map and altTitles. A record with
+// no usable primary title is named after its first English alternate, which is
+// then no longer an alternate; one with nothing at all is "Untitled".
+func pickTitles(titleMap map[string]string, altTitles []map[string]string) (string, []string) {
 	candidates := make([]string, 0, len(titleMap)+(len(altTitles)*2))
 	for _, value := range titleMap {
 		candidates = append(candidates, value)
@@ -360,51 +306,16 @@ func collectEnglishRelatedTitles(primaryTitle string, titleMap map[string]string
 		}
 	}
 
-	filtered := searchutil.FilterEnglishAlphabetNames(candidates)
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	primaryKey := searchutil.Normalize(primaryTitle)
-	if primaryKey == "" {
-		return filtered
-	}
-
-	relatedOnly := make([]string, 0, len(filtered))
-	for _, candidate := range filtered {
-		if searchutil.Normalize(candidate) == primaryKey {
-			continue
+	title := pickBestTitle(titleMap)
+	related := searchutil.RelatedTitles(title, candidates)
+	if title == "" {
+		if len(related) == 0 {
+			return "Untitled", nil
 		}
-		relatedOnly = append(relatedOnly, candidate)
+		title = related[0]
+		related = searchutil.RelatedTitles(title, related)
 	}
-	if len(relatedOnly) == 0 {
-		return nil
-	}
-
-	return relatedOnly
-}
-
-func removePrimaryTitle(values []string, primaryTitle string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-
-	primaryKey := searchutil.Normalize(primaryTitle)
-	if primaryKey == "" {
-		return values
-	}
-
-	filtered := make([]string, 0, len(values))
-	for _, value := range values {
-		if searchutil.Normalize(value) == primaryKey {
-			continue
-		}
-		filtered = append(filtered, value)
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-	return filtered
+	return title, related
 }
 
 func pickCoverImageURL(mangaID string, relationships []mangaRelationship) string {
@@ -453,24 +364,21 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 		return nil, nil, fmt.Errorf("fetch mangadex feed: %w", err)
 	}
 
-	var latest *float64
-	var latestReleaseAt *time.Time
+	var latest connectors.LatestReading
 	for _, chapter := range payload.Data {
 		parsed := parseChapterNumber(chapter.Attributes.Chapter)
 		if parsed == nil {
 			continue
 		}
-		if latest == nil || *parsed > *latest {
-			latest = parsed
-			latestReleaseAt = parseChapterTime(
-				chapter.Attributes.PublishAt,
-				chapter.Attributes.ReadableAt,
-				chapter.Attributes.CreatedAt,
-			)
-		}
+		latest.Add(*parsed, parseChapterTime(
+			chapter.Attributes.PublishAt,
+			chapter.Attributes.ReadableAt,
+			chapter.Attributes.CreatedAt,
+		))
 	}
 
-	return latest, latestReleaseAt, nil
+	latestChapter, latestReleaseAt := latest.Result()
+	return latestChapter, latestReleaseAt, nil
 }
 
 // feedURL builds a chapter feed request. Both callers share one builder so the

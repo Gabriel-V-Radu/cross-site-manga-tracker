@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +28,25 @@ import (
 // That is why this connector deliberately does not implement
 // connectors.OfflineChapterLinker; see ResolveChapterURL.
 
+const (
+	canonicalHost    = "mangafire.to"
+	canonicalBaseURL = "https://" + canonicalHost
+)
+
+// site is the connector's identity. Its Home is the origin every returned or
+// stored URL is built on: deliberately the production host rather than
+// baseURL, which is where requests go (a test server in tests), while the URLs
+// handed back are stored in trackers and opened by the reader's browser, so
+// they must always point at the real site. MangaFire is a readable aggregator
+// in the default tier.
+var site = connectors.Site{
+	SiteKey:   "mangafire",
+	SiteName:  "MangaFire",
+	SiteHosts: []string{canonicalHost},
+	Home:      canonicalBaseURL,
+	Rank:      connectors.ReaderRankDefault,
+}
+
 // chapterLanguage is the only language this connector reads. MangaFire hosts a
 // title in several languages at once and its title payload describes all of them
 // together: `latestChapter` is the highest number in *any* language, and
@@ -42,11 +60,14 @@ import (
 // date this connector reports is derived from it.
 const chapterLanguage = "en"
 
+// Connector reads MangaFire through its signed JSON API. The embedded Site
+// supplies Key, Name, Kind, the SiteInfo methods and the URL helpers; baseURL
+// is where requests go (the live site, or a test server).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
-	signer      *signer
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
+	signer     *signer
 
 	// breaker classifies outages the shared per-host throttle cannot see
 	// (Cloudflare challenges, token rejections) and escalates its cooldown on
@@ -58,40 +79,33 @@ type Connector struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     "https://mangafire.to",
-		allowedHost: []string{"mangafire.to"},
-		httpClient:  connectors.NewThrottledClient(),
-		signer:      newSigner(),
-		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		Site:       site,
+		baseURL:    canonicalBaseURL,
+		httpClient: connectors.NewThrottledClient(),
+		signer:     newSigner(),
+		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident;
+// tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = []string{"mangafire.to"}
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		baseURL:     strings.TrimRight(baseURL, "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
-		signer:      newSigner(),
-		breaker:     connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		Site:       identity,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		httpClient: client,
+		signer:     newSigner(),
+		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
 	}
-}
-
-func (c *Connector) Key() string {
-	return "mangafire"
-}
-
-func (c *Connector) Name() string {
-	return "MangaFire"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
 }
 
 type apiPoster struct {
@@ -209,16 +223,14 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
-
 	params := url.Values{}
-	params.Set("keyword", query)
-	params.Set("limit", strconv.Itoa(limit))
+	params.Set("keyword", query.Raw)
+	params.Set("limit", strconv.Itoa(query.Limit))
 	var response apiTitlesResponse
 	if err := c.fetchAPI(ctx, "/api/titles", params, &response); err != nil {
 		return nil, fmt.Errorf("search mangafire titles: %w", err)
@@ -229,8 +241,12 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if strings.TrimSpace(item.HID) == "" {
 			continue
 		}
-		results = append(results, c.resultFromAPITitle(item))
-		if len(results) >= limit {
+		result := c.resultFromAPITitle(item)
+		if !query.Matches(append([]string{result.Title, item.Slug}, result.RelatedTitles...)...) {
+			continue
+		}
+		results = append(results, result)
+		if len(results) >= query.Limit {
 			break
 		}
 	}
@@ -279,7 +295,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		slug = detail.Slug
 	}
 
-	return c.canonicalBaseURL() + "/title/" + titleKey(hid, slug) + "/chapter/" + strconv.FormatInt(match.ID, 10), nil
+	return c.HomeURL() + "/title/" + titleKey(hid, slug) + "/chapter/" + strconv.FormatInt(match.ID, 10), nil
 }
 
 // Deliberately NOT a connectors.OfflineChapterLinker. Until the SPA rebuild the
@@ -298,20 +314,12 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 // current /title/{hid}-{slug} URLs and the legacy /manga/{slug}.{hid} and
 // /read/{slug}.{hid}/... URLs that existing trackers still have stored.
 func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", "", fmt.Errorf("url is required")
+	parsed, err := c.ParseOwnedURL(rawURL)
+	if err != nil {
+		return "", "", err
 	}
 
-	parsed, parseErr := url.Parse(trimmed)
-	if parseErr != nil {
-		return "", "", fmt.Errorf("invalid url: %w", parseErr)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", "", fmt.Errorf("url does not belong to mangafire")
-	}
-
-	segments := strings.Split(strings.Trim(path.Clean(parsed.Path), "/"), "/")
+	segments := connectors.PathSegments(parsed)
 	if len(segments) < 2 {
 		return "", "", fmt.Errorf("mangafire url must include a title id")
 	}
@@ -340,12 +348,15 @@ func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err e
 }
 
 func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle, error) {
+	path := "/api/titles/" + hid
 	var response apiTitleDetailResponse
-	if err := c.fetchAPI(ctx, "/api/titles/"+hid, nil, &response); err != nil {
+	if err := c.fetchAPI(ctx, path, nil, &response); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(response.Data.HID) == "" {
-		return nil, fmt.Errorf("mangafire title %q not found", hid)
+		// An empty record is the API's way of saying the hid names no title;
+		// typed as a 404 so callers classify it with IsNotFound.
+		return nil, fmt.Errorf("mangafire title %q not found: %w", hid, &connectors.HTTPStatusError{StatusCode: http.StatusNotFound, URL: c.baseURL + path})
 	}
 	return &response.Data, nil
 }
@@ -413,37 +424,28 @@ func (c *Connector) fetchChapters(ctx context.Context, hid string, stop func(pag
 // payload can supply neither for a multilingual series (see chapterLanguage).
 // A title with no English chapters yields (nil, nil, nil) — absent, not an
 // error, and distinct from a fetch that failed.
+//
+// A number can be uploaded more than once (a re-release, a second group); the
+// shared accumulator keeps the first date it sees for the winning number rather
+// than the newest upload's, since a re-upload is not the release.
 func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*float64, *time.Time, error) {
 	// The listing is newest-first, so the highest number is on the first page.
 	chapters, err := c.fetchChapters(ctx, hid, func([]apiChapter) bool { return true })
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(chapters) == 0 {
-		return nil, nil, nil
-	}
 
-	latest := chapters[0].Number
+	var latest connectors.LatestReading
 	for _, entry := range chapters {
-		if entry.Number > latest {
-			latest = entry.Number
-		}
-	}
-
-	// A number can be uploaded more than once; the newest upload of it is the
-	// one that dates the release.
-	var releaseAt *time.Time
-	for _, entry := range chapters {
-		if !connectors.SameChapter(entry.Number, latest) || entry.CreatedAt <= 0 {
-			continue
-		}
-		createdAt := time.Unix(entry.CreatedAt, 0).UTC()
-		if releaseAt == nil || createdAt.After(*releaseAt) {
+		var releaseAt *time.Time
+		if entry.CreatedAt > 0 {
+			createdAt := time.Unix(entry.CreatedAt, 0).UTC()
 			releaseAt = &createdAt
 		}
+		latest.Add(entry.Number, releaseAt)
 	}
-
-	return &latest, releaseAt, nil
+	chapter, releaseAt := latest.Result()
+	return chapter, releaseAt, nil
 }
 
 func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
@@ -470,7 +472,7 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		SourceItemID:  key,
 		Title:         title,
 		RelatedTitles: buildRelatedTitles(title, item.Slug, item.AltTitles),
-		URL:           c.canonicalBaseURL() + "/title/" + key,
+		URL:           c.HomeURL() + "/title/" + key,
 		CoverImageURL: coverImageURL,
 	}
 }
@@ -495,28 +497,13 @@ func titleKey(hid string, slug string) string {
 	return hid + "-" + slug
 }
 
+// buildRelatedTitles offers the prettified slug alongside the API's alternate
+// titles: the slug is often the romanized form a reader searches by.
 func buildRelatedTitles(title string, slug string, altTitles []string) []string {
 	candidates := make([]string, 0, len(altTitles)+1)
 	candidates = append(candidates, connectors.PrettifySlug(slug))
-	candidates = append(candidates, searchutil.FilterEnglishAlphabetNames(altTitles)...)
-	candidates = searchutil.UniqueNonEmpty(candidates)
-
-	titleKey := searchutil.Normalize(title)
-	filtered := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		candidateKey := searchutil.Normalize(candidate)
-		if candidateKey == "" {
-			continue
-		}
-		if titleKey != "" && candidateKey == titleKey {
-			continue
-		}
-		filtered = append(filtered, candidate)
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-	return filtered
+	candidates = append(candidates, altTitles...)
+	return searchutil.RelatedTitles(title, candidates)
 }
 
 func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) error {
@@ -524,7 +511,9 @@ func (c *Connector) fetchJSON(ctx context.Context, endpoint string, target any) 
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if remaining, reason := c.CooldownRemaining(); remaining > 0 {
-			return fmt.Errorf("mangafire %s, cooling down for %s: %w", reason, remaining.Round(time.Second), &connectors.HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint})
+			// The same error the shared throttle returns for an open circuit,
+			// so callers classify both breakers identically.
+			return fmt.Errorf("mangafire %s: %w", reason, &connectors.SourceCoolingDownError{Host: canonicalHost, RetryAfter: remaining})
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -674,33 +663,4 @@ func computeRetryDelay(attempt int, retryAfter string) time.Duration {
 	default:
 		return 1500 * time.Millisecond
 	}
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: MangaFire is a readable
-// aggregator in the default tier.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on.
-// It is deliberately the production host rather than c.baseURL: c.baseURL is
-// where requests go (a test server in tests), while the URLs handed back are
-// stored in trackers and opened by the reader's browser, so they must always
-// point at the real site.
-func (c *Connector) canonicalBaseURL() string {
-	return "https://mangafire.to"
 }

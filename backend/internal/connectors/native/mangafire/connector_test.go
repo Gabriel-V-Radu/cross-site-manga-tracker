@@ -2,6 +2,7 @@ package mangafire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ func newFakeAPIServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		keyword := r.URL.Query().Get("keyword")
 		switch keyword {
-		case "", "one":
+		case "", "one", "piece":
 			_, _ = w.Write([]byte(`{"items":[
 				{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece"},
 				{"id":2,"hid":"oo4","slug":"one-punch-man","title":"One-Punch Man","poster":{"medium":"https://cdn.example/opm@280.jpg"},"latestChapter":264,"chapterUpdatedAt":"1mo ago","url":"/title/oo4-one-punch-man"}
@@ -247,6 +248,24 @@ func TestMangaFireConnectorSearchByTitle(t *testing.T) {
 	}
 }
 
+// TestMangaFireSearchDropsUnrelatedResults pins the shared post-filter: the API
+// answers "piece" with One-Punch Man as well, which matches neither the title,
+// the slug nor an alternate title, so it is not returned.
+func TestMangaFireSearchDropsUnrelatedResults(t *testing.T) {
+	server := newFakeAPIServer(t)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+
+	results, err := connector.SearchByTitle(context.Background(), "piece", 10)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].SourceItemID != "dkw-one-piece" {
+		t.Fatalf("expected only One Piece to survive the post-filter, got %v", results)
+	}
+}
+
 func TestMangaFireConnectorResolveChapterURL(t *testing.T) {
 	server := newFakeAPIServer(t)
 	defer server.Close()
@@ -380,8 +399,15 @@ func TestMangaFireConnectorCoolsDownAfterForbidden(t *testing.T) {
 		t.Fatalf("expected a single request before cooldown, got %d", requests)
 	}
 
-	if _, err := connector.SearchByTitle(context.Background(), "one piece", 5); err == nil {
+	_, err := connector.SearchByTitle(context.Background(), "one piece", 5)
+	if err == nil {
 		t.Fatalf("expected fail-fast error while cooling down")
+	}
+	// The refusal is the same typed error the shared throttle returns for its
+	// own open circuit, so the poller classifies the two together.
+	var cooling *connectors.SourceCoolingDownError
+	if !errors.As(err, &cooling) {
+		t.Fatalf("expected a SourceCoolingDownError while cooling down, got %v", err)
 	}
 	if requests != 1 {
 		t.Fatalf("expected no additional requests while cooling down, got %d", requests)

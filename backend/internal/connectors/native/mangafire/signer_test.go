@@ -68,3 +68,12 @@ func TestSignerParamOrderStable(t *testing.T) {
 		t.Fatalf("token changed with param order: %q vs %q", a, b)
 	}
 }
+
+// TestSignerRefusesRepeatedParams: the signer can only sign one value per key
+// while the request would send all of them, so a repeated key must be refused
+// rather than signed under its first value.
+func TestSignerRefusesRepeatedParams(t *testing.T) {
+	if _, err := newSigner().Sign("/api/titles", url.Values{"keyword": {"a", "b"}}); err == nil {
+		t.Fatalf("expected a repeated query parameter to be refused")
+	}
+}

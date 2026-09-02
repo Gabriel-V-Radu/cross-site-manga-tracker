@@ -6,7 +6,6 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,16 +15,28 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
-// defaultAllowedHosts is the one list behind both the constructors' default and
-// Hosts(): asurascans.com is the current domain (asuracomic.net answers with a
-// 301 to it, verified 2026-09-01) and the one NewConnector fetches from;
-// asuracomic.net is kept because trackers were linked on it before the move,
-// so URLs stored in either era still resolve to this connector.
-var defaultAllowedHosts = []string{"asurascans.com", "asuracomic.net"}
+// defaultBaseURL is the live domain: asuracomic.net answers with a 301 to it
+// (verified 2026-09-01) and it is the one NewConnector fetches from.
+const defaultBaseURL = "https://asurascans.com"
+
+// site is the connector's identity. asurascans.com is the current domain;
+// asuracomic.net is kept because trackers were linked on it before the move, so
+// URLs stored in either era still resolve to this connector. Asura is an origin
+// scanlator: for its own series chapters appear here before any aggregator
+// mirrors them.
+var site = connectors.Site{
+	SiteKey:   "asuracomic",
+	SiteName:  "AsuraComic",
+	SiteHosts: []string{"asurascans.com", "asuracomic.net"},
+	Home:      defaultBaseURL,
+	Rank:      connectors.ReaderRankOrigin,
+}
 
 var (
 	seriesHrefPattern                = regexp.MustCompile(`(?i)href=["'](?:https?://[^"']+)?/?(?:series|comics)/([a-z0-9-]+)["']`)
+	seriesAnchorPattern              = regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/?(?:series|comics)/([a-z0-9-]+)["'][^>]*>(.*?)</a>`)
 	chapterHrefPattern               = regexp.MustCompile(`(?i)(?:/|[a-z0-9-]+/)?chapter/(\d+(?:\.\d+)?)`)
+	seriesChapterHrefPattern         = regexp.MustCompile(`(?i)(?:/(?:series|comics)/)?([a-z0-9-]+)/chapter/(\d+(?:\.\d+)?)`)
 	chapterPublishedEscPattern       = regexp.MustCompile(`(?is)\\"name\\":\s*(\d+(?:\.\d+)?).*?\\"published_at\\":\\"([^\\"]+)\\"`)
 	chapterPublishedRawPattern       = regexp.MustCompile(`(?is)"name":\s*(\d+(?:\.\d+)?).*?"published_at":"([^"]+)"`)
 	chapterPublishedEscNumberPattern = regexp.MustCompile(`(?is)\\"number\\":\s*(?:\[0,)?\s*(\d+(?:\.\d+)?)\s*\]?[^\r\n]*?\\"published_at\\":\s*(?:\[0,)?\\"([^\\"]+)\\"\]?`)
@@ -38,40 +49,56 @@ var (
 	monthDayOrdinalYearPattern       = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
 )
 
+// Connector reads asurascans.com by scraping its series and browse pages. The
+// embedded Site supplies Key, Name, Kind and the SiteInfo methods; baseURL is
+// where requests go and, unlike the other scrapers, also the canonical origin
+// (see HomeURL).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
 }
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     "https://asurascans.com",
-		allowedHost: defaultAllowedHosts,
-		httpClient:  connectors.NewThrottledClient(),
+		Site:       site,
+		baseURL:    defaultBaseURL,
+		httpClient: connectors.NewThrottledClient(),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets the shared
+// throttled one, so no caller can construct an unpaced connector by accident;
+// tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = connectors.NewThrottledClient()
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = defaultAllowedHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
-	return &Connector{baseURL: strings.TrimRight(baseURL, "/"), allowedHost: allowedHost, httpClient: client}
+	return &Connector{
+		Site:       identity,
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		httpClient: client,
+	}
 }
 
-func (c *Connector) Key() string {
-	return "asuracomic"
+// HomeURL is the origin every returned or stored URL is built on. Unlike the
+// other scrapers it follows c.baseURL instead of a pinned production constant:
+// Asura has already moved domain once, so the base is the single place that
+// choice is made, and a stored link must point at the same origin the connector
+// verified the chapter on.
+func (c *Connector) HomeURL() string {
+	return c.baseURL
 }
 
-func (c *Connector) Name() string {
-	return "AsuraComic"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
+// AbsoluteURL resolves a scraped href against c.baseURL, for the reason HomeURL
+// gives.
+func (c *Connector) AbsoluteURL(raw string) string {
+	return connectors.AbsoluteURL(c.baseURL, raw)
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
@@ -80,46 +107,20 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to asuracomic")
-	}
-
-	seriesID, _, err := parseSeriesIDFromPath(parsed.Path)
+	seriesID, _, err := c.parseSeriesURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
-
-	seriesID = strings.TrimSpace(seriesID)
-	if seriesID == "" || !isValidSeriesID(seriesID) {
-		return nil, fmt.Errorf("invalid asuracomic series id")
-	}
-
 	return c.resolveBySeriesID(ctx, seriesID)
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
-	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
-
-	body, err := c.fetchPage(ctx, c.searchPageURL(title))
+	body, err := c.fetchPage(ctx, c.searchPageURL(query.Raw))
 	if err != nil {
 		return nil, fmt.Errorf("fetch asuracomic search page: %w", err)
 	}
@@ -129,9 +130,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
-	results := make([]connectors.MangaResult, 0, limit)
+	results := make([]connectors.MangaResult, 0, query.Limit)
 	for _, seriesID := range seriesIDs {
-		if len(results) >= limit {
+		if len(results) >= query.Limit {
 			break
 		}
 
@@ -143,11 +144,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			continue
 		}
 
-		if !searchutil.AnyCandidateMatches(
-			[]string{resolved.Title, resolved.SourceItemID, anchorTitle, seriesSlugTitle},
-			normalizedQuery,
-			queryTokens,
-		) {
+		if !query.Matches(resolved.Title, resolved.SourceItemID, anchorTitle, seriesSlugTitle) {
 			continue
 		}
 
@@ -162,27 +159,9 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("invalid chapter")
 	}
 
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to asuracomic")
-	}
-
-	seriesID, routeKind, err := parseSeriesIDFromPath(parsed.Path)
+	seriesID, routeKind, err := c.parseSeriesURL(rawURL)
 	if err != nil {
 		return "", err
-	}
-
-	seriesID = strings.TrimSpace(seriesID)
-	if seriesID == "" || !isValidSeriesID(seriesID) {
-		return "", fmt.Errorf("invalid asuracomic series id")
 	}
 	if routeKind == "series" {
 		canonicalSeriesID, resolveErr := c.findCanonicalSeriesID(ctx, seriesID)
@@ -215,7 +194,31 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 			connectors.ErrChapterNotFound)
 	}
 
-	return c.absoluteURL("/comics/" + seriesID + "/chapter/" + chapterSegment), nil
+	return c.AbsoluteURL("/comics/" + seriesID + "/chapter/" + chapterSegment), nil
+}
+
+// parseSeriesURL checks the URL is this site's and reads the series id and the
+// route it arrived on ("comics", or the pre-move "series") out of its path.
+func (c *Connector) parseSeriesURL(rawURL string) (string, string, error) {
+	parsed, err := c.ParseOwnedURL(rawURL)
+	if err != nil {
+		return "", "", err
+	}
+
+	segments := connectors.PathSegments(parsed)
+	if len(segments) < 2 {
+		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
+	}
+	routeKind := strings.ToLower(strings.TrimSpace(segments[0]))
+	if routeKind != "series" && routeKind != "comics" {
+		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
+	}
+
+	seriesID := strings.TrimSpace(segments[1])
+	if seriesID == "" || !isValidSeriesID(seriesID) {
+		return "", "", fmt.Errorf("invalid asuracomic series id")
+	}
+	return seriesID, routeKind, nil
 }
 
 func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
@@ -239,7 +242,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 }
 
 func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
-	body, err := c.fetchPage(ctx, c.absoluteURL("/comics/"+url.PathEscape(seriesID)))
+	body, err := c.fetchPage(ctx, c.AbsoluteURL("/comics/"+url.PathEscape(seriesID)))
 	if err != nil {
 		return nil, fmt.Errorf("fetch series page: %w", err)
 	}
@@ -249,8 +252,7 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		title = prettifySeriesID(seriesID)
 	}
 	latestChapter, releaseAtByChapter := extractLatestChapterAndReleaseAt(body, seriesID)
-	coverImageURL := extractCoverImageURL(body)
-	coverImageURL = c.absoluteURL(coverImageURL)
+	coverImageURL := c.AbsoluteURL(extractCoverImageURL(body))
 	lastUpdatedAt := releaseAtByChapter
 	if lastUpdatedAt == nil {
 		lastUpdatedAt = extractLastUpdatedAt(body)
@@ -260,7 +262,7 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		SourceKey:     c.Key(),
 		SourceItemID:  seriesID,
 		Title:         title,
-		URL:           c.absoluteURL("/comics/" + seriesID),
+		URL:           c.AbsoluteURL("/comics/" + seriesID),
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
@@ -305,58 +307,11 @@ func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) 
 }
 
 func (c *Connector) searchPageURL(query string) string {
-	return c.absoluteURL("/browse?page=1&q=" + url.QueryEscape(strings.TrimSpace(query)))
+	return c.AbsoluteURL("/browse?page=1&q=" + url.QueryEscape(strings.TrimSpace(query)))
 }
 
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
 	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
-}
-
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo (see defaultAllowedHosts for why the
-// pre-move domain is still claimed).
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: Asura is an origin scanlator —
-// for its own series chapters appear here before any aggregator mirrors them.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankOrigin
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on.
-// Unlike the other scrapers it follows c.baseURL instead of a pinned
-// production constant: Asura has already moved domain once, so the base is the
-// single place that choice is made, and a stored link must point at the same
-// origin the connector verified the chapter on.
-func (c *Connector) canonicalBaseURL() string {
-	return c.baseURL
-}
-
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return c.canonicalBaseURL() + trimmed
-	}
-	return c.canonicalBaseURL() + "/" + trimmed
 }
 
 func collectUniqueSeriesIDs(body string) []string {
@@ -385,17 +340,19 @@ func collectUniqueSeriesIDs(body string) []string {
 	return ids
 }
 
+// extractAnchorTextForSeriesID returns the first usable link text of an anchor
+// pointing at seriesID; the series anchors are matched once with a shared
+// pattern and the id compared afterwards.
 func extractAnchorTextForSeriesID(body string, seriesID string) string {
 	if seriesID == "" {
 		return ""
 	}
-	pattern := regexp.MustCompile(`(?is)<a[^>]+href=["'](?:https?://[^"']+)?/?(?:series|comics)/` + regexp.QuoteMeta(seriesID) + `["'][^>]*>(.*?)</a>`)
-	matches := pattern.FindAllStringSubmatch(body, -1)
+	matches := seriesAnchorPattern.FindAllStringSubmatch(body, -1)
 	for _, match := range matches {
-		if len(match) < 2 {
+		if len(match) < 3 || !strings.EqualFold(match[1], seriesID) {
 			continue
 		}
-		candidate := connectors.CleanText(match[1])
+		candidate := connectors.CleanText(match[2])
 		if candidate == "" || strings.EqualFold(candidate, "poster") || strings.EqualFold(candidate, "image") {
 			continue
 		}
@@ -433,22 +390,36 @@ func extractCoverImageURL(body string) string {
 	return strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaImagePattern, body)))
 }
 
-func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {
-	chapterPattern := chapterHrefPattern
-	if strings.TrimSpace(seriesID) != "" {
-		chapterPattern = regexp.MustCompile(`(?i)(?:/(?:series|comics)/)?` + regexp.QuoteMeta(seriesID) + `/chapter/(\d+(?:\.\d+)?)`)
+// chapterHrefIndexes locates the chapter links of seriesID in body: each entry
+// is [start, end, chapterStart, chapterEnd] of a match. Links of other series
+// on the page are skipped; when the page spells its chapter links without the
+// series slug at all, every chapter link is taken.
+func chapterHrefIndexes(body string, seriesID string) [][]int {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return chapterHrefPattern.FindAllStringSubmatchIndex(body, -1)
 	}
 
-	chapterIndexes := chapterPattern.FindAllStringSubmatchIndex(body, -1)
-	if len(chapterIndexes) == 0 && strings.TrimSpace(seriesID) != "" {
-		chapterIndexes = chapterHrefPattern.FindAllStringSubmatchIndex(body, -1)
+	var indexes [][]int
+	for _, loc := range seriesChapterHrefPattern.FindAllStringSubmatchIndex(body, -1) {
+		if len(loc) < 6 || !strings.EqualFold(body[loc[2]:loc[3]], seriesID) {
+			continue
+		}
+		indexes = append(indexes, []int{loc[0], loc[1], loc[4], loc[5]})
 	}
+	if len(indexes) == 0 {
+		return chapterHrefPattern.FindAllStringSubmatchIndex(body, -1)
+	}
+	return indexes
+}
+
+func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {
+	chapterIndexes := chapterHrefIndexes(body, seriesID)
 	if len(chapterIndexes) == 0 {
 		return nil, nil
 	}
 
-	var latestByPair *float64
-	var releaseAtByPair *time.Time
+	var latest connectors.LatestReading
 	for _, loc := range chapterIndexes {
 		if len(loc) < 4 {
 			continue
@@ -461,38 +432,23 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 		}
 
 		segmentStart := loc[0]
-		segmentEnd := segmentStart + 2200
-		if segmentEnd > len(body) {
-			segmentEnd = len(body)
-		}
-		if segmentStart < 0 || segmentStart >= len(body) || segmentStart >= segmentEnd {
+		segmentEnd := min(segmentStart+2200, len(body))
+		if segmentStart < 0 || segmentStart >= segmentEnd {
 			continue
 		}
 
 		segment := body[segmentStart:segmentEnd]
-		dateRaw := monthDayOrdinalYearPattern.FindString(segment)
-		parsedDate := parseAsuraDate(dateRaw)
-
-		if latestByPair == nil || parsedChapter > *latestByPair {
-			chapterValue := parsedChapter
-			latestByPair = &chapterValue
-			if parsedDate != nil {
-				dateValue := *parsedDate
-				releaseAtByPair = &dateValue
-			} else {
-				releaseAtByPair = nil
-			}
-		}
+		latest.Add(parsedChapter, parseAsuraDate(monthDayOrdinalYearPattern.FindString(segment)))
 	}
 
-	if latestByPair != nil {
-		if publishedAt := extractPublishedAtForChapter(body, *latestByPair); publishedAt != nil {
-			return latestByPair, publishedAt
-		}
-		return latestByPair, releaseAtByPair
+	latestChapter, releaseAt := latest.Result()
+	if latestChapter == nil {
+		return nil, nil
 	}
-
-	return nil, nil
+	if publishedAt := extractPublishedAtForChapter(body, *latestChapter); publishedAt != nil {
+		return latestChapter, publishedAt
+	}
+	return latestChapter, releaseAt
 }
 
 func extractLastUpdatedAt(body string) *time.Time {
@@ -586,20 +542,6 @@ func prettifySeriesID(seriesID string) string {
 		return "Untitled"
 	}
 	return pretty
-}
-
-func parseSeriesIDFromPath(rawPath string) (string, string, error) {
-	segments := strings.Split(strings.Trim(path.Clean(rawPath), "/"), "/")
-	if len(segments) < 2 {
-		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
-	}
-
-	routeKind := strings.ToLower(strings.TrimSpace(segments[0]))
-	if routeKind != "series" && routeKind != "comics" {
-		return "", "", fmt.Errorf("asuracomic url must match /comics/{id} or /series/{id}")
-	}
-
-	return strings.TrimSpace(segments[1]), routeKind, nil
 }
 
 func legacySearchQueryFromSeriesID(seriesID string) string {

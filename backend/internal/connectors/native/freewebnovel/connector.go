@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,16 +20,27 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
-const canonicalBaseURL = "https://freewebnovel.com"
+const (
+	canonicalHost    = "freewebnovel.com"
+	canonicalBaseURL = "https://" + canonicalHost
+)
 
-// siteHosts is the one list of hostnames this connector claims: both the
-// constructors' default and SiteInfo.Hosts read it, so the registry's URL
-// routing can never drift from the connector's own ownership check. Only
-// freewebnovel.com has ever been read here — other sites mirror the same
-// catalogue, but a mirror belongs in this list only once its URLs are
+// site is the connector's identity: the one list of hostnames it claims, and
+// the canonical origin every returned or stored URL is built on (deliberately
+// the production host rather than baseURL, which is a test server in tests,
+// while the URLs handed back are stored in trackers and opened by the reader's
+// browser). Only freewebnovel.com has ever been read here — other sites mirror
+// the same catalogue, but a mirror belongs in this list only once its URLs are
 // confirmed to follow the /novel/{slug}/chapter-{N} scheme the connector
-// parses and rebuilds.
-var siteHosts = []string{"freewebnovel.com"}
+// parses and rebuilds. FreeWebNovel is a readable novel site in the default
+// tier.
+var site = connectors.Site{
+	SiteKey:   "freewebnovel",
+	SiteName:  "FreeWebNovel",
+	SiteHosts: []string{canonicalHost},
+	Home:      canonicalBaseURL,
+	Rank:      connectors.ReaderRankDefault,
+}
 
 var (
 	searchRowSplitPattern    = regexp.MustCompile(`(?is)<div[^>]+class=["'][^"']*\bli-row\b[^"']*["'][^>]*>`)
@@ -47,10 +57,13 @@ var (
 	alternativeNamesPatt = regexp.MustCompile(`(?is)title=["']Alternative names["'][^>]*>.*?<div[^>]*class=["'][^"']*\bright\b[^"']*["'][^>]*>\s*<span[^>]*class=["'][^"']*\bs1\b[^"']*["'][^>]*>(.*?)</span>`)
 )
 
+// Connector reads freewebnovel.com by scraping its pages. The embedded Site
+// supplies Key, Name, Kind, the SiteInfo methods and the URL helpers; baseURL
+// is where requests go (the live site, or a test server).
 type Connector struct {
-	baseURL     string
-	allowedHost []string
-	httpClient  *http.Client
+	connectors.Site
+	baseURL    string
+	httpClient *http.Client
 
 	warmMu sync.Mutex
 	warmed bool
@@ -65,12 +78,16 @@ type searchEntry struct {
 
 func NewConnector() *Connector {
 	return &Connector{
-		baseURL:     canonicalBaseURL,
-		allowedHost: siteHosts,
-		httpClient:  newChromeHTTPClient(connectors.MinClientTimeout),
+		Site:       site,
+		baseURL:    canonicalBaseURL,
+		httpClient: newChromeHTTPClient(connectors.MinClientTimeout),
 	}
 }
 
+// NewConnectorWithOptions points the connector at another base URL (a test
+// server), optionally claiming other hosts. A nil client gets this connector's
+// own Chrome-fingerprint client (see newChromeHTTPClient), which is already
+// paced by the shared throttle; tests that want to stay unpaced pass their own.
 func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.Client) *Connector {
 	if client == nil {
 		client = newChromeHTTPClient(connectors.MinClientTimeout)
@@ -80,13 +97,14 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 			client.Jar = jar
 		}
 	}
-	if len(allowedHost) == 0 {
-		allowedHost = siteHosts
+	identity := site
+	if len(allowedHost) > 0 {
+		identity.SiteHosts = allowedHost
 	}
 	return &Connector{
-		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		allowedHost: allowedHost,
-		httpClient:  client,
+		Site:       identity,
+		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		httpClient: client,
 	}
 }
 
@@ -153,18 +171,6 @@ func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) 
 	return uconn, nil
 }
 
-func (c *Connector) Key() string {
-	return "freewebnovel"
-}
-
-func (c *Connector) Name() string {
-	return "FreeWebNovel"
-}
-
-func (c *Connector) Kind() string {
-	return connectors.KindNative
-}
-
 func (c *Connector) HealthCheck(ctx context.Context) error {
 	_, err := c.fetchPage(ctx, c.baseURL+"/home", "")
 	if err == nil {
@@ -176,41 +182,21 @@ func (c *Connector) HealthCheck(ctx context.Context) error {
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	slug, err := c.parseNovelURL(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("url does not belong to freewebnovel")
-	}
-
-	slug := extractNovelSlugFromPath(parsed.Path)
-	if slug == "" {
-		return nil, fmt.Errorf("freewebnovel url must match /novel/{id}")
+		return nil, err
 	}
 
 	return c.resolveBySlug(ctx, slug)
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
-	query := strings.TrimSpace(title)
-	if query == "" {
-		return nil, fmt.Errorf("title is required")
-	}
-	normalizedQuery := searchutil.Normalize(query)
-	queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
-	if normalizedQuery == "" || len(queryTokens) == 0 {
-		return nil, fmt.Errorf("title is required")
+	query, err := connectors.PrepareSearch(title, limit)
+	if err != nil {
+		return nil, err
 	}
 
-	limit = connectors.ClampSearchLimit(limit)
-
-	body, err := c.fetchPageResilient(ctx, c.baseURL+"/search?keyword="+url.QueryEscape(query), c.baseURL+"/")
+	body, err := c.fetchPageResilient(ctx, c.baseURL+"/search?keyword="+url.QueryEscape(query.Raw), c.baseURL+"/")
 	if err != nil {
 		return nil, fmt.Errorf("fetch freewebnovel search page: %w", err)
 	}
@@ -220,9 +206,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
-	results := make([]connectors.MangaResult, 0, min(limit, len(entries)))
+	results := make([]connectors.MangaResult, 0, min(query.Limit, len(entries)))
 	for _, entry := range entries {
-		if !searchutil.AnyCandidateMatches([]string{entry.Title, entry.Slug}, normalizedQuery, queryTokens) {
+		if !query.Matches(entry.Title, entry.Slug) {
 			continue
 		}
 
@@ -231,7 +217,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			SourceItemID:  entry.Slug,
 			Title:         entry.Title,
 			URL:           c.novelURL(entry.Slug),
-			CoverImageURL: c.absoluteURL(entry.CoverImage),
+			CoverImageURL: c.AbsoluteURL(entry.CoverImage),
 		}
 
 		if entry.LatestChapter != nil {
@@ -240,7 +226,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		}
 
 		results = append(results, result)
-		if len(results) >= limit {
+		if len(results) >= query.Limit {
 			break
 		}
 	}
@@ -256,22 +242,9 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("invalid chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
 	}
 
-	trimmed := strings.TrimSpace(rawURL)
-	if trimmed == "" {
-		return "", fmt.Errorf("url is required")
-	}
-
-	parsed, err := url.Parse(trimmed)
+	slug, err := c.parseNovelURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-	if !c.isAllowedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("url does not belong to freewebnovel")
-	}
-
-	slug := extractNovelSlugFromPath(parsed.Path)
-	if slug == "" {
-		return "", fmt.Errorf("freewebnovel url must match /novel/{id}")
+		return "", err
 	}
 
 	// FreeWebNovel chapter URLs are a deterministic sequential index:
@@ -279,6 +252,26 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// index (taken from og:novel:lastest_chapter_url), so we can build the
 	// URL directly without fetching a chapter list.
 	return c.novelURL(slug) + "/chapter-" + connectors.FormatChapter(chapter), nil
+}
+
+// parseNovelURL checks the URL is this site's and reads the novel slug out of
+// its /novel/{slug} path; chapter pages (/novel/{slug}/chapter-{N}) share it.
+func (c *Connector) parseNovelURL(rawURL string) (string, error) {
+	parsed, err := c.ParseOwnedURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	segments := connectors.PathSegments(parsed)
+	if len(segments) < 2 || segments[0] != "novel" {
+		return "", fmt.Errorf("freewebnovel url must match /novel/{id}")
+	}
+
+	slug := strings.TrimSpace(segments[1])
+	if slug == "" {
+		return "", fmt.Errorf("freewebnovel url must match /novel/{id}")
+	}
+	return slug, nil
 }
 
 func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
@@ -290,7 +283,7 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	title := extractTitle(body, slug)
 	relatedTitles := extractRelatedTitles(body, title)
 
-	coverImageURL := c.absoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body))))
+	coverImageURL := c.AbsoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body))))
 
 	latestChapter := parseLatestChapterFromURL(connectors.FirstSubmatch(latestChapterURLPatt, body))
 	lastUpdatedAt := parseUpdateTime(connectors.FirstSubmatch(updateTimePattern, body))
@@ -382,6 +375,9 @@ func extractTitle(body string, slug string) string {
 	return titleFromSlug(slug)
 }
 
+// extractRelatedTitles reads the page's "Alternative names" block (a
+// comma-separated span) and the generic related-title markup, then reduces
+// them to the Latin-alphabet names worth storing beside the primary title.
 func extractRelatedTitles(body string, primaryTitle string) []string {
 	candidates := make([]string, 0, 16)
 
@@ -397,24 +393,7 @@ func extractRelatedTitles(body string, primaryTitle string) []string {
 	}
 
 	candidates = append(candidates, searchutil.ExtractRelatedTitles(body)...)
-	filtered := searchutil.FilterEnglishAlphabetNames(candidates)
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	primaryKey := searchutil.Normalize(primaryTitle)
-	related := make([]string, 0, len(filtered))
-	for _, candidate := range filtered {
-		if searchutil.Normalize(candidate) == primaryKey {
-			continue
-		}
-		related = append(related, candidate)
-	}
-	if len(related) == 0 {
-		return nil
-	}
-
-	return searchutil.UniqueNonEmpty(related)
+	return searchutil.RelatedTitles(primaryTitle, candidates)
 }
 
 // warm performs a best-effort homepage fetch so the shared cookie jar picks up
@@ -546,20 +525,6 @@ func parseUpdateTime(raw string) *time.Time {
 	return nil
 }
 
-func extractNovelSlugFromPath(rawPath string) string {
-	segments := strings.Split(strings.Trim(path.Clean(strings.TrimSpace(rawPath)), "/"), "/")
-	if len(segments) < 2 || segments[0] != "novel" {
-		return ""
-	}
-
-	slug := strings.TrimSpace(segments[1])
-	if slug == "" {
-		return ""
-	}
-
-	return slug
-}
-
 // titleFromSlug is the display-title fallback for a page that carries no
 // usable title. connectors.PrettifySlug leaves a slug made of nothing but
 // separators empty, while every tracker row needs something to show, so the
@@ -571,52 +536,8 @@ func titleFromSlug(slug string) string {
 	return "Untitled"
 }
 
-func (c *Connector) isAllowedHost(host string) bool {
-	return connectors.HostAllowed(host, c.allowedHost)
-}
-
-// Hosts implements connectors.SiteInfo.
-func (c *Connector) Hosts() []string {
-	return c.allowedHost
-}
-
-// HomeURL implements connectors.SiteInfo.
-func (c *Connector) HomeURL() string {
-	return c.canonicalBaseURL()
-}
-
-// ReaderRank implements connectors.SiteInfo: FreeWebNovel is a readable novel
-// site in the default tier.
-func (c *Connector) ReaderRank() int {
-	return connectors.ReaderRankDefault
-}
-
-// canonicalBaseURL is the origin every returned or stored URL is built on. It
-// is deliberately the production host rather than c.baseURL: c.baseURL is
-// where requests go (a test server in tests), while the URLs handed back are
-// stored in trackers and opened by the reader's browser, so they must always
-// point at the real site.
-func (c *Connector) canonicalBaseURL() string {
-	return canonicalBaseURL
-}
-
-func (c *Connector) absoluteURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "//") {
-		return "https:" + trimmed
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return c.canonicalBaseURL() + trimmed
-	}
-	return c.canonicalBaseURL() + "/" + trimmed
-}
-
+// novelURL is the stored, canonical address of a novel: always on the real
+// site, never on the base URL requests go to.
 func (c *Connector) novelURL(slug string) string {
-	return c.canonicalBaseURL() + "/novel/" + slug
+	return c.HomeURL() + "/novel/" + slug
 }
