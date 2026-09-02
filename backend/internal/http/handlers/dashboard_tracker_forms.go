@@ -10,6 +10,7 @@ import (
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 	"github.com/gabriel/cross-site-tracker/backend/internal/sourcepick"
 	"github.com/gofiber/fiber/v2"
@@ -162,7 +163,11 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Selected source does not exist", nil)
 	}
 
-	created, err := h.trackerRepo.Create(c.Context(), tracker)
+	// One transaction for the row, its tags and the pasted link.
+	created, err := h.trackerRepo.CreateWithLinks(c.Context(), tracker, repository.TrackerLinks{
+		TagIDs:      tagIDs,
+		ExtraSource: pastedLink,
+	})
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to create tracker", err)
 	}
@@ -170,14 +175,7 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
-
-	if err := h.trackerRepo.ReplaceTrackerTags(c.Context(), activeProfile.ID, created.ID, tagIDs); err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
-	}
 	if pastedLink != nil {
-		if err := h.trackerRepo.UpsertTrackerSource(c.Context(), activeProfile.ID, created.ID, *pastedLink); err != nil {
-			return h.fail(c, fiber.StatusInternalServerError, "Failed to save the pasted link", err)
-		}
 		h.invalidateLinkLookups()
 	}
 
@@ -420,32 +418,21 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Selected source does not exist", nil)
 	}
 
-	updated, err := h.trackerRepo.Update(c.Context(), activeProfile.ID, id, tracker)
+	// The row, the linked sources, the tags, the pasted link and the reading
+	// pin commit together: this used to be five separate writes, and a failure
+	// at the third left the title and sources saved and the tags and pin not.
+	updated, err := h.trackerRepo.SaveTrackerEdit(c.Context(), activeProfile.ID, id, tracker, repository.TrackerLinks{
+		Sources:          uniqueSources,
+		TagIDs:           tagIDs,
+		ExtraSource:      pastedLink,
+		SetReadingSource: true,
+		ReadingSourceID:  readingSourceID,
+	})
 	if err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to update tracker", err)
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker", err)
 	}
 	if updated == nil {
 		return h.fail(c, fiber.StatusNotFound, "Tracker not found", nil)
-	}
-
-	if err := h.trackerRepo.ReplaceTrackerSources(c.Context(), activeProfile.ID, id, uniqueSources); err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked sources", err)
-	}
-
-	if err := h.trackerRepo.ReplaceTrackerTags(c.Context(), activeProfile.ID, id, tagIDs); err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to save tracker tags", err)
-	}
-
-	// After ReplaceTrackerSources, so the freshly pasted link survives the
-	// replace instead of being wiped by it.
-	if pastedLink != nil {
-		if err := h.trackerRepo.UpsertTrackerSource(c.Context(), activeProfile.ID, id, *pastedLink); err != nil {
-			return h.fail(c, fiber.StatusInternalServerError, "Failed to save the pasted link", err)
-		}
-	}
-
-	if err := h.trackerRepo.SetReadingSource(c.Context(), activeProfile.ID, id, readingSourceID); err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to save reading site", err)
 	}
 
 	// The saved links or pin may differ from what the cached chapter URLs

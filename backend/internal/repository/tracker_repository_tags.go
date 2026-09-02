@@ -151,40 +151,8 @@ func (r *TrackerRepository) ReplaceTrackerTags(ctx context.Context, profileID in
 	}
 	defer tx.Rollback()
 
-	var trackerExists int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&trackerExists); err != nil {
-		return fmt.Errorf("check tracker ownership for tags: %w", err)
-	}
-	if trackerExists == 0 {
-		return nil
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tracker_tags WHERE tracker_id = ?`, trackerID); err != nil {
-		return fmt.Errorf("delete tracker tags: %w", err)
-	}
-
-	uniqueTagIDs := dedupePositiveInt64(tagIDs)
-	if len(uniqueTagIDs) > 0 {
-		validTagIDs, err := profileTagIDsInTx(ctx, tx, profileID, uniqueTagIDs)
-		if err != nil {
-			return err
-		}
-
-		insertStmt, err := tx.PrepareContext(ctx, `INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?)`)
-		if err != nil {
-			return fmt.Errorf("prepare tracker tag insert: %w", err)
-		}
-		defer insertStmt.Close()
-
-		for _, tagID := range uniqueTagIDs {
-			if _, exists := validTagIDs[tagID]; !exists {
-				continue
-			}
-
-			if _, err := insertStmt.ExecContext(ctx, trackerID, tagID); err != nil {
-				return fmt.Errorf("insert tracker tag: %w", err)
-			}
-		}
+	if err := replaceTrackerTagsInTx(ctx, tx, profileID, trackerID, tagIDs); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {

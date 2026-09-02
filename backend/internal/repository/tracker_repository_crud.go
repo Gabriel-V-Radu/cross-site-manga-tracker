@@ -17,48 +17,12 @@ func (r *TrackerRepository) SourceExists(ctx context.Context, sourceID int64) (b
 	return count > 0, nil
 }
 
+// Create inserts a tracker and its primary source mirror as one write:
+// committing the INSERT and then failing to link the source used to leave a
+// tracker with no tracker_sources rows behind. The form path, which also has
+// tags and a pasted link to attach, uses CreateWithLinks.
 func (r *TrackerRepository) Create(ctx context.Context, tracker *models.Tracker) (*models.Tracker, error) {
-	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
-
-	// The tracker row and its primary source row are one write: committing the
-	// INSERT and then failing to link the source used to leave a tracker with
-	// no tracker_sources rows behind. With MaxOpenConns(1) everything up to
-	// Commit must run on the tx handle — including GetByID staying AFTER the
-	// commit, since it would otherwise wait on the connection this tx holds.
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin create tracker tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO trackers (
-			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, latest_chapter_seen_at, last_checked_at, last_read_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.ProfileID, tracker.Title, relatedTitlesJSON, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LatestKnownChapter, tracker.LastCheckedAt, tracker.LastReadChapter)
-	if err != nil {
-		return nil, fmt.Errorf("insert tracker: %w", err)
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("get tracker last insert id: %w", err)
-	}
-
-	if err := replaceTrackerSourcesInTx(ctx, tx, tracker.ProfileID, id, []models.TrackerSource{{
-		SourceID:     tracker.SourceID,
-		SourceItemID: tracker.SourceItemID,
-		SourceURL:    tracker.SourceURL,
-	}}); err != nil {
-		return nil, fmt.Errorf("create tracker sources: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit create tracker tx: %w", err)
-	}
-
-	return r.GetByID(ctx, tracker.ProfileID, id)
+	return r.CreateWithLinks(ctx, tracker, TrackerLinks{})
 }
 
 func (r *TrackerRepository) GetByID(ctx context.Context, profileID int64, id int64) (*models.Tracker, error) {
@@ -89,91 +53,38 @@ func (r *TrackerRepository) GetByID(ctx context.Context, profileID int64, id int
 	return tracker, nil
 }
 
+// Update writes the tracker's own columns and mirrors the (possibly new)
+// primary source into tracker_sources, in one transaction — a failure between
+// the two used to leave the new primary without a mirror row until the next
+// poll. It returns nil for a tracker the profile does not own. The edit form,
+// which also replaces sources, tags and the reading pin, uses SaveTrackerEdit.
 func (r *TrackerRepository) Update(ctx context.Context, profileID int64, id int64, tracker *models.Tracker) (*models.Tracker, error) {
-	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
-	result, err := r.db.ExecContext(ctx, `
-		UPDATE trackers
-		SET
-			title = ?,
-			related_titles = ?,
-			source_id = ?,
-			source_item_id = ?,
-			source_url = ?,
-			status = ?,
-			last_read_chapter = ?,
-			rating = ?,
-			last_read_at = CASE WHEN last_read_chapter IS NOT ? THEN CURRENT_TIMESTAMP ELSE last_read_at END,
-			latest_chapter_seen_at = CASE
-				WHEN ? IS NULL THEN NULL
-				WHEN latest_known_chapter IS NOT ? THEN CURRENT_TIMESTAMP
-				ELSE COALESCE(latest_chapter_seen_at, CURRENT_TIMESTAMP)
-			END,
-			latest_known_chapter = ?,
-			latest_release_at = ?,
-			last_checked_at = ?,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-		  AND profile_id = ?
-		  AND (
-			title IS NOT ?
-			OR related_titles IS NOT ?
-			OR source_id IS NOT ?
-			OR source_item_id IS NOT ?
-			OR source_url IS NOT ?
-			OR status IS NOT ?
-			OR last_read_chapter IS NOT ?
-			OR rating IS NOT ?
-			OR latest_known_chapter IS NOT ?
-			OR latest_release_at IS NOT ?
-			OR last_checked_at IS NOT ?
-		  )
-	`,
-		tracker.Title,
-		relatedTitlesJSON,
-		tracker.SourceID,
-		tracker.SourceItemID,
-		tracker.SourceURL,
-		tracker.Status,
-		tracker.LastReadChapter,
-		tracker.Rating,
-		tracker.LastReadChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestReleaseAt,
-		tracker.LastCheckedAt,
-		id,
-		profileID,
-		tracker.Title,
-		relatedTitlesJSON,
-		tracker.SourceID,
-		tracker.SourceItemID,
-		tracker.SourceURL,
-		tracker.Status,
-		tracker.LastReadChapter,
-		tracker.Rating,
-		tracker.LatestKnownChapter,
-		tracker.LatestReleaseAt,
-		tracker.LastCheckedAt,
-	)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("update tracker: %w", err)
+		return nil, fmt.Errorf("begin update tracker tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	owned, err := trackerOwnedByProfileTx(ctx, tx, id, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if !owned {
+		return nil, nil
 	}
 
-	rowsAffected, err := result.RowsAffected()
+	changed, err := updateTrackerRowTx(ctx, tx, profileID, id, tracker)
 	if err != nil {
-		return nil, fmt.Errorf("tracker update rows affected: %w", err)
+		return nil, err
 	}
-	if rowsAffected == 0 {
-		return r.GetByID(ctx, profileID, id)
+	if changed {
+		if err := upsertTrackerSourceTx(ctx, tx, id, primarySourceOf(tracker)); err != nil {
+			return nil, fmt.Errorf("upsert primary tracker source: %w", err)
+		}
 	}
 
-	if err := r.UpsertTrackerSource(ctx, profileID, id, models.TrackerSource{
-		SourceID:     tracker.SourceID,
-		SourceItemID: tracker.SourceItemID,
-		SourceURL:    tracker.SourceURL,
-	}); err != nil {
-		return nil, fmt.Errorf("upsert primary tracker source: %w", err)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit update tracker tx: %w", err)
 	}
 
 	return r.GetByID(ctx, profileID, id)
@@ -184,30 +95,17 @@ func (r *TrackerRepository) Update(ctx context.Context, profileID int64, id int6
 // sources or its primary; anything else clears the preference rather than
 // storing a dangling pointer.
 func (r *TrackerRepository) SetReadingSource(ctx context.Context, profileID int64, id int64, readingSourceID *int64) error {
-	if readingSourceID != nil {
-		var linked int
-		err := r.db.QueryRowContext(ctx, `
-			SELECT COUNT(1) FROM trackers t
-			WHERE t.id = ? AND t.profile_id = ?
-			  AND (t.source_id = ? OR EXISTS (
-			      SELECT 1 FROM tracker_sources ts
-			      WHERE ts.tracker_id = t.id AND ts.source_id = ?
-			  ))
-		`, id, profileID, *readingSourceID, *readingSourceID).Scan(&linked)
-		if err != nil {
-			return fmt.Errorf("validate reading source: %w", err)
-		}
-		if linked == 0 {
-			readingSourceID = nil
-		}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin set reading source tx: %w", err)
 	}
+	defer tx.Rollback()
 
-	if _, err := r.db.ExecContext(ctx, `
-		UPDATE trackers
-		SET reading_source_id = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND profile_id = ? AND reading_source_id IS NOT ?
-	`, readingSourceID, id, profileID, readingSourceID); err != nil {
-		return fmt.Errorf("set reading source: %w", err)
+	if err := setReadingSourceTx(ctx, tx, profileID, id, readingSourceID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit set reading source tx: %w", err)
 	}
 	return nil
 }
