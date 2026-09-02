@@ -626,9 +626,6 @@ func buildTrackerSiteLinks(sources []models.Source, sourceLogoBySourceID map[int
 	ranked := make([]rankedLink, 0, len(sources))
 	for _, source := range sources {
 		homeURL := homeURLForKey(source.Key)
-		if source.BaseURL != nil && strings.TrimSpace(*source.BaseURL) != "" {
-			homeURL = strings.TrimSpace(*source.BaseURL)
-		}
 		if homeURL == "" {
 			continue
 		}

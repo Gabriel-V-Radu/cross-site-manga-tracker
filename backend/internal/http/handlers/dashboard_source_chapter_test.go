@@ -62,8 +62,8 @@ func setupAppForChapterLookup(t *testing.T, connector connectors.Connector) (*fi
 	// Inserted rather than seeded so the test does not depend on the default
 	// source list, only on a source the stub connector answers for.
 	inserted, err := db.Exec(
-		`INSERT INTO sources (key, name, connector_kind, base_url, enabled) VALUES (?, ?, ?, ?, 1)`,
-		connector.Key(), connector.Name(), connector.Kind(), "https://mangafire.to")
+		`INSERT INTO sources (key, name, connector_kind, enabled) VALUES (?, ?, ?, 1)`,
+		connector.Key(), connector.Name(), connector.Kind())
 	if err != nil {
 		_ = db.Close()
 		t.Fatalf("insert %s source: %v", connector.Key(), err)

@@ -34,6 +34,15 @@ func ledger(t *testing.T, db *sql.DB) map[string]bool {
 	return versions
 }
 
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		t.Fatalf("look up column %s.%s: %v", table, column, err)
+	}
+	return count == 1
+}
+
 func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	t.Helper()
 	var count int
@@ -52,11 +61,14 @@ func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	applied := ledger(t, db)
-	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] {
+	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] {
 		t.Fatalf("expected the embedded files in the ledger, got %v", applied)
 	}
 	if tableExists(t, db, "profile_source_logos") || !tableExists(t, db, "source_logos") {
 		t.Fatal("expected the per-profile logo table to be replaced by the shared one")
+	}
+	if columnExists(t, db, "sources", "base_url") || columnExists(t, db, "sources", "config_path") {
+		t.Fatal("expected the never-used yaml connector columns to be gone")
 	}
 
 	if err := ApplyMigrations(db); err != nil {
@@ -69,9 +81,10 @@ func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 
 // A database that predates the squash has the whole schema and a ledger that
 // names the thirty historical files, not the baseline. The baseline must then
-// run on top of the complete schema without changing it, and the logo
-// migration must carry the existing per-profile rows over, lowest profile
-// first where both had one.
+// run on top of the complete schema without changing it, the logo migration
+// must carry the existing per-profile rows over (lowest profile first where
+// both had one), and the housekeeping must prune the legacy ledger rows and
+// the link rows whose tracker is gone.
 func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
 	db := openMigrateTestDB(t)
 
@@ -103,6 +116,22 @@ func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed per-profile logos: %v", err)
 	}
+	// An orphaned link and tag, the way a delete with foreign keys off leaves
+	// them; a live tracker's link must survive next to them.
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO trackers (id, profile_id, title, source_id, source_url, status) VALUES (7, 1, 'Alive', 1, 'https://mangadex.org/title/alive', 'reading');
+		INSERT INTO tracker_sources (tracker_id, source_id, source_url) VALUES (7, 2, 'https://mangafire.to/manga/alive'), (999, 2, 'https://mangafire.to/manga/gone');
+		INSERT INTO custom_tags (id, profile_id, name) VALUES (1, 1, 'Favorite');
+		INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (7, 1), (999, 1);
+	`); err != nil {
+		t.Fatalf("seed orphans: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
 	var trackersColumns int
 	if err := db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('trackers')`).Scan(&trackersColumns); err != nil {
 		t.Fatal(err)
@@ -113,8 +142,21 @@ func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
 	}
 
 	applied := ledger(t, db)
-	if !applied["0001_init.sql"] || !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] {
-		t.Fatalf("expected the legacy rows kept and the new files recorded, got %v", applied)
+	if applied["0001_init.sql"] || applied["0030_drop_dead_schema.sql"] {
+		t.Fatalf("expected the legacy ledger rows pruned, got %v", applied)
+	}
+	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] || len(applied) != 3 {
+		t.Fatalf("expected exactly the embedded files in the ledger, got %v", applied)
+	}
+	var links, tags int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(1) FROM tracker_sources), (SELECT COUNT(1) FROM tracker_tags)`).Scan(&links, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 || tags != 1 {
+		t.Fatalf("expected only the live tracker's link and tag to survive, got %d links and %d tags", links, tags)
+	}
+	if columnExists(t, db, "sources", "base_url") {
+		t.Fatal("expected sources.base_url dropped")
 	}
 	var after int
 	if err := db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('trackers')`).Scan(&after); err != nil {

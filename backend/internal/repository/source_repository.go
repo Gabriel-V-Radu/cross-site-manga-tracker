@@ -19,7 +19,7 @@ func NewSourceRepository(db *sql.DB) *SourceRepository {
 
 func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
+		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE enabled = 1
 		ORDER BY name ASC
@@ -31,31 +31,11 @@ func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, er
 
 	items := make([]models.Source, 0)
 	for rows.Next() {
-		var source models.Source
-		var baseURL sql.NullString
-		var configPath sql.NullString
-		var enabled bool
-		if err := rows.Scan(
-			&source.ID,
-			&source.Key,
-			&source.Name,
-			&source.ConnectorKind,
-			&baseURL,
-			&configPath,
-			&enabled,
-			&source.CreatedAt,
-			&source.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan source: %w", err)
+		source, err := scanSource(rows, "scan source")
+		if err != nil {
+			return nil, err
 		}
-		source.Enabled = enabled
-		if baseURL.Valid {
-			source.BaseURL = &baseURL.String
-		}
-		if configPath.Valid {
-			source.ConfigPath = &configPath.String
-		}
-		items = append(items, source)
+		items = append(items, *source)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -67,7 +47,7 @@ func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, er
 
 func (r *SourceRepository) GetByID(ctx context.Context, id int64) (*models.Source, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
+		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE id = ?
 	`, id)
@@ -77,7 +57,7 @@ func (r *SourceRepository) GetByID(ctx context.Context, id int64) (*models.Sourc
 
 func (r *SourceRepository) GetByKey(ctx context.Context, key string) (*models.Source, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, key, name, connector_kind, base_url, config_path, enabled, created_at, updated_at
+		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE key = ?
 	`, strings.TrimSpace(strings.ToLower(key)))
@@ -89,16 +69,12 @@ func (r *SourceRepository) GetByKey(ctx context.Context, key string) (*models.So
 // way both lookups have always done.
 func scanSource(row rowScanner, operation string) (*models.Source, error) {
 	var source models.Source
-	var baseURL sql.NullString
-	var configPath sql.NullString
 	var enabled bool
 	if err := row.Scan(
 		&source.ID,
 		&source.Key,
 		&source.Name,
 		&source.ConnectorKind,
-		&baseURL,
-		&configPath,
 		&enabled,
 		&source.CreatedAt,
 		&source.UpdatedAt,
@@ -110,13 +86,6 @@ func scanSource(row rowScanner, operation string) (*models.Source, error) {
 	}
 
 	source.Enabled = enabled
-	if baseURL.Valid {
-		source.BaseURL = &baseURL.String
-	}
-	if configPath.Valid {
-		source.ConfigPath = &configPath.String
-	}
-
 	return &source, nil
 }
 

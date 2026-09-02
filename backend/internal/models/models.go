@@ -10,8 +10,6 @@ type Source struct {
 	Key           string    `json:"key"`
 	Name          string    `json:"name"`
 	ConnectorKind string    `json:"connectorKind"`
-	BaseURL       *string   `json:"baseUrl,omitempty"`
-	ConfigPath    *string   `json:"configPath,omitempty"`
 	Enabled       bool      `json:"enabled"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
