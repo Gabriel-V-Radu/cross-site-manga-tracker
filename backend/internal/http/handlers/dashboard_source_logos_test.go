@@ -80,13 +80,18 @@ func TestSaveSourceLogosFromMenuUploadsPNG(t *testing.T) {
 	var logoPath string
 	if err := db.QueryRow(`
 		SELECT logo_url
-		FROM profile_source_logos
-		WHERE profile_id = ? AND source_id = ?
-	`, 1, sourceID).Scan(&logoPath); err != nil {
+		FROM source_logos
+		WHERE source_id = ?
+	`, sourceID).Scan(&logoPath); err != nil {
 		t.Fatalf("read saved source logo row: %v", err)
 	}
 	if !strings.HasPrefix(logoPath, "/uploads/site-logos/") {
 		t.Fatalf("expected saved logo path in uploads directory, got %q", logoPath)
+	}
+	// The file is one per site now, so the name must not carry the profile that
+	// happened to upload it.
+	if strings.Contains(logoPath, "profile-") {
+		t.Fatalf("logo file name must not be namespaced by profile, got %q", logoPath)
 	}
 
 	// The stored path is what the browser asks /uploads for, so the file has to
@@ -148,9 +153,9 @@ func TestSaveSourceLogosFromMenuUploadsJPG(t *testing.T) {
 	var logoPath string
 	if err := db.QueryRow(`
 		SELECT logo_url
-		FROM profile_source_logos
-		WHERE profile_id = ? AND source_id = ?
-	`, 1, sourceID).Scan(&logoPath); err != nil {
+		FROM source_logos
+		WHERE source_id = ?
+	`, sourceID).Scan(&logoPath); err != nil {
 		t.Fatalf("read saved source logo row: %v", err)
 	}
 	if !strings.HasSuffix(strings.ToLower(logoPath), ".jpg") {
@@ -260,11 +265,11 @@ func TestTrackerCardUsesCustomSourceLogoPath(t *testing.T) {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO profile_source_logos (profile_id, source_id, logo_url)
-		VALUES (?, ?, ?)
-	`, 1, sourceID, "/uploads/site-logos/custom-logo.png")
+		INSERT INTO source_logos (source_id, logo_url)
+		VALUES (?, ?)
+	`, sourceID, "/uploads/site-logos/custom-logo.png")
 	if err != nil {
-		t.Fatalf("seed profile source logo: %v", err)
+		t.Fatalf("seed source logo: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?profile=profile1&view=grid", nil)
@@ -288,6 +293,74 @@ func TestTrackerCardUsesCustomSourceLogoPath(t *testing.T) {
 	}
 	if strings.Contains(html, "<span class=\"tracker-card__source-logo-text\">"+sourceName+"</span>") {
 		t.Fatalf("expected image logo to replace source-name fallback")
+	}
+}
+
+// A logo uploaded from one profile's menu is the other profile's logo too;
+// that is the whole point of storing one per site.
+func TestSourceLogoUploadedFromOneProfileShowsOnTheOther(t *testing.T) {
+	env := newTestEnv(t, nil)
+	defer env.cleanup()
+	db, app := env.db, env.app
+
+	sourceID, sourceName := sourceMetaByKey(t, db, "mangadex")
+
+	// The tracker lives in profile 2; the upload happens from profile 1.
+	_, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, latest_known_chapter)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, 2, "Other Profile Card", sourceID, "https://mangadex.org/title/other-profile-card", "reading", 3.0)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	filePart, err := writer.CreateFormFile("source_logo_file_"+toString(int(sourceID)), "mangadex-logo.png")
+	if err != nil {
+		t.Fatalf("create multipart file part: %v", err)
+	}
+	if _, err := filePart.Write(tinyPNG); err != nil {
+		t.Fatalf("write multipart file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	upload := httptest.NewRequest(http.MethodPost, "/dashboard/profile/source-logos?profile=profile1", &payload)
+	upload.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadRes, err := app.Test(upload)
+	if err != nil {
+		t.Fatalf("save source logos request failed: %v", err)
+	}
+	if uploadRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(uploadRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", uploadRes.StatusCode, string(body))
+	}
+
+	var logoPath string
+	if err := db.QueryRow(`SELECT logo_url FROM source_logos WHERE source_id = ?`, sourceID).Scan(&logoPath); err != nil {
+		t.Fatalf("read saved source logo row: %v", err)
+	}
+
+	res, err := app.Test(httptest.NewRequest(http.MethodGet, "/dashboard/trackers?profile=profile2&view=grid", nil))
+	if err != nil {
+		t.Fatalf("trackers partial request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read trackers partial response: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, "src=\""+logoPath+"\"") {
+		t.Fatalf("profile 2's card must show the logo uploaded from profile 1 (%s); body: %s", logoPath, html)
+	}
+	if strings.Contains(html, "<span class=\"tracker-card__source-logo-text\">"+sourceName+"</span>") {
+		t.Fatalf("expected image logo to replace source-name fallback on profile 2")
 	}
 }
 

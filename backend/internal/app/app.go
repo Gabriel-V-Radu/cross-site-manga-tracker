@@ -67,7 +67,7 @@ func Open(opts Options) (*Runtime, error) {
 	}
 
 	if opts.Migrate {
-		if err := database.ApplyMigrations(db, cfg.MigrationsPath); err != nil {
+		if err := database.ApplyMigrations(db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("apply migrations: %w", err)
 		}

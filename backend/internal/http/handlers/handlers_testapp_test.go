@@ -55,7 +55,7 @@ func newTestEnv(t *testing.T, configure func(*connectors.Registry)) testEnv {
 		t.Fatalf("open test db: %v", err)
 	}
 
-	if err := database.ApplyMigrations(db, filepath.Join(backendRootDir(), "migrations")); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply migrations: %v", err)
 	}

@@ -21,7 +21,7 @@ type sourceUsage struct {
 	Enabled         bool
 	PrimaryTrackers int64
 	LinkedSources   int64
-	ProfileLogos    int64
+	Logos           int64
 }
 
 type linkedSourceCandidate struct {
@@ -111,7 +111,7 @@ func main() {
 			"enabled", source.Enabled,
 			"primary_trackers", source.PrimaryTrackers,
 			"linked_sources", source.LinkedSources,
-			"profile_logos", source.ProfileLogos,
+			"logos", source.Logos,
 		)
 	}
 
@@ -172,7 +172,7 @@ func main() {
 		"deleted_link_suggestions", outcome.DeletedSuggestions,
 		"cleared_reading_pins", outcome.ClearedReadingPins,
 		"cleared_chapter_reporters", outcome.ClearedChapterReporters,
-		"deleted_profile_source_logos", outcome.DeletedSourceLogos,
+		"deleted_source_logos", outcome.DeletedSourceLogos,
 		"deleted_sources", outcome.DeletedSources,
 	)
 }
@@ -203,7 +203,7 @@ func listStaleSources(db *sql.DB, activeSourceKeys map[string]struct{}) ([]sourc
 			s.enabled,
 			(SELECT COUNT(1) FROM trackers t WHERE t.source_id = s.id) AS primary_trackers,
 			(SELECT COUNT(1) FROM tracker_sources ts WHERE ts.source_id = s.id) AS linked_sources,
-			(SELECT COUNT(1) FROM profile_source_logos psl WHERE psl.source_id = s.id) AS profile_logos
+			(SELECT COUNT(1) FROM source_logos sl WHERE sl.source_id = s.id) AS logos
 		FROM sources s
 		ORDER BY s.key ASC
 	`)
@@ -226,7 +226,7 @@ func listStaleSources(db *sql.DB, activeSourceKeys map[string]struct{}) ([]sourc
 			&enabled,
 			&item.PrimaryTrackers,
 			&item.LinkedSources,
-			&item.ProfileLogos,
+			&item.Logos,
 		); err != nil {
 			return nil, nil, fmt.Errorf("scan source row: %w", err)
 		}
@@ -484,7 +484,7 @@ func applyCleanup(db *sql.DB, staleSources []sourceUsage, promotions []trackerPr
 		return cleanupOutcome{}, err
 	}
 
-	outcome.DeletedSourceLogos, err = deleteBySourceID(tx, "profile_source_logos", "source_id", sourceIDs)
+	outcome.DeletedSourceLogos, err = deleteBySourceID(tx, "source_logos", "source_id", sourceIDs)
 	if err != nil {
 		rollback()
 		return cleanupOutcome{}, err

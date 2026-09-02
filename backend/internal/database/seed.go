@@ -7,9 +7,8 @@ import (
 
 // SeedDefaults inserts the source rows the compiled connectors need and the two
 // profiles. It is the one list of sources that has to match the connector
-// registry: the per-source migrations under migrations/ are history (they
-// inserted a source when its connector arrived) and are not consulted for the
-// current set. Idempotent, so it runs on every start.
+// registry: the schema carries no rows, so a source exists because it is
+// named here. Idempotent, so it runs on every start.
 func SeedDefaults(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {

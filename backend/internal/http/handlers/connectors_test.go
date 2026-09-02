@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -40,10 +39,7 @@ func setupAppForConnectors(t *testing.T) (*sql.DB, *fiber.App, func()) {
 		t.Fatalf("open db: %v", err)
 	}
 
-	_, currentFile, _, _ := runtime.Caller(0)
-	baseDir := filepath.Dir(currentFile)
-	migrationsPath := filepath.Join(baseDir, "..", "..", "..", "migrations")
-	if err := database.ApplyMigrations(db, migrationsPath); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply migrations: %v", err)
 	}

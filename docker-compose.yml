@@ -8,7 +8,6 @@ services:
       - ./backend/.env.example
     environment:
       - SQLITE_PATH=/app/data/app.sqlite
-      - MIGRATIONS_PATH=/app/migrations
     ports:
       - "8080:8080"
     volumes:

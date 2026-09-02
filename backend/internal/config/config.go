@@ -17,7 +17,6 @@ type Config struct {
 	Port            string
 	LogLevel        slog.Level
 	SQLitePath      string
-	MigrationsPath  string
 	SeedDefaultData bool
 	PollingEnabled  bool
 	PollingMinutes  int
@@ -52,9 +51,10 @@ func (c Config) CoversDir() string { return filepath.Join(c.DataDir, "covers") }
 // UploadsDir is the directory behind /uploads.
 func (c Config) UploadsDir() string { return filepath.Join(c.DataDir, "uploads") }
 
-// SourceLogosDir holds the per-profile site logos the profile menu uploads.
-// The public path they are stored under (/uploads/site-logos/...) is built
-// from the /uploads mount, so the two must agree.
+// SourceLogosDir holds the site logos the profile menu uploads; one per site,
+// shown to every profile. The public path they are stored under
+// (/uploads/site-logos/...) is built from the /uploads mount, so the two must
+// agree.
 func (c Config) SourceLogosDir() string { return filepath.Join(c.UploadsDir(), "site-logos") }
 
 func Load() (Config, error) {
@@ -65,7 +65,6 @@ func Load() (Config, error) {
 		AppName:            getEnv("APP_NAME", "cross-site-tracker"),
 		Port:               getEnvAsPort("APP_PORT", "8080"),
 		SQLitePath:         getEnv("SQLITE_PATH", "./data/app.sqlite"),
-		MigrationsPath:     getEnv("MIGRATIONS_PATH", "./migrations"),
 		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
 		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),
 		PollingMinutes:     getEnvAsInt("POLLING_MINUTES", 30),

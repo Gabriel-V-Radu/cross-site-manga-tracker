@@ -16,9 +16,9 @@ func TestLinksQueueAcceptFlow(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
-	var weebcentralID int64
-	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'weebcentral'`).Scan(&weebcentralID); err != nil {
-		t.Fatalf("look up weebcentral source: %v", err)
+	var comickID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
 	}
 	var mangafireID int64
 	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangafire'`).Scan(&mangafireID); err != nil {
@@ -37,13 +37,13 @@ func TestLinksQueueAcceptFlow(t *testing.T) {
 	if _, err := db.Exec(`
 		INSERT INTO source_link_suggestions
 			(tracker_id, source_id, candidate_url, candidate_title, score, status)
-		VALUES (?, ?, 'https://weebcentral.com/series/01J76XYDT7H7ANER8KJG5R9SJV', 'Nano Machine', 1.0, 'pending')
-	`, trackerID, weebcentralID); err != nil {
+		VALUES (?, ?, 'https://comick.io/comic/01J76XYDT7H7ANER8KJG5R9SJV', 'Nano Machine', 1.0, 'pending')
+	`, trackerID, comickID); err != nil {
 		t.Fatalf("seed suggestion: %v", err)
 	}
 
 	// The queue renders the pending candidate.
-	queueReq := httptest.NewRequest("GET", "/dashboard/links/queue?source="+toString(int(weebcentralID)), nil)
+	queueReq := httptest.NewRequest("GET", "/dashboard/links/queue?source="+toString(int(comickID)), nil)
 	queueRes, err := app.Test(queueReq, -1)
 	if err != nil {
 		t.Fatalf("queue request: %v", err)
@@ -78,7 +78,7 @@ func TestLinksQueueAcceptFlow(t *testing.T) {
 	var linked int
 	if err := db.QueryRow(`
 		SELECT COUNT(1) FROM tracker_sources WHERE tracker_id = ? AND source_id = ?
-	`, trackerID, weebcentralID).Scan(&linked); err != nil {
+	`, trackerID, comickID).Scan(&linked); err != nil {
 		t.Fatalf("count links: %v", err)
 	}
 	if linked != 1 {
@@ -98,9 +98,9 @@ func TestLinksDismissRemovesFromQueue(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()
 
-	var weebcentralID, mangafireID int64
-	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'weebcentral'`).Scan(&weebcentralID); err != nil {
-		t.Fatalf("look up weebcentral source: %v", err)
+	var comickID, mangafireID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
 	}
 	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangafire'`).Scan(&mangafireID); err != nil {
 		t.Fatalf("look up mangafire source: %v", err)
@@ -117,7 +117,7 @@ func TestLinksDismissRemovesFromQueue(t *testing.T) {
 
 	form := url.Values{}
 	dismissReq := httptest.NewRequest("POST",
-		"/dashboard/links/trackers/"+toString(int(trackerID))+"/dismiss?source="+toString(int(weebcentralID)),
+		"/dashboard/links/trackers/"+toString(int(trackerID))+"/dismiss?source="+toString(int(comickID)),
 		strings.NewReader(form.Encode()))
 	dismissReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	dismissRes, err := app.Test(dismissReq, -1)
@@ -129,7 +129,7 @@ func TestLinksDismissRemovesFromQueue(t *testing.T) {
 		t.Fatalf("dismiss status = %d: %s", dismissRes.StatusCode, body)
 	}
 
-	queueReq := httptest.NewRequest("GET", "/dashboard/links/queue?source="+toString(int(weebcentralID)), nil)
+	queueReq := httptest.NewRequest("GET", "/dashboard/links/queue?source="+toString(int(comickID)), nil)
 	queueRes, err := app.Test(queueReq, -1)
 	if err != nil {
 		t.Fatalf("queue request: %v", err)
@@ -180,9 +180,9 @@ func TestManualLinkAcceptsUnverifiableURL(t *testing.T) {
 	})
 	defer cleanup()
 
-	var weebcentralID, mangadexID, mangafireID int64
-	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'weebcentral'`).Scan(&weebcentralID); err != nil {
-		t.Fatalf("look up weebcentral source: %v", err)
+	var comickID, mangadexID, mangafireID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
 	}
 	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangadex'`).Scan(&mangadexID); err != nil {
 		t.Fatalf("look up mangadex source: %v", err)
@@ -202,7 +202,7 @@ func TestManualLinkAcceptsUnverifiableURL(t *testing.T) {
 
 	form := url.Values{"url": {"https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi"}}
 	req := httptest.NewRequest("POST",
-		"/dashboard/links/trackers/"+toString(int(trackerID))+"/manual?source="+toString(int(weebcentralID)),
+		"/dashboard/links/trackers/"+toString(int(trackerID))+"/manual?source="+toString(int(comickID)),
 		strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := app.Test(req, -1)

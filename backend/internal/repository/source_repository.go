@@ -120,14 +120,15 @@ func scanSource(row rowScanner, operation string) (*models.Source, error) {
 	return &source, nil
 }
 
-func (r *SourceRepository) ListProfileSourceLogoURLs(ctx context.Context, profileID int64) (map[int64]string, error) {
+// ListSourceLogoURLs is the uploaded logo of every source that has one, keyed
+// by source id. Logos are not per-profile: one upload shows on every profile.
+func (r *SourceRepository) ListSourceLogoURLs(ctx context.Context) (map[int64]string, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT source_id, logo_url
-		FROM profile_source_logos
-		WHERE profile_id = ?
-	`, profileID)
+		FROM source_logos
+	`)
 	if err != nil {
-		return nil, fmt.Errorf("list profile source logo urls: %w", err)
+		return nil, fmt.Errorf("list source logo urls: %w", err)
 	}
 	defer rows.Close()
 
@@ -136,7 +137,7 @@ func (r *SourceRepository) ListProfileSourceLogoURLs(ctx context.Context, profil
 		var sourceID int64
 		var logoURL string
 		if err := rows.Scan(&sourceID, &logoURL); err != nil {
-			return nil, fmt.Errorf("scan profile source logo url: %w", err)
+			return nil, fmt.Errorf("scan source logo url: %w", err)
 		}
 
 		trimmedLogoURL := strings.TrimSpace(logoURL)
@@ -147,13 +148,15 @@ func (r *SourceRepository) ListProfileSourceLogoURLs(ctx context.Context, profil
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate profile source logo urls: %w", err)
+		return nil, fmt.Errorf("iterate source logo urls: %w", err)
 	}
 
 	return logoBySourceID, nil
 }
 
-func (r *SourceRepository) UpsertProfileSourceLogoURLs(ctx context.Context, profileID int64, logoBySourceID map[int64]string) error {
+// UpsertSourceLogoURLs stores the given logo per source; an empty URL removes
+// the source's logo.
+func (r *SourceRepository) UpsertSourceLogoURLs(ctx context.Context, logoBySourceID map[int64]string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin source logo urls tx: %w", err)
@@ -168,23 +171,23 @@ func (r *SourceRepository) UpsertProfileSourceLogoURLs(ctx context.Context, prof
 		trimmedLogoURL := strings.TrimSpace(logoURL)
 		if trimmedLogoURL == "" {
 			if _, err := tx.ExecContext(ctx, `
-				DELETE FROM profile_source_logos
-				WHERE profile_id = ? AND source_id = ?
-			`, profileID, sourceID); err != nil {
-				return fmt.Errorf("delete profile source logo: %w", err)
+				DELETE FROM source_logos
+				WHERE source_id = ?
+			`, sourceID); err != nil {
+				return fmt.Errorf("delete source logo: %w", err)
 			}
 			continue
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO profile_source_logos (profile_id, source_id, logo_url)
-			VALUES (?, ?, ?)
-			ON CONFLICT(profile_id, source_id)
+			INSERT INTO source_logos (source_id, logo_url)
+			VALUES (?, ?)
+			ON CONFLICT(source_id)
 			DO UPDATE SET
 				logo_url = excluded.logo_url,
 				updated_at = CURRENT_TIMESTAMP
-		`, profileID, sourceID, trimmedLogoURL); err != nil {
-			return fmt.Errorf("upsert profile source logo: %w", err)
+		`, sourceID, trimmedLogoURL); err != nil {
+			return fmt.Errorf("upsert source logo: %w", err)
 		}
 	}
 

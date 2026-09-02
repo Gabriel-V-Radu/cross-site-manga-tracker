@@ -258,25 +258,27 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 		return h.renderProfileMenu(c, activeProfile, "No sites available to configure", "")
 	}
 
-	existingLogosBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(c.Context(), activeProfile.ID)
+	existingLogosBySourceID, err := h.sourceRepo.ListSourceLogoURLs(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
-	logoBySourceID, err := h.readSourceLogoUpdates(c, activeProfile.ID, linkedSites, existingLogosBySourceID)
+	logoBySourceID, err := h.readSourceLogoUpdates(c, linkedSites, existingLogosBySourceID)
 	if err != nil {
 		return h.renderProfileMenu(c, activeProfile, err.Error(), "")
 	}
 
-	if err := h.sourceRepo.UpsertProfileSourceLogoURLs(c.Context(), activeProfile.ID, logoBySourceID); err != nil {
+	// Logos are shared: the active profile only decides which menu re-renders,
+	// not whose logo was saved. Uploading from either profile changes both.
+	if err := h.sourceRepo.UpsertSourceLogoURLs(c.Context(), logoBySourceID); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked site logos", err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "Linked site logos saved", `{"trackersChanged":true}`)
 }
 
-// listLinkedSites is every enabled source. It takes no profile: the sites a
-// profile can link to are not per-profile, only the logos are.
+// listLinkedSites is every enabled source. It takes no profile: neither the
+// sites a profile can link to nor their logos are per-profile.
 func (h *DashboardHandler) listLinkedSites(ctx context.Context) ([]models.Source, error) {
 	enabledSources, err := h.sourceRepo.ListEnabled(ctx)
 	if err != nil {
@@ -301,7 +303,7 @@ func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
-	sourceLogoURLs, err := h.sourceRepo.ListProfileSourceLogoURLs(c.Context(), activeProfile.ID)
+	sourceLogoURLs, err := h.sourceRepo.ListSourceLogoURLs(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
@@ -322,7 +324,7 @@ func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models
 	})
 }
 
-func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, profileID int64, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
+func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
 	logoBySourceID := make(map[int64]string, len(linkedSites))
 	for _, linkedSite := range linkedSites {
 		fileField := fmt.Sprintf("source_logo_file_%d", linkedSite.ID)
@@ -349,7 +351,7 @@ func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, profileID int64, 
 			continue
 		}
 
-		logoPath, err := h.saveUploadedSourceLogo(profileID, linkedSite.ID, fileHeader)
+		logoPath, err := h.saveUploadedSourceLogo(linkedSite.ID, fileHeader)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", linkedSite.Name, err)
 		}
@@ -363,7 +365,7 @@ func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, profileID int64, 
 	return logoBySourceID, nil
 }
 
-func (h *DashboardHandler) saveUploadedSourceLogo(profileID, sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
+func (h *DashboardHandler) saveUploadedSourceLogo(sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
 	ext, data, err := readValidatedSourceLogo(fileHeader)
 	if err != nil {
 		return "", err
@@ -373,9 +375,11 @@ func (h *DashboardHandler) saveUploadedSourceLogo(profileID, sourceID int64, fil
 		return "", fmt.Errorf("prepare upload directory: %w", err)
 	}
 
+	// Files uploaded before logos were shared are named profile-N-source-M-...;
+	// they stay valid because the stored URL is what gets served, and they are
+	// replaced (and removed) the next time that site's logo is uploaded.
 	fileName := fmt.Sprintf(
-		"profile-%d-source-%d-%d%s",
-		profileID,
+		"source-%d-%d%s",
 		sourceID,
 		time.Now().UTC().UnixNano(),
 		ext,

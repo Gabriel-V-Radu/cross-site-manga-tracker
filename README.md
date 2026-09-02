@@ -67,9 +67,10 @@ in Docker and is used from any browser on the same network.
 - A cookie stores the active profile in the browser for convenience.
 
 ## Notes
-- Migrations are auto-applied from `backend/migrations/`.
+- The schema is compiled into the binary (`backend/internal/database/migrations/`) and applied at startup; nothing to copy or configure.
 - SQLite database file defaults to `backend/data/app.sqlite` locally.
-- Seed data inserts default sources and base settings.
+- Seed data inserts the default sources and the two profiles.
+- Site logos are uploaded once, from either profile's menu, and shown to both.
 
 ## Backup and Restore
 - Quick backup (local): `./scripts/backup.ps1 -Mode local`

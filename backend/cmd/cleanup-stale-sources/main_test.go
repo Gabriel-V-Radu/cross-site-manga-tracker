@@ -27,11 +27,23 @@ func openTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "migrations")); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := database.SeedDefaults(db); err != nil {
 		t.Fatalf("seed defaults: %v", err)
+	}
+
+	// The deployed database still carries the rows of the two sources retired
+	// in 2026-08: disabled, never deleted, because removing them is this tool's
+	// job. A fresh schema has no such history, so the suite plants them; every
+	// test below relies on exactly these two being the stale set.
+	if _, err := db.Exec(`
+		INSERT INTO sources (key, name, connector_kind, enabled)
+		VALUES ('mangabuddy', 'MangaBuddy', 'native', 0),
+		       ('weebcentral', 'WeebCentral', 'native', 0)
+	`); err != nil {
+		t.Fatalf("plant retired sources: %v", err)
 	}
 	return db
 }
@@ -100,8 +112,8 @@ func seedSuggestion(t *testing.T, db *sql.DB, trackerID int64, sourceID int64, c
 func seedLogo(t *testing.T, db *sql.DB, sourceID int64, logoURL string) {
 	t.Helper()
 	if _, err := db.Exec(`
-		INSERT INTO profile_source_logos (profile_id, source_id, logo_url)
-		VALUES (1, ?, ?)
+		INSERT INTO source_logos (source_id, logo_url)
+		VALUES (?, ?)
 	`, sourceID, logoURL); err != nil {
 		t.Fatalf("seed logo source=%d: %v", sourceID, err)
 	}
@@ -135,12 +147,12 @@ func TestBuildActiveSourceKeySetCoversSeededSources(t *testing.T) {
 	}
 }
 
-func TestListStaleSourcesFreshDatabaseHasOnlyRetiredMigrationStrays(t *testing.T) {
+func TestListStaleSourcesFindsOnlyTheRetiredRows(t *testing.T) {
 	db := openTestDB(t)
 
-	// Migration 0027 deliberately disables mangabuddy/weebcentral instead of
-	// deleting them and leaves the row removal to this tool, so a freshly
-	// migrated database has exactly those two stale sources (ordered by key).
+	// The retired sources were disabled rather than deleted and their removal
+	// left to this tool, so the stale set is exactly those two (ordered by key)
+	// and none of the seeded ones.
 	stale, byID, err := listStaleSources(db, buildActiveSourceKeySet())
 	if err != nil {
 		t.Fatalf("list stale sources: %v", err)
@@ -182,7 +194,7 @@ func TestListStaleSourcesReportsUsageCounts(t *testing.T) {
 	if got.ID != staleID || got.Key != "mangabuddy" || got.Name != "MangaBuddy" {
 		t.Fatalf("unexpected stale source identity: %+v", got)
 	}
-	if got.PrimaryTrackers != 2 || got.LinkedSources != 2 || got.ProfileLogos != 1 {
+	if got.PrimaryTrackers != 2 || got.LinkedSources != 2 || got.Logos != 1 {
 		t.Fatalf("unexpected usage counts: %+v", got)
 	}
 	if byID[staleID] != "mangabuddy" {
@@ -195,7 +207,7 @@ func TestListStaleSourcesNormalizesKeysCaseInsensitively(t *testing.T) {
 
 	// A key that differs only in case/whitespace from an active key is NOT
 	// stale; matching is on the normalized (lowercased, trimmed) key. Only the
-	// two retired migration strays remain stale.
+	// two retired rows remain stale.
 	casedID := seedSource(t, db, " ComicK ", "ComicK Cased")
 
 	stale, _, err := listStaleSources(db, buildActiveSourceKeySet())
@@ -330,7 +342,7 @@ func TestPlanTrackerPrimarySourcePromotionsEmptyInput(t *testing.T) {
 }
 
 // seedCleanupScenario builds the canonical mixed scenario on top of the
-// migration-provided stale rows (mangabuddy carries all the usage,
+// retired rows openTestDB plants (mangabuddy carries all the usage,
 // weebcentral stays a zero-usage stray):
 //   - promotable: primary stale, linked to mangadex (survives, repointed);
 //   - orphan: primary stale, no active links (deleted);
@@ -370,7 +382,7 @@ func seedCleanupScenario(t *testing.T, db *sql.DB) (staleID, activeID, promotabl
 func snapshotCounts(t *testing.T, db *sql.DB) map[string]int64 {
 	t.Helper()
 	counts := make(map[string]int64)
-	for _, table := range []string{"sources", "trackers", "tracker_sources", "source_link_suggestions", "profile_source_logos"} {
+	for _, table := range []string{"sources", "trackers", "tracker_sources", "source_link_suggestions", "source_logos"} {
 		counts[table] = countRows(t, db, "SELECT COUNT(1) FROM "+table)
 	}
 	return counts
@@ -396,11 +408,11 @@ func TestDryRunPlanningReportsWithoutWriting(t *testing.T) {
 	}
 
 	// The dry-run report must be accurate... (mangabuddy carries the usage,
-	// weebcentral is the second, zero-usage migration stray)
+	// weebcentral is the second, zero-usage retired row)
 	if len(stale) != 2 || stale[0].ID != staleID {
 		t.Fatalf("expected stale sources led by %d, got %+v", staleID, stale)
 	}
-	if stale[0].PrimaryTrackers != 2 || stale[0].LinkedSources != 3 || stale[0].ProfileLogos != 1 {
+	if stale[0].PrimaryTrackers != 2 || stale[0].LinkedSources != 3 || stale[0].Logos != 1 {
 		t.Fatalf("unexpected reported usage counts: %+v", stale[0])
 	}
 	if got := sumLinkedRowCounts(stale); got != 3 {
@@ -489,7 +501,7 @@ func TestApplyCleanupDeletesExactlyStaleEntities(t *testing.T) {
 	if got := countRows(t, db, `SELECT COUNT(1) FROM source_link_suggestions WHERE source_id = ?`, staleID); got != 0 {
 		t.Fatalf("stale suggestions survived")
 	}
-	if got := countRows(t, db, `SELECT COUNT(1) FROM profile_source_logos WHERE source_id = ?`, staleID); got != 0 {
+	if got := countRows(t, db, `SELECT COUNT(1) FROM source_logos WHERE source_id = ?`, staleID); got != 0 {
 		t.Fatalf("stale logo survived")
 	}
 
@@ -529,7 +541,7 @@ func TestApplyCleanupDeletesExactlyStaleEntities(t *testing.T) {
 	if got := countRows(t, db, `SELECT COUNT(1) FROM source_link_suggestions WHERE source_id = ?`, activeID); got != 2 {
 		t.Fatalf("active-source suggestions must survive, got %d", got)
 	}
-	if got := countRows(t, db, `SELECT COUNT(1) FROM profile_source_logos WHERE source_id = ?`, activeID); got != 1 {
+	if got := countRows(t, db, `SELECT COUNT(1) FROM source_logos WHERE source_id = ?`, activeID); got != 1 {
 		t.Fatalf("active-source logo must survive, got %d", got)
 	}
 	if got := countRows(t, db, `SELECT COUNT(1) FROM sources WHERE id = ?`, activeID); got != 1 {

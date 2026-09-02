@@ -20,7 +20,7 @@ func openCoverPersistenceTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "migrations")); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := database.SeedDefaults(db); err != nil {

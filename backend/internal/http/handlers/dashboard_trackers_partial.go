@@ -78,7 +78,7 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(c.Context(), activeProfile.ID)
+	sourceLogoBySourceID, err := h.sourceRepo.ListSourceLogoURLs(c.Context())
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}

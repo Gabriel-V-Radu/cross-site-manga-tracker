@@ -2,17 +2,13 @@ package app
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func pointAtTempDatabase(t *testing.T) string {
 	t.Helper()
-	_, currentFile, _, _ := runtime.Caller(0)
-	backendRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
 	dbPath := filepath.Join(t.TempDir(), "app.sqlite")
 	t.Setenv("SQLITE_PATH", dbPath)
-	t.Setenv("MIGRATIONS_PATH", filepath.Join(backendRoot, "migrations"))
 	t.Setenv("LOG_LEVEL", "INFO")
 	return dbPath
 }

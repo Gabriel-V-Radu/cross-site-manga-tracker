@@ -21,7 +21,7 @@ func openLinkSuggestionTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "migrations")); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := database.SeedDefaults(db); err != nil {
@@ -69,23 +69,23 @@ func TestScanTargetsExcludeLinkedAndDecidedTrackers(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
 	trackerRepo := repository.NewTrackerRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 
 	unlinked := seedLinkTracker(t, db, "unlinked")
 	linked := seedLinkTracker(t, db, "linked")
 	dismissed := seedLinkTracker(t, db, "dismissed")
 
 	if err := trackerRepo.UpsertTrackerSource(context.Background(), 1, linked, models.TrackerSource{
-		SourceID:  weebcentral,
-		SourceURL: "https://weebcentral.com/series/01ABCDEFGHJKMNPQRSTVWXYZ01",
+		SourceID:  comick,
+		SourceURL: "https://comick.io/comic/01ABCDEFGHJKMNPQRSTVWXYZ01",
 	}); err != nil {
 		t.Fatalf("link tracker: %v", err)
 	}
-	if err := repo.DismissTracker(context.Background(), 1, dismissed, weebcentral); err != nil {
+	if err := repo.DismissTracker(context.Background(), 1, dismissed, comick); err != nil {
 		t.Fatalf("dismiss tracker: %v", err)
 	}
 
-	targets, err := repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	targets, err := repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list scan targets: %v", err)
 	}
@@ -100,10 +100,10 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
 	trackerRepo := repository.NewTrackerRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 	mangafire := sourceIDByKey(t, db, "mangafire")
 	mangadex := sourceIDByKey(t, db, "mangadex")
-	mangabuddy := sourceIDByKey(t, db, "mangabuddy")
+	mangahub := sourceIDByKey(t, db, "mangahub")
 
 	reading := seedLinkTracker(t, db, "reading-no-alternates")
 
@@ -119,15 +119,15 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 
 	withAlternate := seedLinkTracker(t, db, "with-alternate")
 	if err := trackerRepo.UpsertTrackerSource(context.Background(), 1, withAlternate, models.TrackerSource{
-		SourceID:  mangabuddy,
-		SourceURL: "https://mangabuddy1.co.uk/series/with-alternate.xx",
+		SourceID:  mangahub,
+		SourceURL: "https://mangahub.io/manga/with-alternate.xx",
 	}); err != nil {
 		t.Fatalf("link alternate: %v", err)
 	}
 
 	// Status: reading + plan_to_read leaves out nothing here except nothing;
 	// reading alone leaves out the planned tracker.
-	targets, err := repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{Statuses: []string{"reading"}})
+	targets, err := repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{Statuses: []string{"reading"}})
 	if err != nil {
 		t.Fatalf("status filter: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 	}
 
 	// Primary source: only the mangafire ones.
-	targets, err = repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{PrimarySourceIDs: []int64{mangafire}})
+	targets, err = repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{PrimarySourceIDs: []int64{mangafire}})
 	if err != nil {
 		t.Fatalf("primary filter: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 	}
 
 	// A non-nil empty primary set ("broken" resolved to none) matches nothing.
-	targets, err = repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{PrimarySourceIDs: []int64{}})
+	targets, err = repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{PrimarySourceIDs: []int64{}})
 	if err != nil {
 		t.Fatalf("empty primary filter: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 
 	// Max alternates 0: the tracker that already has a fallback drops out.
 	zero := 0
-	targets, err = repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{MaxAlternates: &zero})
+	targets, err = repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{MaxAlternates: &zero})
 	if err != nil {
 		t.Fatalf("alternates filter: %v", err)
 	}
@@ -178,15 +178,15 @@ func TestScanFilterNarrowsTargets(t *testing.T) {
 func TestRejectedCandidateDoesNotResurface(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 	trackerID := seedLinkTracker(t, db, "series")
 
-	candidate := pendingSuggestion(trackerID, weebcentral, "https://weebcentral.com/series/A", "Series", 1.0)
-	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, weebcentral, []repository.LinkSuggestion{candidate}); err != nil {
+	candidate := pendingSuggestion(trackerID, comick, "https://comick.io/comic/A", "Series", 1.0)
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{candidate}); err != nil {
 		t.Fatalf("store suggestion: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	queue, err := repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -199,10 +199,10 @@ func TestRejectedCandidateDoesNotResurface(t *testing.T) {
 	}
 
 	// A re-scan reporting the same candidate must not resurrect it.
-	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, weebcentral, []repository.LinkSuggestion{candidate}); err != nil {
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{candidate}); err != nil {
 		t.Fatalf("re-store suggestion: %v", err)
 	}
-	queue, err = repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	queue, err = repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue after rescan: %v", err)
 	}
@@ -215,17 +215,17 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
 	trackerRepo := repository.NewTrackerRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 	trackerID := seedLinkTracker(t, db, "series")
 
-	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, weebcentral, []repository.LinkSuggestion{
-		pendingSuggestion(trackerID, weebcentral, "https://weebcentral.com/series/A", "Series", 1.0),
-		pendingSuggestion(trackerID, weebcentral, "https://weebcentral.com/series/B", "Series (Colored)", 0.5),
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, "https://comick.io/comic/A", "Series", 1.0),
+		pendingSuggestion(trackerID, comick, "https://comick.io/comic/B", "Series (Colored)", 0.5),
 	}); err != nil {
 		t.Fatalf("store suggestions: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	queue, err := repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -238,13 +238,13 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 		t.Fatalf("accept: %v", err)
 	}
 	if err := trackerRepo.UpsertTrackerSource(context.Background(), 1, trackerID, models.TrackerSource{
-		SourceID:  weebcentral,
+		SourceID:  comick,
 		SourceURL: best.CandidateURL,
 	}); err != nil {
 		t.Fatalf("link tracker: %v", err)
 	}
 
-	queue, err = repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	queue, err = repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue after accept: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 		t.Fatalf("queue after accept = %+v, want empty", queue)
 	}
 
-	targets, err := repo.ListScanTargets(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	targets, err := repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list scan targets: %v", err)
 	}
@@ -298,16 +298,16 @@ func TestMergeRelatedTitlesUnionsAndFilters(t *testing.T) {
 func TestQueueScopedToProfile(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	repo := repository.NewLinkSuggestionRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 	trackerID := seedLinkTracker(t, db, "series")
 
-	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, weebcentral, []repository.LinkSuggestion{
-		pendingSuggestion(trackerID, weebcentral, "https://weebcentral.com/series/A", "Series", 1.0),
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, "https://comick.io/comic/A", "Series", 1.0),
 	}); err != nil {
 		t.Fatalf("store suggestion: %v", err)
 	}
 
-	queue, err := repo.ListReviewQueue(context.Background(), 2, weebcentral, repository.LinkScanFilter{})
+	queue, err := repo.ListReviewQueue(context.Background(), 2, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue for other profile: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestQueueScopedToProfile(t *testing.T) {
 		t.Fatalf("other profile sees %d queue entries, want 0", len(queue))
 	}
 
-	suggestionQueue, err := repo.ListReviewQueue(context.Background(), 1, weebcentral, repository.LinkScanFilter{})
+	suggestionQueue, err := repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
@@ -337,13 +337,13 @@ func TestQueueScopedToProfile(t *testing.T) {
 func TestSetReadingSourceValidatesLinkage(t *testing.T) {
 	db := openLinkSuggestionTestDB(t)
 	trackerRepo := repository.NewTrackerRepository(db)
-	weebcentral := sourceIDByKey(t, db, "weebcentral")
+	comick := sourceIDByKey(t, db, "comick")
 	mangadex := sourceIDByKey(t, db, "mangadex")
 	trackerID := seedLinkTracker(t, db, "series")
 
 	if err := trackerRepo.UpsertTrackerSource(context.Background(), 1, trackerID, models.TrackerSource{
-		SourceID:  weebcentral,
-		SourceURL: "https://weebcentral.com/series/01ABCDEFGHJKMNPQRSTVWXYZ01",
+		SourceID:  comick,
+		SourceURL: "https://comick.io/comic/01ABCDEFGHJKMNPQRSTVWXYZ01",
 	}); err != nil {
 		t.Fatalf("link source: %v", err)
 	}
@@ -357,11 +357,11 @@ func TestSetReadingSourceValidatesLinkage(t *testing.T) {
 	}
 
 	// A linked source pins.
-	if err := trackerRepo.SetReadingSource(context.Background(), 1, trackerID, &weebcentral); err != nil {
+	if err := trackerRepo.SetReadingSource(context.Background(), 1, trackerID, &comick); err != nil {
 		t.Fatalf("set pin: %v", err)
 	}
-	if got := readPin(); got != weebcentral {
-		t.Fatalf("pin = %v, want %d", got, weebcentral)
+	if got := readPin(); got != comick {
+		t.Fatalf("pin = %v, want %d", got, comick)
 	}
 
 	// A source the tracker does not carry clears instead of dangling.
@@ -390,13 +390,13 @@ func TestSetReadingSourceValidatesLinkage(t *testing.T) {
 	}
 
 	// Another profile cannot touch it.
-	if err := trackerRepo.SetReadingSource(context.Background(), 1, trackerID, &weebcentral); err != nil {
+	if err := trackerRepo.SetReadingSource(context.Background(), 1, trackerID, &comick); err != nil {
 		t.Fatalf("re-pin: %v", err)
 	}
 	if err := trackerRepo.SetReadingSource(context.Background(), 2, trackerID, nil); err != nil {
 		t.Fatalf("clear as other profile: %v", err)
 	}
-	if got := readPin(); got != weebcentral {
+	if got := readPin(); got != comick {
 		t.Fatalf("other profile cleared the pin: %v", got)
 	}
 }

@@ -23,7 +23,6 @@ RUN adduser -D -g '' appuser
 COPY --from=builder /cross-site-tracker-api /usr/local/bin/cross-site-tracker-api
 COPY --from=builder /cleanup-stale-sources /usr/local/bin/cleanup-stale-sources
 COPY --from=builder /repair-latest-chapter /usr/local/bin/repair-latest-chapter
-COPY backend/migrations ./migrations
 COPY backend/web ./web
 
 RUN mkdir -p /app/data && chown -R appuser:appuser /app

@@ -560,7 +560,7 @@ func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID in
 		return nil, err
 	}
 
-	sourceLogoBySourceID, err := h.sourceRepo.ListProfileSourceLogoURLs(ctx, profileID)
+	sourceLogoBySourceID, err := h.sourceRepo.ListSourceLogoURLs(ctx)
 	if err != nil {
 		return nil, err
 	}

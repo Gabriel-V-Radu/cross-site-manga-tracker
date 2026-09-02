@@ -17,7 +17,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := database.ApplyMigrations(db, filepath.Join("..", "..", "migrations")); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if err := database.SeedDefaults(db); err != nil {
@@ -100,7 +100,8 @@ func TestRunRepairsSetsChapterAndClearsPendingState(t *testing.T) {
 	}
 	// Not NULL: the next poll would fill a NULL with its own time and rank the
 	// repaired tracker as freshly updated. With no release date on record the
-	// fallback is the tracker's creation, the rule migration 0018 used.
+	// fallback is the tracker's creation, the rule the original backfill of
+	// this column used.
 	if !seenAt.Valid || seenAt.String != createdAt {
 		t.Fatalf("expected latest_chapter_seen_at to fall back to created_at %q, got %#v", createdAt, seenAt)
 	}

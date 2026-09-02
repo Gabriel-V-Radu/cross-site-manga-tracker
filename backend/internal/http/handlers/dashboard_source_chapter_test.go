@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -55,9 +54,7 @@ func setupAppForChapterLookup(t *testing.T, connector connectors.Connector) (*fi
 		t.Fatalf("open db: %v", err)
 	}
 
-	_, currentFile, _, _ := runtime.Caller(0)
-	migrationsPath := filepath.Join(filepath.Dir(currentFile), "..", "..", "..", "migrations")
-	if err := database.ApplyMigrations(db, migrationsPath); err != nil {
+	if err := database.ApplyMigrations(db); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply migrations: %v", err)
 	}
