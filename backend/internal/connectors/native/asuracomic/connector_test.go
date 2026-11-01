@@ -426,6 +426,83 @@ func TestAsuraComicResolveChapterURLVerifiesAgainstTheSeriesPage(t *testing.T) {
 	}
 }
 
+// TestAsuraComicResolveChapterURLRefusesChaptersThePageDoesNotList pins that a
+// number at or below the latest is linked only when the page carries it. The
+// upper bound alone built links for chapters Asura never ran (a .5 extra from
+// another site), which 404 and were cached as verified hits. Below the lowest
+// number on the page the link is still built, since the page may carry only
+// the newest part of the run, and chapters known only from the serialized
+// island props count as carried.
+func TestAsuraComicResolveChapterURLRefusesChaptersThePageDoesNotList(t *testing.T) {
+	var links strings.Builder
+	for chapter := 50; chapter >= 40; chapter-- {
+		if chapter == 47 {
+			continue
+		}
+		fmt.Fprintf(&links, `<a href="/comics/nano-machine-7f873ca6/chapter/%d">Chapter %d</a>`, chapter, chapter)
+	}
+	// A "first chapter" button plus the newest rows, with the full run only in
+	// the island's props.
+	var props strings.Builder
+	for chapter := 30; chapter >= 1; chapter-- {
+		if props.Len() > 0 {
+			props.WriteString(",")
+		}
+		fmt.Fprintf(&props, `[0,{&quot;number&quot;:[0,%d],&quot;published_at&quot;:[0,&quot;2026-01-01T00:00:00Z&quot;]}]`, chapter)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/comics/nano-machine-7f873ca6", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><head><meta property="og:title" content="Nano Machine - Asura Scans"></head><body>` + links.String() + `</body></html>`))
+	})
+	mux.HandleFunc("/comics/island-series-12345678", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><head><meta property="og:title" content="Island Series - Asura Scans"></head><body>` +
+			`<astro-island props="{&quot;chapters&quot;:[1,[` + props.String() + `]]}"></astro-island>` +
+			`<a href="/comics/island-series-12345678/chapter/1">First Chapter</a>` +
+			`<a href="/comics/island-series-12345678/chapter/30">Chapter 30</a>` +
+			`<a href="/comics/island-series-12345678/chapter/29">Chapter 29</a>` +
+			`</body></html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+
+	cases := []struct {
+		name    string
+		series  string
+		chapter float64
+		carried bool
+	}{
+		{name: "listed chapter", series: "nano-machine-7f873ca6", chapter: 46, carried: true},
+		{name: "lowest listed chapter", series: "nano-machine-7f873ca6", chapter: 40, carried: true},
+		{name: "decimal extra from another site", series: "nano-machine-7f873ca6", chapter: 45.5, carried: false},
+		{name: "gap inside the listed range", series: "nano-machine-7f873ca6", chapter: 47, carried: false},
+		{name: "below the lowest listed chapter", series: "nano-machine-7f873ca6", chapter: 12, carried: true},
+		{name: "chapter only in the island props", series: "island-series-12345678", chapter: 15, carried: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chapterURL, err := conn.ResolveChapterURL(context.Background(), "https://asurascans.com/comics/"+tc.series, tc.chapter)
+			if !tc.carried {
+				if !errors.Is(err, connectors.ErrChapterNotFound) {
+					t.Fatalf("expected the typed not-found verdict, got url %q and error %v", chapterURL, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve chapter url failed: %v", err)
+			}
+			want := server.URL + "/comics/" + tc.series + "/chapter/" + connectors.FormatChapter(tc.chapter)
+			if chapterURL != want {
+				t.Fatalf("expected %s, got %s", want, chapterURL)
+			}
+		})
+	}
+}
+
 // TestAsuraComicSearchFetchesOnlyMatchingSeries pins that the match is settled
 // from the browse page before any series page is fetched. Every fetch costs a
 // turn in the per-host pacing, and reading the nav and sidebar /comics/ links

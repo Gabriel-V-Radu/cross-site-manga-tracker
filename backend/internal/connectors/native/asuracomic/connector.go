@@ -50,6 +50,11 @@ var (
 	monthDayOrdinalYearPattern       = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
 )
 
+// chapterPublishedPatterns are the serialized chapter records each site era
+// has embedded in the page (escaped and raw script JSON, Astro island props);
+// each match captures a chapter number and its publish time.
+var chapterPublishedPatterns = []*regexp.Regexp{chapterPublishedEscPattern, chapterPublishedRawPattern, chapterPublishedEscNumberPattern, chapterPublishedHTMLPattern}
+
 // Connector reads asurascans.com by scraping its series and browse pages. The
 // embedded Site supplies Key, Name, Kind and the SiteInfo methods; baseURL is
 // where requests go and, unlike the other scrapers, also the canonical origin
@@ -122,7 +127,8 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	if err != nil {
 		return nil, err
 	}
-	return c.resolveBySeriesID(ctx, seriesID)
+	result, _, err := c.resolveBySeriesID(ctx, seriesID)
+	return result, err
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
@@ -165,7 +171,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			continue
 		}
 
-		resolved, resolveErr := c.resolveBySeriesIDExact(ctx, seriesID)
+		resolved, _, resolveErr := c.resolveBySeriesIDExact(ctx, seriesID)
 		// A series with no chapter out yet is still a real hit; only a page
 		// that could not be read is skipped.
 		if resolveErr != nil && !errors.Is(resolveErr, connectors.ErrNoChaptersListed) {
@@ -206,7 +212,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// chapter, and the reader chain ranks sites by that claim. A chapter the
 	// page lists as locked early-access counts as carried — its page exists
 	// and unlocks on its own timer.
-	result, err := c.resolveBySeriesID(ctx, seriesID)
+	result, listed, err := c.resolveBySeriesID(ctx, seriesID)
 	if err != nil {
 		return "", err
 	}
@@ -219,6 +225,13 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 			chapterSegment,
 			connectors.FormatChapter(*result.LatestChapter),
 			connectors.ErrChapterNotFound)
+	}
+	// The upper bound alone let every number at or below the latest through,
+	// so a chapter Asura never ran (a .5 extra numbered by another site, the
+	// early run of a series it picked up midway) got a built link that 404s,
+	// which the reading chain then cached for hours as a verified hit.
+	if !chapterCarried(listed, chapter) {
+		return "", fmt.Errorf("chapter %s not listed: %w", chapterSegment, connectors.ErrChapterNotFound)
 	}
 
 	return c.AbsoluteURL("/comics/" + seriesID + "/chapter/" + chapterSegment), nil
@@ -248,36 +261,39 @@ func (c *Connector) parseSeriesURL(rawURL string) (string, string, error) {
 	return seriesID, routeKind, nil
 }
 
-func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
-	result, err := c.resolveBySeriesIDExact(ctx, seriesID)
+func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, []float64, error) {
+	result, listed, err := c.resolveBySeriesIDExact(ctx, seriesID)
 	if err == nil {
-		return result, nil
+		return result, listed, nil
 	}
 	if !connectors.IsNotFound(err) {
-		return nil, err
+		return nil, nil, err
 	}
 
 	canonicalSeriesID, findErr := c.findCanonicalSeriesID(ctx, seriesID)
 	if findErr != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if canonicalSeriesID == seriesID {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// resolveBySeriesIDExact hands its result back beside a no-chapters error
 	// for search's sake; a resolve answers with a result only on success.
-	result, err = c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
+	result, listed, err = c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return result, nil
+	return result, listed, nil
 }
 
-func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
+// resolveBySeriesIDExact reads one series page. Beside the result it returns
+// every chapter number the page carries (see listedChapters), which only the
+// chapter-link check reads.
+func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, []float64, error) {
 	body, err := c.fetchPage(ctx, c.AbsoluteURL("/comics/"+url.PathEscape(seriesID)))
 	if err != nil {
-		return nil, fmt.Errorf("fetch series page: %w", err)
+		return nil, nil, fmt.Errorf("fetch series page: %w", err)
 	}
 
 	title := extractTitle(body)
@@ -306,9 +322,9 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 	// log line and no turn for its other sources. The result still comes back
 	// beside the error so search can list a series with no chapter out yet.
 	if latestChapter == nil {
-		return result, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
+		return result, nil, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
 	}
-	return result, nil
+	return result, listedChapters(body, seriesID), nil
 }
 
 func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) (string, error) {
@@ -493,6 +509,53 @@ func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *
 	return latestChapter, releaseAt
 }
 
+// listedChapters returns every chapter number the series page carries: its
+// chapter links, plus the chapter records serialized into its scripts and
+// island props. The records count as well because the rendered list may show
+// only part of the run (a "first chapter" button beside the newest rows, the
+// rest left to the island), and a chapter the site has must not be refused
+// for being missing from the links.
+func listedChapters(body string, seriesID string) []float64 {
+	var listed []float64
+	add := func(raw string) {
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err == nil && connectors.ValidChapter(parsed) {
+			listed = append(listed, parsed)
+		}
+	}
+	for _, loc := range chapterHrefIndexes(body, seriesID) {
+		if len(loc) >= 4 {
+			add(body[loc[2]:loc[3]])
+		}
+	}
+	for _, pattern := range chapterPublishedPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(body, -1) {
+			if len(match) >= 2 {
+				add(match[1])
+			}
+		}
+	}
+	return listed
+}
+
+// chapterCarried reports whether the chapter numbers a series page carries
+// admit chapter. A number below the lowest one is admitted all the same: the
+// page may hold only the newest part of a long run, so its absence there
+// proves nothing, while a gap inside the listed range does.
+func chapterCarried(listed []float64, chapter float64) bool {
+	if len(listed) == 0 {
+		return true
+	}
+	lowest := listed[0]
+	for _, number := range listed {
+		if connectors.SameChapter(number, chapter) {
+			return true
+		}
+		lowest = min(lowest, number)
+	}
+	return chapter < lowest
+}
+
 func extractLastUpdatedAt(body string) *time.Time {
 	raw := strings.TrimSpace(connectors.FirstSubmatch(updatedOnPattern, body))
 	if raw != "" {
@@ -543,7 +606,7 @@ func extractPublishedAtForChapter(body string, chapter float64) *time.Time {
 		return nil
 	}
 
-	for _, pattern := range []*regexp.Regexp{chapterPublishedEscPattern, chapterPublishedRawPattern, chapterPublishedEscNumberPattern, chapterPublishedHTMLPattern} {
+	for _, pattern := range chapterPublishedPatterns {
 		matches := pattern.FindAllStringSubmatch(body, -1)
 		for _, match := range matches {
 			if len(match) < 3 {
