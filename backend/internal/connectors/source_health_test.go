@@ -41,6 +41,8 @@ func TestClassifyOutcome(t *testing.T) {
 		{name: "client timeout", err: &url.Error{Op: "Get", URL: "https://x", Err: timeoutError{}}, kind: OutcomeFailed, label: "timed out"},
 		{name: "dns", err: fmt.Errorf("request failed: %w", &net.DNSError{Err: "no such host", Name: "x"}), kind: OutcomeFailed, label: "DNS lookup failed"},
 		{name: "refused", err: fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}), kind: OutcomeFailed, label: "unreachable"},
+		{name: "dial timeout", err: fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Err: timeoutError{}}), kind: OutcomeFailed, label: "could not connect (timed out)"},
+		{name: "connection reset", err: fmt.Errorf("request failed: %w", &net.OpError{Op: "read", Err: errors.New("connection reset by peer")}), kind: OutcomeFailed, label: "connection failed"},
 		{name: "foreign link", err: errors.New("url does not belong to comick"), kind: OutcomeBadLink, label: "unusable link"},
 		{name: "garbled json", err: errors.New("decode response: invalid character"), kind: OutcomeFailed, label: "unreadable response"},
 		{name: "layout changed", err: fmt.Errorf("asura series x-1: %w", ErrNoChaptersListed), kind: OutcomeFailed, label: "page lists no chapters (site layout changed?)"},
@@ -114,6 +116,41 @@ func TestSourceHealthBoardOneBadCycleIsABlipTwoAreAnOutage(t *testing.T) {
 	row = boardRow(t, board, "asura")
 	if row.State != SourceStateOK || row.BadCycles != 0 || !row.Since.IsZero() || row.Reason != "" {
 		t.Fatalf("an answered request clears the outage, got %+v", row)
+	}
+}
+
+// A long cycle with a dark site must not leave the panel blank until it ends:
+// a source the running cycle has asked shows that cycle's verdict so far,
+// dated from the cycle's start, while the real record only moves at EndCycle.
+func TestSourceHealthBoardShowsTheRunningCycleSoFar(t *testing.T) {
+	board, now := testBoard()
+	chapter := 1.0
+	runCycle(board, func() { board.RecordResolve("asura", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil) })
+
+	*now = now.Add(30 * time.Minute)
+	board.BeginCycle()
+	started := *now
+	timeout := fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Err: timeoutError{}})
+	for i := 0; i < 4; i++ {
+		*now = now.Add(30 * time.Second)
+		board.RecordResolve("asura", RolePrimary, nil, timeout)
+	}
+
+	row := boardRow(t, board, "asura")
+	if !row.Provisional || row.State != SourceStateFailing || row.Reason != "could not connect (timed out)" || row.Failed != 4 {
+		t.Fatalf("the running cycle's verdict so far = %+v", row)
+	}
+	if !row.Since.Equal(started) {
+		t.Fatalf("Since = %v, want the cycle start %v", row.Since, started)
+	}
+	if board.sources["asura"].state != SourceStateOK {
+		t.Fatal("a provisional verdict must not touch the stored record")
+	}
+
+	board.EndCycle()
+	row = boardRow(t, board, "asura")
+	if row.Provisional || row.State != SourceStateFailing || !row.Since.Equal(started) || row.BadCycles != 1 {
+		t.Fatalf("after EndCycle = %+v", row)
 	}
 }
 

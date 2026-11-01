@@ -107,6 +107,21 @@ func ClassifyOutcome(result *MangaResult, err error) Outcome {
 		}
 	}
 
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return Outcome{Kind: OutcomeFailed, Label: "DNS lookup failed"}
+	}
+	// A connection that never opened is told apart from a slow answer: the
+	// first is the network or the site's address (a dead Cloudflare IP on the
+	// Pi's route), the second the site itself. Checked before the deadline
+	// test because a dial timeout also matches context.DeadlineExceeded.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		if opErr.Timeout() {
+			return Outcome{Kind: OutcomeFailed, Label: "could not connect (timed out)"}
+		}
+		return Outcome{Kind: OutcomeFailed, Label: "unreachable"}
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return Outcome{Kind: OutcomeFailed, Label: "timed out"}
 	}
@@ -114,13 +129,8 @@ func ClassifyOutcome(result *MangaResult, err error) Outcome {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return Outcome{Kind: OutcomeFailed, Label: "timed out"}
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return Outcome{Kind: OutcomeFailed, Label: "DNS lookup failed"}
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return Outcome{Kind: OutcomeFailed, Label: "unreachable"}
+	if opErr != nil {
+		return Outcome{Kind: OutcomeFailed, Label: "connection failed"}
 	}
 
 	// The URL checks every connector opens with (Site.ParseOwnedURL and the
@@ -408,6 +418,12 @@ func (b *SourceHealthBoard) EndCycle() {
 	b.lastCycleStartedAt = b.cycleStartedAt
 	b.lastCycleFinishedAt = now
 	b.lastCycleError = ""
+	// A run of bad cycles is dated from the start of its first cycle, when
+	// the failing began, not from when that cycle finished.
+	startedAt := b.cycleStartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
 
 	for key, tally := range b.current {
 		record := b.recordLocked(key)
@@ -418,7 +434,7 @@ func (b *SourceHealthBoard) EndCycle() {
 			continue
 		}
 		record.evaluated = true
-		foldVerdict(record, tally, now)
+		foldVerdict(record, tally, startedAt)
 	}
 	b.current = map[string]*sourceTally{}
 }
@@ -505,8 +521,12 @@ type SourceHealth struct {
 	Since time.Time
 	// BadCycles is how many consecutive cycles nothing got through.
 	BadCycles int
+	// Provisional marks a verdict and counts taken from the cycle still
+	// running rather than the last finished one.
+	Provisional bool
 
-	// Counts from the last cycle that asked this source.
+	// Counts from the last cycle that asked this source, or from the running
+	// one when Provisional.
 	Answered   int
 	NoChapter  int
 	NotFound   int
@@ -583,7 +603,20 @@ func (b *SourceHealthBoard) view() boardView {
 		LastCycleFinishedAt: b.lastCycleFinishedAt,
 		LastCycleError:      b.lastCycleError,
 	}
-	for key, record := range b.sources {
+	for key, stored := range b.sources {
+		record := *stored
+		provisional := false
+		// While a cycle runs, a source it has already asked is shown with the
+		// verdict that cycle points to so far, folded on a copy so the real
+		// record only moves at EndCycle. Without this the panel said nothing
+		// for as long as the cycle lasted — and a site going dark is exactly
+		// what makes a cycle long, every tracker on it waiting out a timeout.
+		if tally, ok := b.current[key]; ok && b.cycleRunning && tally.asked()+tally.refused > 0 {
+			record.last = *tally
+			foldVerdict(&record, tally, b.cycleStartedAt)
+			record.evaluated = true
+			provisional = true
+		}
 		row := SourceHealth{
 			Key:            key,
 			State:          record.state,
@@ -594,6 +627,7 @@ func (b *SourceHealthBoard) view() boardView {
 			LastFailureAt:  record.lastFailureAt,
 			Since:          record.since,
 			BadCycles:      record.badStreak,
+			Provisional:    provisional,
 			Answered:       record.last.answered(),
 			NoChapter:      record.last.noChapter,
 			NotFound:       record.last.notFound,

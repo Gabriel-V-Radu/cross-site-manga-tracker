@@ -32,6 +32,9 @@ type sourceHealthRowView struct {
 	Facts      []string
 	Counts     string
 	Coverage   string
+	// CycleWord says which cycle the counts describe: "last cycle", or
+	// "this cycle so far" while the verdict is provisional.
+	CycleWord string
 	// Unchecked lists the active profile's trackers this source left
 	// unchecked last cycle; UncheckedMore counts the rest (other profile, or
 	// past the list cap).
@@ -123,9 +126,8 @@ func buildSourceHealthModal(report connectors.SourceHealthReport, profileID int6
 		data.CycleLine = "Poll cycle in progress, started " + relativeTime(report.CycleStartedAt) + "."
 		if !report.LastCycleFinishedAt.IsZero() {
 			data.CycleLine += " The previous one finished " + relativeTime(report.LastCycleFinishedAt) + "."
-		} else {
-			data.CycleLine += " Results appear as each site is asked about its series."
 		}
+		data.CycleLine += " Sites this cycle has already asked show what it has seen so far."
 	case !report.LastCycleFinishedAt.IsZero():
 		data.CycleLine = fmt.Sprintf("Last poll cycle finished %s (took %s).",
 			relativeTime(report.LastCycleFinishedAt),
@@ -192,8 +194,13 @@ func buildSourceHealthRow(source connectors.SourceHealth, profileID int64) sourc
 	} else if !source.LastAskedAt.IsZero() {
 		row.Facts = append(row.Facts, "No answer since the server started")
 	}
-	if source.State == connectors.SourceStateUnknown && source.CooldownLeft <= 0 {
+	if source.State == connectors.SourceStateUnknown && source.CooldownLeft <= 0 && source.LastAskedAt.IsZero() {
 		row.Facts = append(row.Facts, "Not asked by the poller since the server started")
+	}
+
+	row.CycleWord = "last cycle"
+	if source.Provisional {
+		row.CycleWord = "this cycle so far"
 	}
 
 	var counts []string
@@ -219,7 +226,7 @@ func buildSourceHealthRow(source connectors.SourceHealth, profileID int64) sourc
 		counts = append(counts, fmt.Sprintf("%d as a fallback", source.AsFallback))
 	}
 	if len(counts) > 0 {
-		row.Counts = "Last cycle: " + strings.Join(counts, " · ")
+		row.Counts = strings.ToUpper(row.CycleWord[:1]) + row.CycleWord[1:] + ": " + strings.Join(counts, " · ")
 	}
 
 	switch {

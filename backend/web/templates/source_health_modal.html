@@ -28,7 +28,7 @@
                 {{if .Counts}}<p class="source-health-row__fact">{{.Counts}}</p>{{end}}
                 {{if .Coverage}}<p class="source-health-row__fact">{{.Coverage}}</p>{{end}}
                 {{if or .Unchecked .UncheckedMore}}
-                <p class="source-health-row__fact">Not checked last cycle:
+                <p class="source-health-row__fact">Not checked {{.CycleWord}}:
                     {{range $i, $title := .Unchecked}}{{if $i}}, {{end}}{{$title}}{{end}}{{if .UncheckedMore}}{{if .Unchecked}} and{{end}} {{.UncheckedMore}} more{{end}}</p>
                 {{end}}
                 {{if .LastError}}<code class="source-health-row__error" title="{{.LastError}}">{{.LastError}}</code>{{end}}

@@ -128,6 +128,26 @@ func TestBuildSourceHealthModalOrdersWorstFirstAndFiltersTitlesByProfile(t *test
 	}
 }
 
+func TestBuildSourceHealthRowSaysWhichCycleItDescribes(t *testing.T) {
+	now := time.Now().UTC()
+	running := buildSourceHealthRow(connectors.SourceHealth{
+		Name: "AsuraComic", State: connectors.SourceStateFailing, Provisional: true, Failed: 4,
+		LastAskedAt: now, UncheckedCount: 1, Unchecked: []connectors.TrackedSeries{{Title: "Mine", ProfileID: 1}},
+	}, 1)
+	if running.Counts != "This cycle so far: 4 failed" || running.CycleWord != "this cycle so far" {
+		t.Fatalf("provisional row = %+v", running)
+	}
+
+	// Asked during the running cycle but with no verdict yet: it was asked, so
+	// it must not also claim the poller never asked it.
+	asked := buildSourceHealthRow(connectors.SourceHealth{Name: "MangaFire", State: connectors.SourceStateUnknown, LastAskedAt: now, LastSuccessAt: now}, 1)
+	for _, fact := range asked.Facts {
+		if strings.Contains(fact, "Not asked") {
+			t.Fatalf("a source with an answer cannot be 'not asked': %v", asked.Facts)
+		}
+	}
+}
+
 func TestBuildSourceHealthModalPollingOff(t *testing.T) {
 	data := buildSourceHealthModal(connectors.SourceHealthReport{}, 1, time.Now())
 	if data.Notice == "" || data.CycleLine != "" {
