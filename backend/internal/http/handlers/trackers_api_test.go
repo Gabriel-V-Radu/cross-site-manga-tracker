@@ -2,11 +2,13 @@ package handlers_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestTrackersCRUD(t *testing.T) {
@@ -120,6 +122,98 @@ func TestTrackersCRUD(t *testing.T) {
 	}
 	if getAfterDeleteRes.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", getAfterDeleteRes.StatusCode)
+	}
+}
+
+// The request has no release-date field, so a PUT keeps the stored one. It
+// used to write NULL over it, even when the client echoed back the body GET
+// returned, which moved the tracker in the default latest-chapter sort.
+func TestTrackersUpdateKeepsStoredReleaseDate(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	releasedAt := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, latest_known_chapter, latest_release_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, 1, "Dated Tracker", 1, "https://mangadex.org/title/dated", "reading", 40.0, releasedAt)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("tracker id: %v", err)
+	}
+	path := "/v1/trackers/" + toString(int(id))
+
+	getRes, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+	if err != nil {
+		t.Fatalf("get request failed: %v", err)
+	}
+	var echoed map[string]any
+	if err := json.NewDecoder(getRes.Body).Decode(&echoed); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+
+	// Echo the whole object back with one field changed, the way a client
+	// edits a tracker.
+	echoed["status"] = "on_hold"
+	raw, _ := json.Marshal(echoed)
+	putReq := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(raw))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRes, err := app.Test(putReq)
+	if err != nil {
+		t.Fatalf("update request failed: %v", err)
+	}
+	if putRes.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(putRes.Body)
+		t.Fatalf("expected 200, got %d (body: %s)", putRes.StatusCode, body)
+	}
+
+	var updated struct {
+		Status          string     `json:"status"`
+		LatestReleaseAt *time.Time `json:"latestReleaseAt"`
+	}
+	if err := json.NewDecoder(putRes.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updated.Status != "on_hold" {
+		t.Fatalf("expected the status change to be saved, got %q", updated.Status)
+	}
+	if updated.LatestReleaseAt == nil || !updated.LatestReleaseAt.Equal(releasedAt) {
+		t.Fatalf("expected the stored release date %s to survive the PUT, got %v", releasedAt, updated.LatestReleaseAt)
+	}
+
+	var stored sql.NullTime
+	if err := db.QueryRow(`SELECT latest_release_at FROM trackers WHERE id = ?`, id).Scan(&stored); err != nil {
+		t.Fatalf("read latest_release_at: %v", err)
+	}
+	if !stored.Valid || !stored.Time.Equal(releasedAt) {
+		t.Fatalf("expected latest_release_at to stay %s in the database, got %v", releasedAt, stored)
+	}
+}
+
+// A PUT to a tracker that is not there, or belongs to the other profile,
+// answers 404 before anything is written.
+func TestTrackersUpdateUnknownTrackerIsNotFound(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	raw, _ := json.Marshal(map[string]any{
+		"title":     "Nobody",
+		"sourceId":  1,
+		"sourceUrl": "https://mangadex.org/title/nobody",
+		"status":    "reading",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/v1/trackers/999", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("update request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 404, got %d (body: %s)", res.StatusCode, body)
 	}
 }
 

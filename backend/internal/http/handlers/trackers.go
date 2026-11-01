@@ -158,6 +158,21 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
 	}
 
+	// The request has no release-date field and the update writes every
+	// column, so the stored date has to ride along, as it does on the edit
+	// form. A PUT used to write NULL over it, even one echoing back the body GET
+	// returned, which moved the tracker in the default latest-chapter sort and
+	// took the release date off its card until the next poll.
+	existing, err := h.repo.GetByID(c.Context(), profile.ID, id)
+	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to load tracker", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to update tracker"})
+	}
+	if existing == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "tracker not found"})
+	}
+	tracker.LatestReleaseAt = existing.LatestReleaseAt
+
 	tracker.ProfileID = profile.ID
 
 	updated, err := h.repo.Update(c.Context(), profile.ID, id, tracker)
