@@ -2,6 +2,7 @@ package linkscan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,7 @@ type stubStore struct {
 	targets      []repository.LinkScanTarget
 	stored       map[int64][]repository.LinkSuggestion
 	mergedTitles map[int64][]string
+	decided      map[int64][]string
 }
 
 func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
@@ -26,7 +28,14 @@ func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
 		targets:      targets,
 		stored:       map[int64][]repository.LinkSuggestion{},
 		mergedTitles: map[int64][]string{},
+		decided:      map[int64][]string{},
 	}
+}
+
+func (s *stubStore) DecidedCandidateURLs(_ context.Context, trackerID int64, _ int64) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.decided[trackerID], nil
 }
 
 func (s *stubStore) ListScanTargets(context.Context, int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
@@ -85,7 +94,7 @@ func (a *stubAid) Search(context.Context, string, int) ([]mangabaka.Series, erro
 	return a.series, a.err
 }
 
-func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid AidLookup) {
+func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid AidLookup) *Scanner {
 	t.Helper()
 	registry := connectors.NewRegistry()
 	if err := registry.Register(connector); err != nil {
@@ -102,6 +111,7 @@ func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	return scanner
 }
 
 // blockingConnector parks inside SearchByTitle until its context is cancelled,
@@ -159,6 +169,87 @@ func TestCloseCancelsARunningScan(t *testing.T) {
 
 	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err == nil {
 		t.Fatal("a scan started after shutdown")
+	}
+}
+
+// TestStopReportsStoppingUntilTheScanEnds pins the feedback Stop gives while
+// the tracker in flight finishes, and that a Start in that window is refused
+// with an error the dashboard can tell apart from a real failure.
+func TestStopReportsStoppingUntilTheScanEnds(t *testing.T) {
+	connector := &blockingConnector{key: "weebcentral", entered: make(chan struct{})}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	store := newStubStore(repository.LinkScanTarget{TrackerID: 1, Title: "First"})
+	scanner := NewScanner(store, registry, nil, slog.Default())
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	<-connector.entered
+
+	if scanner.Snapshot().Stopping {
+		t.Fatal("a scan nobody asked to stop reports Stopping")
+	}
+	scanner.Stop()
+	progress := scanner.Snapshot()
+	if !progress.Running || !progress.Stopping {
+		t.Fatalf("after Stop mid-tracker: running=%v stopping=%v, want both true", progress.Running, progress.Stopping)
+	}
+
+	err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{})
+	if !errors.Is(err, ErrScanRunning) {
+		t.Fatalf("start during wind-down = %v, want ErrScanRunning", err)
+	}
+
+	scanner.Close()
+	progress = scanner.Snapshot()
+	if progress.Running || progress.Stopping || !progress.Stopped {
+		t.Fatalf("after the scan ended: running=%v stopping=%v stopped=%v, want only stopped", progress.Running, progress.Stopping, progress.Stopped)
+	}
+}
+
+// TestScanSkipsDecidedCandidatesBeforeRanking covers a tracker whose top hits
+// the user already rejected: the next-best hit must take their place, and a
+// tracker left with nothing new must not count as "with candidates".
+func TestScanSkipsDecidedCandidatesBeforeRanking(t *testing.T) {
+	connector := &stubConnector{
+		key: "weebcentral",
+		searchResults: map[string][]connectors.MangaResult{
+			"Solo Leveling": {
+				{Title: "Solo Leveling", URL: "https://weebcentral.com/series/a"},
+				{Title: "Solo Leveling Ragnarok", URL: "https://weebcentral.com/series/b"},
+				{Title: "Solo Leveling Side Story", URL: "https://weebcentral.com/series/c"},
+				{Title: "Solo Leveling Arise From the Shadow", URL: "https://weebcentral.com/series/d"},
+			},
+			"Omniscient Reader": {
+				{Title: "Omniscient Reader", URL: "https://weebcentral.com/series/e"},
+			},
+		},
+	}
+	store := newStubStore(
+		repository.LinkScanTarget{TrackerID: 1, Title: "Solo Leveling"},
+		repository.LinkScanTarget{TrackerID: 2, Title: "Omniscient Reader"},
+	)
+	store.decided[1] = []string{
+		"https://weebcentral.com/series/a",
+		"https://weebcentral.com/series/b",
+		"https://weebcentral.com/series/c",
+	}
+	store.decided[2] = []string{"https://weebcentral.com/series/e"}
+
+	scanner := runScan(t, store, connector, nil)
+
+	suggestions := store.stored[1]
+	if len(suggestions) != 1 || suggestions[0].CandidateURL != "https://weebcentral.com/series/d" {
+		t.Fatalf("suggestions = %+v, want only the undecided fourth hit", suggestions)
+	}
+	if len(store.stored[2]) != 0 {
+		t.Fatalf("a decided candidate came back: %+v", store.stored[2])
+	}
+	if got := scanner.Snapshot().WithCandidates; got != 1 {
+		t.Fatalf("WithCandidates = %d, want 1: only the first tracker has anything new", got)
 	}
 }
 

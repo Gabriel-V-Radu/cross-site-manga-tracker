@@ -6,6 +6,7 @@ package linkscan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -49,7 +50,17 @@ type Progress struct {
 	// Stopped records that the user cut the scan short; what was already
 	// stored stays stored, the rest simply was not visited.
 	Stopped bool
+	// Stopping is a running scan the user asked to stop. Stop only raises a
+	// flag the walk checks between trackers, and the tracker in flight can
+	// take an aggregator lookup, several searches and a resolve; without this
+	// the status kept reading "Scanning" with a Stop button that seemed to do
+	// nothing.
+	Stopping bool
 }
+
+// ErrScanRunning is Start's refusal while another scan is running, including
+// one still finishing its current tracker after Stop.
+var ErrScanRunning = errors.New("a link scan is already running")
 
 // suggestionStore takes the context-carrying repository methods: a scan writes
 // from a background goroutine against a one-connection pool, so a statement
@@ -58,6 +69,7 @@ type Progress struct {
 type suggestionStore interface {
 	ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
 	ReplacePendingSuggestions(ctx context.Context, trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
+	DecidedCandidateURLs(ctx context.Context, trackerID int64, sourceID int64) ([]string, error)
 	MergeRelatedTitles(ctx context.Context, trackerID int64, titles []string) error
 }
 
@@ -139,7 +151,7 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.progress.Running {
-		return fmt.Errorf("a link scan is already running")
+		return ErrScanRunning
 	}
 	if s.lifetime.Err() != nil {
 		// The process is shutting down; a scan launched now would be cancelled
@@ -174,7 +186,9 @@ func (s *Scanner) Stop() {
 func (s *Scanner) Snapshot() Progress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.progress
+	progress := s.progress
+	progress.Stopping = progress.Running && s.stopRequested
+	return progress
 }
 
 func (s *Scanner) shouldStop() bool {
@@ -211,7 +225,15 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 			return
 		}
 
-		suggestions := s.findCandidates(ctx, connector, target, sourceID)
+		decided, err := s.store.DecidedCandidateURLs(ctx, target.TrackerID, sourceID)
+		if err != nil {
+			// Not fatal: the store still refuses to reopen a decided candidate,
+			// the tracker just loses the next-best hits that would have taken
+			// its place.
+			s.logger.Warn("link scan could not load decided candidates", "trackerId", target.TrackerID, "error", err)
+		}
+
+		suggestions := s.findCandidates(ctx, connector, target, sourceID, decided)
 
 		// A cancelled scan comes back from the searches above with nothing to
 		// show for them, and storing that nothing would erase the candidates
@@ -244,8 +266,19 @@ func (s *Scanner) setError(message string) {
 // back. A metadata-aggregator lookup runs first: a confirmed record widens
 // the title set candidates are scored against, and on MangaUpdates it skips
 // the fuzzy search entirely in favour of the record's exact series id.
-func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64) []repository.LinkSuggestion {
+//
+// decidedURLs are candidates the user already accepted or rejected for this
+// tracker. They are dropped before ranking: left in, three rejected hits
+// filled every slot, the store then skipped all three, and the fourth hit —
+// often the right series — was thrown away along with the alternate-title
+// queries that only run when nothing was found.
+func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, decidedURLs []string) []repository.LinkSuggestion {
 	wanted := append([]string{target.Title}, target.RelatedTitles...)
+
+	decided := make(map[string]struct{}, len(decidedURLs))
+	for _, url := range decidedURLs {
+		decided[strings.TrimSpace(url)] = struct{}{}
+	}
 
 	if aid := s.lookupAid(ctx, target); aid != nil {
 		wanted = searchutil.UniqueNonEmpty(append(wanted, aid.Titles...))
@@ -257,7 +290,9 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 
 		if connector.Key() == "mangaupdates" {
 			if suggestion := s.directSuggestion(ctx, connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
-				return []repository.LinkSuggestion{*suggestion}
+				if _, done := decided[suggestion.CandidateURL]; !done {
+					return []repository.LinkSuggestion{*suggestion}
+				}
 			}
 		}
 	}
@@ -292,6 +327,9 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 				continue
 			}
 			seen[url] = struct{}{}
+			if _, done := decided[url]; done {
+				continue
+			}
 
 			score := ScoreCandidate(result.Title, wanted)
 			if score < minKeepScore {
