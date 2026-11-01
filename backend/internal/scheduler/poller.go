@@ -277,8 +277,42 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		result.LatestChapter = nil
 	}
 
+	// A primary can answer successfully and still carry no chapter number:
+	// MangaUpdates once its newest release is past the staleness cutoff (a
+	// licensed series the scanlators dropped), a feed with no English
+	// chapters, Asura or Flame the day their markup stops matching — or the
+	// number was junk and was dropped just above. Only an error used to reach
+	// the alternates, so such a tracker froze on its old chapter with nothing
+	// logged while a linked mirror kept listing new ones. The alternates'
+	// chapter and its date are taken only when one of them actually has a
+	// number; otherwise the primary's answer stands. Either way the primary
+	// did resolve, so its canonical id and URL are still written below:
+	// usedFallback, which blanks them, stays false.
+	chapterFromFallback := usedFallback
+	if !usedFallback && result.LatestChapter == nil && len(tracker.AlternateSources) > 0 {
+		alternate, alternateSource := p.resolveFromAlternates(ctx, tracker)
+		if alternate != nil && alternate.LatestChapter != nil {
+			// A copy, so the connector's own result is never rewritten with
+			// another site's data.
+			merged := *result
+			merged.LatestChapter = alternate.LatestChapter
+			merged.LastUpdatedAt = alternate.LastUpdatedAt
+			result = &merged
+			chapterFromFallback = true
+			reporterSourceID = alternateSource.SourceID
+			p.logger.Debug("poll took the chapter from an alternate: the primary reported none",
+				"trackerId", tracker.ID,
+				"primarySourceKey", tracker.SourceKey,
+				"fallbackSourceKey", alternateSource.SourceKey,
+				"reported", *alternate.LatestChapter)
+		} else {
+			p.logger.Debug("poll found no chapter number on the primary or any alternate",
+				"trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
+		}
+	}
+
 	now := time.Now().UTC()
-	outcome := decideChapter(tracker, result.LatestChapter, usedFallback, now, p.lowerConfirmationDelay)
+	outcome := decideChapter(tracker, result.LatestChapter, chapterFromFallback, now, p.lowerConfirmationDelay)
 	latest := outcome.latest
 	if outcome.corrected {
 		p.logger.Info("poll corrected the stored chapter downwards",
@@ -287,18 +321,22 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			"from", derefChapter(tracker.LatestKnownChapter),
 			"to", derefChapter(latest),
 			"sourceKey", tracker.SourceKey,
-			"usedFallback", usedFallback)
+			"usedFallback", chapterFromFallback)
 	}
 
-	// The source whose report the stored number now reflects. Recorded when
-	// this poll's report IS the stored number — an advance, a correction, a
-	// first fill, or a plain confirmation (which backfills trackers from
-	// before the column existed and keeps the attribution current). A poll
-	// whose report lost the reconciliation — a lagging mirror, a pending
-	// lower — must not claim a number it did not supply.
+	// Whether this poll's report IS the stored number — an advance, a
+	// correction, a first fill, or a plain confirmation — as opposed to a
+	// report that lost the reconciliation: a lagging mirror, a pending lower,
+	// a correction clamped at the read position, a number dropped as junk.
+	reportIsStored := latest != nil && result.LatestChapter != nil &&
+		sameChapterNumber(*latest, *result.LatestChapter)
+
+	// The source whose report the stored number now reflects. A plain
+	// confirmation records it too, which backfills trackers from before the
+	// column existed and keeps the attribution current. A poll whose report
+	// lost the reconciliation must not claim a number it did not supply.
 	var latestChapterSourceID *int64
-	if reporterSourceID > 0 && latest != nil && result.LatestChapter != nil &&
-		sameChapterNumber(*latest, *result.LatestChapter) {
+	if reporterSourceID > 0 && reportIsStored {
 		latestChapterSourceID = &reporterSourceID
 	}
 
@@ -309,11 +347,16 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	// that merely lags leaves `latest` alone and so reads as no change.
 	chapterMoved := chapterNumberChanged(tracker.LatestKnownChapter, latest)
 	latestReleaseAt := result.LastUpdatedAt
-	if !chapterMoved && tracker.LatestReleaseAt != nil {
+	if !chapterMoved && (tracker.LatestReleaseAt != nil || !reportIsStored) {
 		// The chapter didn't move, so keep the stored release date
 		// rather than rewriting it with the source's current value —
 		// some sources bump their update timestamp without releasing
-		// anything, which made dates drift toward "just now".
+		// anything, which made dates drift toward "just now". A missing
+		// date is filled only from a report of the stored chapter itself:
+		// a lagging mirror's lower chapter, or a number dropped as junk,
+		// carries a date that belongs to some other chapter, and once
+		// written it would sit beside the stored one as if exact until the
+		// next release.
 		latestReleaseAt = nil
 	}
 	// chapterMoved, not newChapter: a correction downward changes the recorded
@@ -322,7 +365,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	// test left that stale date on the card, next to a number it never belonged
 	// to, and the default ordering sorts by it.
 	clearLatestReleaseAt := latestReleaseAt == nil && chapterMoved
-	if usedFallback {
+	if chapterFromFallback {
 		// A fallback source may know nothing about release dates (MangaBuddy
 		// reports none usable), and dropping to one must never destroy what the
 		// primary already recorded. Keeping a stale date beside a newer chapter
@@ -421,11 +464,14 @@ type chapterOutcome struct {
 
 // decideChapter reconciles the number a poll reported with the one on record.
 //
-// A primary source is authoritative: whatever it reports is stored, corrections
-// downwards included, which is how a source that used to over-report gets to fix
-// its own history. A fallback is not — it may be a mirror that simply lags — so a
-// lower number from one is only applied once it has kept reporting the same value
-// for confirmationDelay. Until then it is remembered, not acted on.
+// A primary source is authoritative over its own numbers: whatever it reports is
+// stored, corrections downwards included, which is how a source that used to
+// over-report gets to fix its own history. A fallback is not — it may be a mirror
+// that simply lags — so a lower number from one is only applied once it has kept
+// reporting the same value for confirmationDelay. Until then it is remembered, not
+// acted on. The same wait applies to the primary when the stored number is not
+// its own: a fallback that advanced the tracker while the primary was dark put a
+// number there the primary may simply not have indexed yet.
 //
 // Both paths refuse to record a chapter below the one the reader has already
 // finished, so no correction can make read chapters look unread.
@@ -465,7 +511,16 @@ func decideChapter(
 		return chapterOutcome{latest: stored}
 	}
 
-	if !usedFallback {
+	// The immediate correction assumes the stored number is the primary's
+	// own. When a fallback supplied it (MangaFire behind its challenge for a
+	// few days while ComicK moved the tracker from 120 to 122), the recovered
+	// primary still topping out at 121 is exactly the lagging mirror the
+	// confirmation exists for; applying it at once walked the tracker back
+	// and forth every time a primary came back. No attribution means a number
+	// from before the column existed or a hand repair, which the primary has
+	// always been trusted to correct.
+	storedByPrimary := tracker.LatestChapterSourceID == nil || *tracker.LatestChapterSourceID == tracker.SourceID
+	if !usedFallback && storedByPrimary {
 		return chapterOutcome{latest: &candidate, corrected: true}
 	}
 

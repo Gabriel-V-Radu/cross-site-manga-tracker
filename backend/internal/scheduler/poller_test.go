@@ -75,13 +75,18 @@ func chapterPtr(value float64) *float64 { return &value }
 // no English mirror could ever correct.
 func TestDecideChapter(t *testing.T) {
 	const window = 24 * time.Hour
+	// The tracker's primary source, and an alternate that once supplied the
+	// stored number while the primary was dark.
+	const primaryID, fallbackID int64 = 7, 9
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	longAgo := now.Add(-48 * time.Hour)
 	recently := now.Add(-1 * time.Hour)
+	sourceIDPtr := func(id int64) *int64 { return &id }
 
 	cases := []struct {
 		name             string
 		stored           *float64
+		storedBy         *int64
 		lastRead         *float64
 		pending          *float64
 		pendingSeenAt    *time.Time
@@ -193,11 +198,59 @@ func TestDecideChapter(t *testing.T) {
 			reported:   chapterPtr(176),
 			wantLatest: chapterPtr(302),
 		},
+		{
+			name:          "a primary corrects a number it reported itself immediately",
+			stored:        chapterPtr(122),
+			storedBy:      sourceIDPtr(primaryID),
+			reported:      chapterPtr(121),
+			wantLatest:    chapterPtr(121),
+			wantCorrected: true,
+		},
+		{
+			// MangaFire back from its challenge, still topping out at 121
+			// after ComicK moved the tracker to 122 while it was dark.
+			name:             "a primary's lower report over a fallback's number is remembered, not applied",
+			stored:           chapterPtr(122),
+			storedBy:         sourceIDPtr(fallbackID),
+			reported:         chapterPtr(121),
+			wantLatest:       chapterPtr(122),
+			wantPendingLower: chapterPtr(121),
+		},
+		{
+			name:             "a primary's lower report over a fallback's number still inside the window is not applied",
+			stored:           chapterPtr(122),
+			storedBy:         sourceIDPtr(fallbackID),
+			pending:          chapterPtr(121),
+			pendingSeenAt:    &recently,
+			reported:         chapterPtr(121),
+			wantLatest:       chapterPtr(122),
+			wantPendingLower: chapterPtr(121),
+		},
+		{
+			name:          "a primary's lower report over a fallback's number confirmed past the window is applied",
+			stored:        chapterPtr(122),
+			storedBy:      sourceIDPtr(fallbackID),
+			pending:       chapterPtr(121),
+			pendingSeenAt: &longAgo,
+			reported:      chapterPtr(121),
+			wantLatest:    chapterPtr(121),
+			wantCorrected: true,
+		},
+		{
+			name:       "a primary catching up to a fallback's number clears the pending correction",
+			stored:     chapterPtr(122),
+			storedBy:   sourceIDPtr(fallbackID),
+			pending:    chapterPtr(121),
+			reported:   chapterPtr(122),
+			wantLatest: chapterPtr(122),
+		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			tracker := repository.PollingTracker{
+				SourceID:                primaryID,
+				LatestChapterSourceID:   testCase.storedBy,
 				LatestKnownChapter:      testCase.stored,
 				LastReadChapter:         testCase.lastRead,
 				PendingLowerChapter:     testCase.pending,
@@ -824,6 +877,347 @@ func TestPollerRunOnce_FallbackIgnoresImplausibleJumpAndUsesSaneMirror(t *testin
 
 	if repo.updatedLatest == nil || *repo.updatedLatest != sane {
 		t.Fatalf("expected the sane mirror's %.0f to win over junk, got %#v", sane, repo.updatedLatest)
+	}
+}
+
+// countingConnector returns a fixed result and counts how often it was asked,
+// so a test can prove an alternate was, or was not, consulted.
+type countingConnector struct {
+	key      string
+	result   *connectors.MangaResult
+	resolves atomic.Int32
+}
+
+func (c *countingConnector) Key() string                       { return c.key }
+func (c *countingConnector) Name() string                      { return c.key }
+func (c *countingConnector) Kind() string                      { return connectors.KindNative }
+func (c *countingConnector) HealthCheck(context.Context) error { return nil }
+func (c *countingConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (c *countingConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	c.resolves.Add(1)
+	return c.result, nil
+}
+
+// numberlessPrimaryTracker is a tracker whose primary (source 7) is linked
+// next to one alternate (source 9), as the numberless-primary tests need it.
+func numberlessPrimaryTracker(stored float64) repository.PollingTracker {
+	return repository.PollingTracker{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceID:           7,
+		SourceURL:          "https://primary/series",
+		SourceKey:          "primarysource",
+		LatestKnownChapter: &stored,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}
+}
+
+// numberlessPrimary answers successfully, with its canonical identifiers, but
+// carries no chapter number — MangaUpdates past its staleness cutoff, or a
+// scraper whose chapter list stopped matching.
+func numberlessPrimary() scriptedConnector {
+	return scriptedConnector{key: "primarysource", result: &connectors.MangaResult{
+		SourceKey: "primarysource", SourceItemID: "primary-id", URL: "https://primary/series-canonical",
+	}}
+}
+
+// TestPollerRunOnce_NumberlessPrimaryTakesAlternateChapter covers the freeze:
+// a primary that resolves with no chapter number used to skip the alternates
+// entirely, so the tracker stayed on its old chapter while a linked mirror
+// listed new ones.
+func TestPollerRunOnce_NumberlessPrimaryTakesAlternateChapter(t *testing.T) {
+	stored := 100.0
+	advanced := 104.0
+	storedReleaseAt := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	mirrorReleaseAt := time.Now().UTC().Add(-3 * time.Hour)
+	tracker := numberlessPrimaryTracker(stored)
+	tracker.LatestReleaseAt = &storedReleaseAt
+	repo := &fakeRepo{items: []repository.PollingTracker{tracker}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(numberlessPrimary()); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", SourceItemID: "mirror-id", URL: "https://mirror/series",
+		LatestChapter: &advanced, LastUpdatedAt: &mirrorReleaseAt,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != advanced {
+		t.Fatalf("expected the alternate's chapter %.1f, got %#v", advanced, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 9 {
+		t.Fatalf("expected the alternate to be recorded as the reporter, got %#v", repo.updatedLatestSource)
+	}
+	if repo.updatedAt == nil || !repo.updatedAt.Equal(mirrorReleaseAt) {
+		t.Fatalf("expected the alternate's date for the alternate's chapter, got %v", repo.updatedAt)
+	}
+	if repo.clearedReleaseAt {
+		t.Fatalf("a chapter taken from an alternate must never clear the stored date")
+	}
+	// The primary did answer, so its canonical identifiers are refreshed as
+	// on any primary poll, never replaced by the mirror's.
+	if repo.updatedURL != "https://primary/series-canonical" {
+		t.Fatalf("expected the primary's canonical url, got %q", repo.updatedURL)
+	}
+	if repo.updatedItemID == nil || *repo.updatedItemID != "primary-id" {
+		t.Fatalf("expected the primary's canonical item id, got %#v", repo.updatedItemID)
+	}
+	if repo.updatedSourceID != 7 || repo.updatedCurrentURL != "https://primary/series" {
+		t.Fatalf("expected the primary to stay mirrored, got sourceID=%d currentURL=%q", repo.updatedSourceID, repo.updatedCurrentURL)
+	}
+}
+
+// TestPollerRunOnce_NumberlessPrimaryKeepsItsAnswerWhenNoAlternateHasANumber
+// pins the other half: an alternate that also answers without a number must
+// not turn the poll into a fallback poll, which would blank the primary's
+// identifier refresh for nothing.
+func TestPollerRunOnce_NumberlessPrimaryKeepsItsAnswerWhenNoAlternateHasANumber(t *testing.T) {
+	stored := 100.0
+	repo := &fakeRepo{items: []repository.PollingTracker{numberlessPrimaryTracker(stored)}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(numberlessPrimary()); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", URL: "https://mirror/series",
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the stored chapter %.1f to stand, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource != nil {
+		t.Fatalf("nobody reported the stored number, got reporter %#v", repo.updatedLatestSource)
+	}
+	if repo.updatedURL != "https://primary/series-canonical" || repo.updatedSourceID != 7 {
+		t.Fatalf("expected the primary's identifiers to be refreshed, got url=%q sourceID=%d", repo.updatedURL, repo.updatedSourceID)
+	}
+}
+
+// TestPollerRunOnce_NumberlessPrimaryTreatsALowerAlternateAsAMirror proves a
+// number taken from an alternate keeps the fallback rules: a lower one waits
+// for confirmation instead of being applied as if the primary had said it.
+func TestPollerRunOnce_NumberlessPrimaryTreatsALowerAlternateAsAMirror(t *testing.T) {
+	stored := 100.0
+	behind := 90.0
+	repo := &fakeRepo{items: []repository.PollingTracker{numberlessPrimaryTracker(stored)}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(numberlessPrimary()); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &behind,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the stored chapter %.1f to survive a lagging alternate, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != behind {
+		t.Fatalf("expected the alternate's lower chapter to be pending, got %#v", repo.updatedPendingLower)
+	}
+}
+
+// TestPollerRunOnce_JunkPrimaryNumberFallsBackToAlternate covers the primary
+// whose number was dropped as an implausible jump: it is as numberless as one
+// that reported nothing, so the alternates get their say.
+func TestPollerRunOnce_JunkPrimaryNumberFallsBackToAlternate(t *testing.T) {
+	stored := 271.0
+	junk := 2019.0
+	sane := 272.0
+	repo := &fakeRepo{items: []repository.PollingTracker{numberlessPrimaryTracker(stored)}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "primarysource", result: &connectors.MangaResult{
+		SourceKey: "primarysource", LatestChapter: &junk,
+	}}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &sane,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != sane {
+		t.Fatalf("expected the alternate's %.0f in place of the junk number, got %#v", sane, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 9 {
+		t.Fatalf("expected the alternate to be recorded as the reporter, got %#v", repo.updatedLatestSource)
+	}
+}
+
+// TestPollerRunOnce_PrimaryWithChapterNeverAsksAlternates keeps the extra
+// requests to the numberless case: a primary that has a number is the answer,
+// and the alternates' hosts are not touched.
+func TestPollerRunOnce_PrimaryWithChapterNeverAsksAlternates(t *testing.T) {
+	stored := 100.0
+	next := 101.0
+	repo := &fakeRepo{items: []repository.PollingTracker{numberlessPrimaryTracker(stored)}}
+
+	mirror := &countingConnector{key: "mirrorsource", result: &connectors.MangaResult{SourceKey: "mirrorsource", LatestChapter: chapterPtr(150)}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "primarysource", result: &connectors.MangaResult{
+		SourceKey: "primarysource", LatestChapter: &next,
+	}}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+	if err := registry.Register(mirror); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if got := mirror.resolves.Load(); got != 0 {
+		t.Fatalf("expected the alternate never to be asked, got %d resolves", got)
+	}
+	if repo.updatedLatest == nil || *repo.updatedLatest != next {
+		t.Fatalf("expected the primary's chapter %.1f, got %#v", next, repo.updatedLatest)
+	}
+}
+
+// TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber is the
+// walk-back from a recovered primary: ComicK advanced the tracker to 122 while
+// MangaFire was behind its challenge, and MangaFire comes back still at 121.
+// Its lower number is a lagging mirror's, so it waits for confirmation.
+func TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber(t *testing.T) {
+	stored := 122.0
+	lagging := 121.0
+	fallbackID := int64(9)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                    1,
+		Title:                 "A",
+		Status:                "reading",
+		SourceID:              7,
+		SourceURL:             "https://primary/series",
+		SourceKey:             "primarysource",
+		LatestKnownChapter:    &stored,
+		LatestChapterSourceID: &fallbackID,
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "primarysource", result: &connectors.MangaResult{
+		SourceKey: "primarysource", LatestChapter: &lagging,
+	}}); err != nil {
+		t.Fatalf("register primary connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the fallback's %.0f to stand, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != lagging {
+		t.Fatalf("expected the primary's lower %.0f to be pending, got %#v", lagging, repo.updatedPendingLower)
+	}
+	if repo.updatedLatestSource != nil {
+		t.Fatalf("a lagging report must not take over the attribution, got %#v", repo.updatedLatestSource)
+	}
+}
+
+// TestPollerRunOnce_LaggingFallbackDoesNotFillMissingReleaseDate guards a
+// dateless stored chapter: a fallback's lower report carries the date of its
+// own chapter, and written beside the stored one it would read as an exact
+// release date that belongs to a different chapter.
+func TestPollerRunOnce_LaggingFallbackDoesNotFillMissingReleaseDate(t *testing.T) {
+	stored := 120.0
+	behind := 118.0
+	behindReleaseAt := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                 1,
+		Title:              "A",
+		Status:             "reading",
+		SourceURL:          "https://blocked/series",
+		SourceKey:          "blockedsource",
+		LatestKnownChapter: &stored,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &behind, LastUpdatedAt: &behindReleaseAt,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the stored chapter %.0f to stand, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedAt != nil {
+		t.Fatalf("expected no date from a report of another chapter, got %v", repo.updatedAt)
+	}
+}
+
+// TestPollerRunOnce_IgnoredJumpDoesNotFillMissingReleaseDate is the same rule
+// for a number dropped as junk: its date went with it.
+func TestPollerRunOnce_IgnoredJumpDoesNotFillMissingReleaseDate(t *testing.T) {
+	stored := 271.0
+	junk := 2019.0
+	junkReleaseAt := time.Now().UTC().Add(-2 * time.Hour)
+	repo := &fakeRepo{items: []repository.PollingTracker{{ID: 1, Title: "A", Status: "reading", SourceURL: "https://example", SourceKey: "testsource", LatestKnownChapter: &stored}}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(fakeConnector{latest: &junk, releaseDate: &junkReleaseAt}); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the stored chapter %.0f to stand, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedAt != nil {
+		t.Fatalf("expected no date from a number that was ignored, got %v", repo.updatedAt)
 	}
 }
 
