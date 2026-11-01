@@ -182,6 +182,29 @@ func TestSetRatingFromCardReplacesCard(t *testing.T) {
 	}
 }
 
+// Deleting a card used to remove only the card: the result count, the page
+// buttons and the empty state stayed as they were, so deleting the only card on
+// the last page left an empty grid under a stale count. The response now has
+// the list reload as well.
+func TestDeleteFromFormReloadsTheList(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+	id := seedGuardTracker(t, db, 1, "Doomed Tracker")
+
+	res := postForm(t, app, "/dashboard/trackers/"+strconv.FormatInt(id, 10)+"/delete", url.Values{}, nil)
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+	html := string(body)
+	if !strings.Contains(html, `hx-swap-oob="delete:#tracker-card-`+strconv.FormatInt(id, 10)+`"`) {
+		t.Fatalf("expected the card to be removed out of band, got %s", html)
+	}
+	if !strings.Contains(html, "dispatchEvent(new Event('trackersChanged'))") {
+		t.Fatalf("expected the delete to reload the list, got %s", html)
+	}
+}
+
 // canonicalComickConnector resolves every URL to one canonical series page, as
 // the real connectors do when they rebuild the URL from the series id. It holds
 // no state: the card render after the save may call it from background lookups.

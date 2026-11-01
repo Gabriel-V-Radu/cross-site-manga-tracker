@@ -1,5 +1,19 @@
 {{if gt .DeleteTrackerID 0}}
 <div hx-swap-oob="delete:#tracker-card-{{.DeleteTrackerID}}"></div>
+<script>
+    (function () {
+        // Removing the card alone left the result count, the page buttons and
+        // the empty state as they were: deleting the only card on the last page
+        // left an empty grid under "49 results". The list reloads to put them
+        // right, quietly like a cover refresh, so the grid does not collapse
+        // into the loading skeleton under the reader.
+        if (!document || !document.body) {
+            return;
+        }
+        window.__silentCoverRefresh = true;
+        document.body.dispatchEvent(new Event('trackersChanged'));
+    })();
+</script>
 {{end}}
 
 {{if .ReplaceCard}}
