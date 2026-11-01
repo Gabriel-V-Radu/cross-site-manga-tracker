@@ -23,6 +23,7 @@ type TrackerRepository struct {
 
 type PollingTracker struct {
 	ID                 int64
+	ProfileID          int64
 	Title              string
 	Status             string
 	SourceID           int64

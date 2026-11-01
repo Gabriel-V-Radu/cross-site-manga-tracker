@@ -277,7 +277,7 @@ func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracke
 func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingTracker, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
-			t.id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
+			t.id, t.profile_id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
 			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
 			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id
 		FROM trackers t
@@ -300,7 +300,7 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 		var pendingLowerSeenAt sql.NullTime
 		var latestChapterSourceID sql.NullInt64
 		if err := rows.Scan(
-			&item.ID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
+			&item.ID, &item.ProfileID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
 			&latest, &lastRead, &latestReleaseAt, &item.SourceKey, &lastCheckedAt,
 			&pendingLower, &pendingLowerSeenAt, &latestChapterSourceID,
 		); err != nil {

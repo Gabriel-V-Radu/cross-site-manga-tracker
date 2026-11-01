@@ -438,3 +438,32 @@ func TestUpdatePollingStateAppliesOverAMissingChapter(t *testing.T) {
 		t.Fatalf("expected chapter %.0f, got %#v", firstChapter, latest)
 	}
 }
+
+// TestListForPollingCarriesTheProfile proves the snapshot names the profile
+// each tracker belongs to, which is what lets a poll outcome be reported to
+// the library it concerns.
+func TestListForPollingCarriesTheProfile(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	firstID := seedPollingTracker(t, db, 19)
+	secondID := seedPollingTracker(t, db, 7)
+	if _, err := db.Exec(`UPDATE trackers SET profile_id = 2 WHERE id = ?`, secondID); err != nil {
+		t.Fatalf("move tracker to profile 2: %v", err)
+	}
+
+	trackers, err := repo.ListForPolling(context.Background())
+	if err != nil {
+		t.Fatalf("list for polling: %v", err)
+	}
+
+	profiles := map[int64]int64{}
+	for _, tracker := range trackers {
+		profiles[tracker.ID] = tracker.ProfileID
+		if tracker.SourceURL != pollingSeedURL || tracker.SourceKey != "mangadex" {
+			t.Fatalf("expected the columns after profile_id to scan unchanged, got url=%q key=%q", tracker.SourceURL, tracker.SourceKey)
+		}
+	}
+	if profiles[firstID] != 1 || profiles[secondID] != 2 {
+		t.Fatalf("expected tracker %d in profile 1 and %d in profile 2, got %v", firstID, secondID, profiles)
+	}
+}
