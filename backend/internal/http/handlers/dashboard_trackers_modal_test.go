@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -202,6 +203,103 @@ func TestDeleteFromFormReloadsTheList(t *testing.T) {
 	}
 	if !strings.Contains(html, "dispatchEvent(new Event('trackersChanged'))") {
 		t.Fatalf("expected the delete to reload the list, got %s", html)
+	}
+}
+
+// The edit modal is filled in when it opens, and a poll can store a newer
+// chapter while it sits open. Saving used to write the opening value back over
+// the newer one. With the rendered value sent alongside, an untouched field
+// keeps what the database holds now; a changed field, or a form that sends no
+// original, is written as submitted.
+func TestUpdateFromFormKeepsAChapterTheUserDidNotEdit(t *testing.T) {
+	cases := []struct {
+		name         string
+		fields       map[string]string
+		wantLatest   sql.NullFloat64
+		wantLastRead sql.NullFloat64
+	}{
+		{
+			name: "untouched fields keep the polled values",
+			fields: map[string]string{
+				"latest_known_chapter": "100", "latest_known_chapter_original": "100",
+				"last_read_chapter": "40", "last_read_chapter_original": "40",
+			},
+			wantLatest:   sql.NullFloat64{Float64: 101, Valid: true},
+			wantLastRead: sql.NullFloat64{Float64: 50, Valid: true},
+		},
+		{
+			name: "fields the modal opened empty stay as stored",
+			fields: map[string]string{
+				"latest_known_chapter": "", "latest_known_chapter_original": "",
+				"last_read_chapter": "", "last_read_chapter_original": "",
+			},
+			wantLatest:   sql.NullFloat64{Float64: 101, Valid: true},
+			wantLastRead: sql.NullFloat64{Float64: 50, Valid: true},
+		},
+		{
+			name: "edited fields are written",
+			fields: map[string]string{
+				"latest_known_chapter": "120", "latest_known_chapter_original": "100",
+				"last_read_chapter": "", "last_read_chapter_original": "40",
+			},
+			wantLatest: sql.NullFloat64{Float64: 120, Valid: true},
+		},
+		{
+			name: "a form without originals is taken at its word",
+			fields: map[string]string{
+				"latest_known_chapter": "100",
+				"last_read_chapter":    "40",
+			},
+			wantLatest:   sql.NullFloat64{Float64: 100, Valid: true},
+			wantLastRead: sql.NullFloat64{Float64: 40, Valid: true},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			db, app, cleanup := setupTestApp(t)
+			defer cleanup()
+
+			// Where the database stands after a poll landed while the modal was
+			// open on latest 100 and last read 40.
+			result, err := db.Exec(`
+				INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+				VALUES (1, 'Polled Tracker', 1, 'https://mangadex.org/title/polled', 'reading', 50, 101)
+			`)
+			if err != nil {
+				t.Fatalf("seed tracker: %v", err)
+			}
+			id, _ := result.LastInsertId()
+
+			form := url.Values{}
+			form.Set("title", "Polled Tracker")
+			form.Set("source_id", "1")
+			form.Set("source_url", "https://mangadex.org/title/polled")
+			form.Set("status", "completed")
+			for key, value := range testCase.fields {
+				form.Set(key, value)
+			}
+			res := postForm(t, app, "/dashboard/trackers/"+strconv.FormatInt(id, 10), form, nil)
+			if res.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(res.Body)
+				t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+			}
+
+			var latest, lastRead sql.NullFloat64
+			var status string
+			if err := db.QueryRow(`SELECT latest_known_chapter, last_read_chapter, status FROM trackers WHERE id = ?`, id).Scan(&latest, &lastRead, &status); err != nil {
+				t.Fatalf("load tracker: %v", err)
+			}
+			if status != "completed" {
+				t.Fatalf("status = %q, the rest of the save must still apply", status)
+			}
+			if latest != testCase.wantLatest {
+				t.Fatalf("latest_known_chapter = %+v, want %+v", latest, testCase.wantLatest)
+			}
+			if lastRead != testCase.wantLastRead {
+				t.Fatalf("last_read_chapter = %+v, want %+v", lastRead, testCase.wantLastRead)
+			}
+		})
 	}
 }
 

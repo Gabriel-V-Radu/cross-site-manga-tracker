@@ -48,6 +48,89 @@
     })();
 </script>
 {{end}}
+{{if and .ReplaceCard .RefreshCard}}
+<script>
+    (function () {
+        // The card above was rendered while a chapter or cover lookup it needs
+        // was still running, so its chapter links point at the series page for
+        // now. Nothing else re-renders a single swapped card, so it fetches
+        // itself again a few times, until the server stops reporting a lookup
+        // in flight. A list render that replaces the card in the meantime
+        // carries its own refresh, and ends this one.
+        var cardID = 'tracker-card-{{.ReplaceCard.ID}}';
+        var node = document.getElementById(cardID);
+        if (!node || !window.fetch) {
+            return;
+        }
+
+        var profileInput = document.getElementById('profile-filter');
+        var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
+        var requestURL = '/dashboard/trackers/{{.ReplaceCard.ID}}/card-fragment?view=' + encodeURIComponent('{{.ViewMode}}');
+        if (profileKey) {
+            requestURL += '&profile=' + encodeURIComponent(profileKey);
+        }
+
+        var attempts = 0;
+        var maxAttempts = 8;
+        var refresh;
+        var schedule = function () {
+            if (attempts >= maxAttempts) {
+                return;
+            }
+            window.setTimeout(refresh, Math.min(3000, 1000 + (attempts * 400)));
+        };
+        refresh = function () {
+            attempts += 1;
+            if (document.getElementById(cardID) !== node) {
+                return;
+            }
+            // Swapping the card out would close an open rating popover and
+            // drop focus from under the user, so it waits for them instead.
+            if (node.querySelector('details[open]') || node.contains(document.activeElement)) {
+                schedule();
+                return;
+            }
+
+            fetch(requestURL, { credentials: 'same-origin', headers: { 'HX-Request': 'true' } })
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('card fragment request failed');
+                    }
+                    var pending = response.headers.get('X-Card-Lookups-Pending') === '1';
+                    return response.text().then(function (html) {
+                        return { html: html, pending: pending };
+                    });
+                })
+                .then(function (result) {
+                    var buffer = document.createElement('div');
+                    buffer.innerHTML = String(result.html || '').trim();
+                    var fresh = buffer.firstElementChild;
+                    if (!fresh || fresh.id !== cardID || document.getElementById(cardID) !== node) {
+                        return;
+                    }
+                    if (node.style && node.style.order) {
+                        fresh.style.order = node.style.order;
+                    }
+                    node.parentNode.replaceChild(fresh, node);
+                    node = fresh;
+                    if (window.htmx && typeof window.htmx.process === 'function') {
+                        window.htmx.process(fresh);
+                    }
+                    if (typeof window.syncTrackerCardHoverState === 'function') {
+                        window.syncTrackerCardHoverState();
+                    }
+                    if (result.pending) {
+                        schedule();
+                    }
+                })
+                .catch(function () {
+                    schedule();
+                });
+        };
+        schedule();
+    })();
+</script>
+{{end}}
 {{if .PrependCard}}
 {{if eq .ViewMode "list"}}
 <article id="tracker-card-{{.PrependCard.ID}}" class="tracker-row tracker-card" hx-swap-oob="afterbegin:#cards-container-list">

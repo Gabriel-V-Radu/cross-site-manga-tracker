@@ -1,11 +1,25 @@
 package handlers
 
 import (
+	"database/sql"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
+	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
+	"github.com/gofiber/fiber/v2"
 )
 
 // newSiteMetadataHandler builds a handler around the connector set the app
@@ -170,6 +184,213 @@ func TestBuildTrackerCardsShowsChapterSeenAtAsApproximateRelease(t *testing.T) {
 	}
 	if cards[0].LatestReleaseTitle == "" {
 		t.Fatalf("expected an explanation of where the approximate date came from")
+	}
+}
+
+// countingChapterLinkResolver degrades every chapter link to the series page,
+// reports the lookup pending or not as the test chooses, and counts the cache
+// invalidations it is asked for. Guarded because the handler runs on fiber's
+// goroutine while the test flips and reads it between requests.
+type countingChapterLinkResolver struct {
+	mu            sync.Mutex
+	waiting       bool
+	invalidations int
+}
+
+func (r *countingChapterLinkResolver) Lookup(_ string, sourceURL string, _ float64, _ []repository.TrackerSourceRef, _ string) (string, bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return sourceURL, false, r.waiting
+}
+
+func (r *countingChapterLinkResolver) Invalidate() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidations++
+}
+
+func (r *countingChapterLinkResolver) Close() {}
+
+func (r *countingChapterLinkResolver) setWaiting(waiting bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.waiting = waiting
+}
+
+func (r *countingChapterLinkResolver) takeInvalidations() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := r.invalidations
+	r.invalidations = 0
+	return count
+}
+
+// newEditTestHandler builds a real handler over a migrated database, with the
+// chapter-link resolver swapped for the counting double and the cover resolver
+// for a fixed answer, so a save's effect on the caches can be observed without
+// a connector or the network. Only the routes the tests drive are mounted.
+func newEditTestHandler(t *testing.T) (*sql.DB, *fiber.App, *countingChapterLinkResolver) {
+	t.Helper()
+
+	db, err := database.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := database.ApplyMigrations(db); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := database.SeedDefaults(db); err != nil {
+		t.Fatalf("seed defaults: %v", err)
+	}
+
+	_, currentFile, _, _ := runtime.Caller(0)
+	webDir := filepath.Join(filepath.Dir(currentFile), "..", "..", "..", "web")
+	handler := NewDashboardHandler(db, connectors.NewRegistry(), DashboardPaths{
+		TemplatesGlob: filepath.Join(webDir, "templates", "*.html"),
+		AssetsDir:     filepath.Join(webDir, "assets"),
+	})
+	if err := handler.TemplateError(); err != nil {
+		t.Fatalf("parse templates: %v", err)
+	}
+	handler.covers.Close()
+	handler.chapterLinks.Close()
+	chapters := &countingChapterLinkResolver{}
+	handler.covers = fakeCoverResolver{}
+	handler.chapterLinks = chapters
+	t.Cleanup(handler.Close)
+
+	app := fiber.New()
+	app.Post("/dashboard/trackers/:id", handler.UpdateFromForm)
+	app.Get("/dashboard/trackers/:id/card-fragment", handler.CardFragment)
+	return db, app, chapters
+}
+
+// seedEditTracker stores a MangaDex tracker with a second, MangaFire link, the
+// state an edit modal opens on.
+func seedEditTracker(t *testing.T, db *sql.DB) (trackerID int64, mangafireID int64) {
+	t.Helper()
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangafire'`).Scan(&mangafireID); err != nil {
+		t.Fatalf("look up mangafire source: %v", err)
+	}
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+		VALUES (1, 'Edited Tracker', 1, 'https://mangadex.org/title/edited', 'reading', 5, 10)
+	`)
+	if err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+	trackerID, _ = result.LastInsertId()
+	if _, err := db.Exec(`
+		INSERT INTO tracker_sources (tracker_id, source_id, source_url) VALUES (?, 1, ?), (?, ?, ?)
+	`, trackerID, "https://mangadex.org/title/edited", trackerID, mangafireID, "https://mangafire.to/manga/edited.x1"); err != nil {
+		t.Fatalf("seed tracker sources: %v", err)
+	}
+	return trackerID, mangafireID
+}
+
+// editForm is the edit modal submitted exactly as it rendered.
+func editForm(mangafireID int64) url.Values {
+	form := url.Values{}
+	form.Set("title", "Edited Tracker")
+	form.Set("source_id", "1")
+	form.Set("source_url", "https://mangadex.org/title/edited")
+	form.Set("status", "reading")
+	form.Set("last_read_chapter", "5")
+	form.Set("latest_known_chapter", "10")
+	form.Set("reading_source_id", "0")
+	form.Set("linked_sources_json", `[{"sourceId":1,"sourceUrl":"https://mangadex.org/title/edited"},`+
+		`{"sourceId":`+strconv.FormatInt(mangafireID, 10)+`,"sourceUrl":"https://mangafire.to/manga/edited.x1"}]`)
+	return form
+}
+
+func postEditForm(t *testing.T, app *fiber.App, trackerID int64, form url.Values) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/trackers/"+strconv.FormatInt(trackerID, 10), strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := app.Test(req, 10000)
+	if err != nil {
+		t.Fatalf("edit request failed: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+	return string(body)
+}
+
+// TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged pins that a save drops
+// the chapter-link cache only when it changed what those links were worked out
+// against. Every save used to drop it — a status edit included — which emptied
+// the whole library's chapter links and left the saved card on its series page.
+func TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged(t *testing.T) {
+	db, app, chapters := newEditTestHandler(t)
+	trackerID, mangafireID := seedEditTracker(t, db)
+
+	cases := []struct {
+		name  string
+		edit  func(url.Values)
+		wants int
+	}{
+		{name: "status and title only", edit: func(form url.Values) {
+			form.Set("status", "on_hold")
+			form.Set("title", "Renamed Tracker")
+		}, wants: 0},
+		{name: "chapter numbers only", edit: func(form url.Values) {
+			form.Set("latest_known_chapter", "11")
+		}, wants: 0},
+		{name: "reading pin set", edit: func(form url.Values) {
+			form.Set("reading_source_id", strconv.FormatInt(mangafireID, 10))
+		}, wants: 1},
+		{name: "reading pin cleared", edit: func(url.Values) {}, wants: 1},
+		{name: "a linked site removed", edit: func(form url.Values) {
+			form.Set("linked_sources_json", `[{"sourceId":1,"sourceUrl":"https://mangadex.org/title/edited"}]`)
+		}, wants: 1},
+	}
+
+	// The cases run in order against one tracker: each starts from what the
+	// previous one saved, which is how the pin gets set and then cleared.
+	for _, testCase := range cases {
+		form := editForm(mangafireID)
+		testCase.edit(form)
+		postEditForm(t, app, trackerID, form)
+		if got := chapters.takeInvalidations(); got != testCase.wants {
+			t.Fatalf("%s: %d invalidations, want %d", testCase.name, got, testCase.wants)
+		}
+	}
+}
+
+// TestSingleCardRefreshFollowsPendingLookups pins how a swapped card that is
+// still waiting on a lookup gets corrected: the response schedules a re-fetch
+// of the card's fragment, and the fragment says whether to ask again. Nothing
+// re-rendered such a card before, so it kept its series-page links.
+func TestSingleCardRefreshFollowsPendingLookups(t *testing.T) {
+	db, app, chapters := newEditTestHandler(t)
+	trackerID, mangafireID := seedEditTracker(t, db)
+	fragmentPath := "/dashboard/trackers/" + strconv.FormatInt(trackerID, 10) + "/card-fragment?view=grid&profile=profile1"
+
+	for _, waiting := range []bool{true, false} {
+		chapters.setWaiting(waiting)
+
+		body := postEditForm(t, app, trackerID, editForm(mangafireID))
+		if !strings.Contains(body, `hx-swap-oob="outerHTML:#tracker-card-`+strconv.FormatInt(trackerID, 10)+`"`) {
+			t.Fatalf("waiting=%v: expected the card to be swapped in", waiting)
+		}
+		if scheduled := strings.Contains(body, cardLookupsPendingHeader); scheduled != waiting {
+			t.Fatalf("waiting=%v: refresh scheduled = %v", waiting, scheduled)
+		}
+
+		res, err := app.Test(httptest.NewRequest(http.MethodGet, fragmentPath, nil), 10000)
+		if err != nil {
+			t.Fatalf("fragment request failed: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("waiting=%v: fragment status %d", waiting, res.StatusCode)
+		}
+		if got, want := res.Header.Get(cardLookupsPendingHeader) == "1", waiting; got != want {
+			t.Fatalf("waiting=%v: fragment pending header = %q", waiting, res.Header.Get(cardLookupsPendingHeader))
+		}
 	}
 }
 

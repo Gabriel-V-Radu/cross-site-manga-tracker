@@ -119,8 +119,11 @@ type trackersPartialData struct {
 }
 
 type trackerOOBResponseData struct {
-	ViewMode        string
-	ReplaceCard     *trackerCardView
+	ViewMode    string
+	ReplaceCard *trackerCardView
+	// RefreshCard marks a ReplaceCard rendered while one of its lookups was
+	// still running; the response then fetches the card again shortly.
+	RefreshCard     bool
 	PrependCard     *trackerCardView
 	DeleteTrackerID int64
 }

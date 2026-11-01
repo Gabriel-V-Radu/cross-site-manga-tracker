@@ -208,6 +208,12 @@ type trackerCardFragmentData struct {
 	Card     trackerCardView
 }
 
+// cardLookupsPendingHeader marks a card fragment rendered while one of its
+// lookups was still running. The single-card refresh a card mutation schedules
+// (tracker_oob_response.html) reads it to decide whether asking once more is
+// worth it, so it stops as soon as the card is final.
+const cardLookupsPendingHeader = "X-Card-Lookups-Pending"
+
 func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
@@ -224,12 +230,15 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 	// Unlike the mutation handlers, this one must keep failing loudly: the
 	// pinned-card script fetches it and retries on a non-OK response, so a
 	// degraded 200 would end that retry loop with an empty card.
-	card, err := h.loadTrackerCardView(c.Context(), activeProfile.ID, id)
+	card, waiting, err := h.loadTrackerCardView(c.Context(), activeProfile.ID, id)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load tracker card", err)
 	}
 	if card == nil {
 		return h.fail(c, fiber.StatusNotFound, "Tracker not found", nil)
+	}
+	if waiting {
+		c.Set(cardLookupsPendingHeader, "1")
 	}
 
 	return h.render(c, "tracker_card_fragment.html", trackerCardFragmentData{
@@ -337,6 +346,8 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	tracker.LatestReleaseAt = existingTracker.LatestReleaseAt
 	tracker.Rating = existingTracker.Rating
 	tracker.ProfileID = activeProfile.ID
+	tracker.LatestKnownChapter = chapterUnlessEdited(c, "latest_known_chapter_original", tracker.LatestKnownChapter, existingTracker.LatestKnownChapter)
+	tracker.LastReadChapter = chapterUnlessEdited(c, "last_read_chapter_original", tracker.LastReadChapter, existingTracker.LastReadChapter)
 
 	linkedSources, err := parseLinkedSourcesFromForm(c)
 	if err != nil {
@@ -409,7 +420,8 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		}
 	}
 
-	if !sameTrackerSources(existingSources, uniqueSources) {
+	sourcesChanged := !sameTrackerSources(existingSources, uniqueSources)
+	if sourcesChanged {
 		primarySource, latestKnownChapter, latestReleaseAt, relatedTitles := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
 		// Canonicalizing can turn two links that looked different — a reader
 		// link and the series page, an old domain and the current one — into
@@ -456,11 +468,51 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusNotFound, "Tracker not found", nil)
 	}
 
-	// The saved links or pin may differ from what the cached chapter URLs
-	// were computed against.
-	h.invalidateLinkLookups()
+	// The cached chapter links and negative covers were worked out against the
+	// tracker's links and reading pin, so only a save that changed one of those
+	// can have made them wrong. Dropping them on every save — a status or title
+	// edit included — cleared the whole library's chapter links, left this card
+	// pointing at its series page, and sent the next list render back to every
+	// site for every card.
+	linksChanged := sourcesChanged ||
+		pastedLink != nil ||
+		tracker.SourceID != existingTracker.SourceID ||
+		tracker.SourceURL != existingTracker.SourceURL ||
+		!samePointedValue(readingSourceID, existingTracker.ReadingSourceID)
+	if linksChanged {
+		h.invalidateLinkLookups()
+	}
 
 	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
+}
+
+// chapterUnlessEdited keeps the stored chapter number when the form submitted
+// the value it was opened with. The edit modal is filled in when it opens, and a
+// poll can store a newer chapter while it sits open: saving then wrote the
+// opening value back over the newer one, restamped when that chapter was first
+// seen, and left it beside a release date belonging to the newer chapter. The
+// modal sends the value it rendered next to each field, so only a number the
+// user actually changed replaces the stored one. A form without the original —
+// an older page, another client — is taken at its word, as before.
+func chapterUnlessEdited(c *fiber.Ctx, originalField string, submitted *float64, stored *float64) *float64 {
+	args := c.Request().PostArgs()
+	if !args.Has(originalField) {
+		return submitted
+	}
+	original, err := parseOptionalFloat(string(args.Peek(originalField)))
+	if err != nil || !samePointedValue(original, submitted) {
+		return submitted
+	}
+	return stored
+}
+
+// samePointedValue reports whether two optional values are both absent or
+// both present and equal.
+func samePointedValue[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
@@ -566,27 +618,29 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 // so a single-card re-render cannot drift from the list render. A nil card with
 // a nil error means the tracker is gone (or no longer produces a card), which
 // callers must be able to tell apart from a query that failed: one is a 404,
-// the other a 500.
-func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID int64, trackerID int64) (*trackerCardView, error) {
+// the other a 500. The bool reports a cover or chapter lookup the card depends
+// on still running, which makes the card provisional: until it lands, its
+// chapter links point at the series page.
+func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID int64, trackerID int64) (*trackerCardView, bool, error) {
 	tracker, err := h.trackerRepo.GetByID(ctx, profileID, trackerID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if tracker == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	sourceByID, err := h.listSourcesByID(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	sourceLogoBySourceID, err := h.sourceRepo.ListSourceLogoURLs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	cards, _ := h.buildTrackerCards(
+	cards, waiting := h.buildTrackerCards(
 		[]models.Tracker{*tracker},
 		sourceByID,
 		sourceLogoBySourceID,
@@ -594,10 +648,10 @@ func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID in
 		"",
 	)
 	if len(cards) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
-	return &cards[0], nil
+	return &cards[0], waiting, nil
 }
 
 // renderSingleCardOOB answers a mutation by swapping just that tracker's card.
@@ -605,8 +659,13 @@ func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID in
 // rebuilt degrades to a trackersChanged trigger instead of an error status: the
 // browser reloads the list and sees the saved state, rather than being told a
 // save failed that in fact succeeded.
+//
+// A card rendered while one of its lookups is still running is swapped in as it
+// is, and the response asks for it again shortly. Nothing else re-renders a
+// single swapped card, so it used to keep its series-page links until the list
+// happened to reload for some other reason.
 func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, trackerID int64, viewMode string) error {
-	card, err := h.loadTrackerCardView(c.Context(), profileID, trackerID)
+	card, waiting, err := h.loadTrackerCardView(c.Context(), profileID, trackerID)
 	if err != nil || card == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
@@ -615,6 +674,7 @@ func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, tr
 	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
 		ViewMode:    viewMode,
 		ReplaceCard: card,
+		RefreshCard: waiting,
 	})
 }
 
