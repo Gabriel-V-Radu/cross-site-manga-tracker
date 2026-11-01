@@ -3,8 +3,12 @@ package webtoons
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,6 +240,156 @@ func TestWebtoonsEpisodeListWithoutEpisodesFailsResolveButNotSearch(t *testing.T
 	}
 	if results[0].LatestChapter != nil {
 		t.Fatalf("expected no chapter, got %v", *results[0].LatestChapter)
+	}
+}
+
+// TestWebtoonsResolveKeepsOnlyAURLNamingTheSameTitle pins that the resolved
+// URL, which the poller stores over the tracker's, still names the title that
+// was asked for. A canonical or redirect URL without that title_no would fail
+// every later poll and chapter-link lookup, with nothing to restore it.
+func TestWebtoonsResolveKeepsOnlyAURLNamingTheSameTitle(t *testing.T) {
+	cases := []struct {
+		name      string
+		canonical string
+		want      string
+	}{
+		{
+			name:      "canonical naming the title",
+			canonical: "https://www.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208",
+			want:      "https://www.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208",
+		},
+		{
+			name:      "canonical without a title number",
+			canonical: "https://www.webtoons.com/en/",
+			want:      "https://www.webtoons.com/episodeList?titleNo=4208",
+		},
+		{
+			name:      "canonical naming another title",
+			canonical: "https://www.webtoons.com/en/romance/other/list?title_no=9999",
+			want:      "https://www.webtoons.com/episodeList?titleNo=4208",
+		},
+		{
+			name:      "canonical on another site",
+			canonical: "https://example.com/list?title_no=4208",
+			want:      "https://www.webtoons.com/episodeList?titleNo=4208",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/episodeList", func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `<html><head><link rel="canonical" href="%s" /><meta property="og:title" content="Maybe Meant to Be" /></head><body>
+<li class="_episodeItem" data-episode-no="125"><a href="https://www.webtoons.com/en/romance/maybe-meant-to-be/ep-125/viewer?title_no=4208&episode_no=125"><span class="date">Feb 18, 2026</span></a></li>
+</body></html>`, tc.canonical)
+			})
+
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			connector := NewConnectorWithOptions(server.URL, []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
+			resolved, err := connector.ResolveByURL(context.Background(), "https://www.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208")
+			if err != nil {
+				t.Fatalf("resolve failed: %v", err)
+			}
+			if resolved.URL != tc.want {
+				t.Fatalf("expected url %s, got %s", tc.want, resolved.URL)
+			}
+		})
+	}
+}
+
+// gappedEpisodeListServer serves a title whose episodes run from latest down
+// to 1, ten rows a page, with the numbers in missing taken down. Every page
+// served is counted in fetches.
+func gappedEpisodeListServer(latest int, missing map[int]bool, fetches *atomic.Int32) *httptest.Server {
+	var episodes []int
+	for number := latest; number >= 1; number-- {
+		if !missing[number] {
+			episodes = append(episodes, number)
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/episodeList", func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if raw := r.URL.Query().Get("page"); raw != "" {
+			page, _ = strconv.Atoi(raw)
+		}
+		fetches.Add(1)
+
+		var body strings.Builder
+		body.WriteString(`<html><body><ul id="_listUl">`)
+		for index := (page - 1) * 10; index < page*10 && index >= 0 && index < len(episodes); index++ {
+			number := episodes[index]
+			fmt.Fprintf(&body, `<li class="_episodeItem" data-episode-no="%d"><a href="https://www.webtoons.com/en/x/ep-%d/viewer?title_no=4208&episode_no=%d"><span class="date">Jan 1, 2026</span></a></li>`, number, number, number)
+		}
+		body.WriteString(`</ul></body></html>`)
+		_, _ = w.Write([]byte(body.String()))
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestWebtoonsResolveChapterURLStepsPastNumberingGaps pins the page search: a
+// taken-down episode above the target moves it onto an earlier page than the
+// ten-rows-a-page estimate, and the lookup steps toward it instead of
+// answering "not carried" from the one estimated page.
+func TestWebtoonsResolveChapterURLStepsPastNumberingGaps(t *testing.T) {
+	var fetches atomic.Int32
+	server := gappedEpisodeListServer(150, map[int]bool{140: true}, &fetches)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
+	titleURL := "https://www.webtoons.com/en/x/list?title_no=4208"
+
+	chapterURL, err := connector.ResolveChapterURL(context.Background(), titleURL, 100)
+	if err != nil {
+		t.Fatalf("resolve chapter url failed: %v", err)
+	}
+	if want := "https://www.webtoons.com/en/x/ep-100/viewer?title_no=4208&episode_no=100"; chapterURL != want {
+		t.Fatalf("expected %s, got %s", want, chapterURL)
+	}
+
+	// The taken-down episode itself is not carried, and finding that out costs
+	// page one and the estimated page 2 (139..130), whose step back lands on
+	// page one again: no walk across the list.
+	fetches.Store(0)
+	_, err = connector.ResolveChapterURL(context.Background(), titleURL, 140)
+	if !errors.Is(err, connectors.ErrChapterNotFound) {
+		t.Fatalf("expected the typed not-found verdict for the missing episode, got %v", err)
+	}
+	if got := fetches.Load(); got != 2 {
+		t.Fatalf("expected 2 page fetches, got %d", got)
+	}
+}
+
+// TestWebtoonsResolveChapterURLReportsAFailedPageFetch pins that a page that
+// could not be read comes back as that failure, not as the site saying it does
+// not carry the episode.
+func TestWebtoonsResolveChapterURLReportsAFailedPageFetch(t *testing.T) {
+	var fetches atomic.Int32
+	gapped := gappedEpisodeListServer(150, nil, &fetches)
+	defer gapped.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "" {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		gapped.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
+	_, err := connector.ResolveChapterURL(context.Background(), "https://www.webtoons.com/en/x/list?title_no=4208", 100)
+	if err == nil {
+		t.Fatal("expected the failed page fetch to be reported")
+	}
+	if errors.Is(err, connectors.ErrChapterNotFound) {
+		t.Fatalf("a failed page fetch must not read as not carried, got %v", err)
+	}
+	if !connectors.IsHTTPStatus(err, http.StatusServiceUnavailable) {
+		t.Fatalf("expected the 503 to be carried, got %v", err)
 	}
 }
 

@@ -23,6 +23,10 @@ const (
 	// searchLocale scopes the immediate-search endpoint to the English site,
 	// which is the only catalogue whose episode numbers this app tracks.
 	searchLocale = "en"
+	// maxEpisodePageSteps bounds how many pages a chapter-link lookup steps
+	// away from its estimated episode-list page; each step is one more paced
+	// request, and a gap wider than this is rare enough to give up on.
+	maxEpisodePageSteps = 2
 )
 
 // site is the connector's identity. The regional, mobile and www sites are all
@@ -215,17 +219,34 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", fmt.Errorf("episode %d not found: %w", episodeNo, connectors.ErrChapterNotFound)
 	}
 
+	// The page is estimated at ten rows a page with no gap in the numbering,
+	// but an episode the site took down (a hiatus notice, say) moves every
+	// older one up a row, onto an earlier page than the arithmetic says, and
+	// one fetch of the estimate answered "not carried" for an episode one page
+	// away. A miss therefore reads which side of the target the fetched page
+	// landed on and steps toward it, a couple of pages at most.
 	page := ((latestEpisode - episodeNo) / 10) + 1
-	if page < 1 {
-		page = 1
-	}
-
-	if page > 1 {
+	for step := 0; step <= maxEpisodePageSteps && page > 1; step++ {
 		pageEntries, fetchErr := c.fetchEpisodeListEntries(ctx, titleNo, page)
-		if fetchErr == nil {
-			if entry := findEpisodeEntry(pageEntries, episodeNo); entry != nil && strings.TrimSpace(entry.URL) != "" {
-				return strings.TrimSpace(entry.URL), nil
-			}
+		if fetchErr != nil {
+			// A page that could not be read says nothing about whether the
+			// site carries the episode, so it is not reported as not carried.
+			return "", fmt.Errorf("fetch episode list page %d: %w", page, fetchErr)
+		}
+		if entry := findEpisodeEntry(pageEntries, episodeNo); entry != nil && strings.TrimSpace(entry.URL) != "" {
+			return strings.TrimSpace(entry.URL), nil
+		}
+
+		lowest, highest, ok := episodeRange(pageEntries)
+		if !ok || (episodeNo >= lowest && episodeNo <= highest) {
+			// Past the last page, or inside this page's range and still
+			// missing: the site skipped that number.
+			break
+		}
+		if episodeNo > highest {
+			page--
+		} else {
+			page++
 		}
 	}
 
@@ -273,10 +294,14 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 
 	// The page states its own canonical URL (the localized, slugged one a
 	// reader recognizes), so it wins over the URL the request happened to end
-	// on, which in turn beats the bare episodeList form.
-	canonicalURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(canonicalPattern, body)))
+	// on, which in turn beats the bare episodeList form. Either is kept only
+	// while it still names this title: the poller stores the resolved URL over
+	// the tracker's, and one that lost its title_no (a redirect to the home
+	// page) would fail every later poll and chapter-link lookup, with nothing
+	// left to put the right one back.
+	canonicalURL := c.titleURLOrEmpty(html.UnescapeString(connectors.FirstSubmatch(canonicalPattern, body)), titleNo)
 	if canonicalURL == "" {
-		canonicalURL = strings.TrimSpace(finalURL)
+		canonicalURL = c.titleURLOrEmpty(finalURL, titleNo)
 	}
 	if canonicalURL == "" {
 		canonicalURL = c.canonicalEpisodeListURL(titleNo)
@@ -318,6 +343,23 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestUpdatedAt,
 	}, nil
+}
+
+// titleURLOrEmpty returns raw, trimmed, when it is a URL on this site that
+// names titleNo, and "" otherwise.
+func (c *Connector) titleURLOrEmpty(raw string, titleNo int) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := c.ParseOwnedURL(trimmed)
+	if err != nil {
+		return ""
+	}
+	if named, err := extractTitleNo(parsed); err != nil || named != titleNo {
+		return ""
+	}
+	return trimmed
 }
 
 func (c *Connector) fetchEpisodeListEntries(ctx context.Context, titleNo int, page int) ([]episodeEntry, error) {
@@ -455,6 +497,20 @@ func findEpisodeEntry(entries []episodeEntry, episodeNo int) *episodeEntry {
 		}
 	}
 	return nil
+}
+
+// episodeRange returns the lowest and highest episode number in entries; ok is
+// false when there are none.
+func episodeRange(entries []episodeEntry) (lowest int, highest int, ok bool) {
+	for index, entry := range entries {
+		if index == 0 || entry.Number < lowest {
+			lowest = entry.Number
+		}
+		if index == 0 || entry.Number > highest {
+			highest = entry.Number
+		}
+	}
+	return lowest, highest, len(entries) > 0
 }
 
 func findLatestEpisodeNumber(entries []episodeEntry) int {
