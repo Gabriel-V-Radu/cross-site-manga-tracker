@@ -198,6 +198,86 @@ func TestDashboardWritesRefuseCrossSiteRequests(t *testing.T) {
 	}
 }
 
+// The JSON API sits behind the same guard. fiber's BodyParser decodes a
+// form-encoded body into the tracker request too, so a plain HTML form
+// auto-submitted from any other page could create trackers in the default
+// profile through POST /v1/trackers.
+func TestAPIWritesRefuseCrossSiteRequests(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	form := url.Values{}
+	form.Set("title", "Injected")
+	form.Set("sourceId", "1")
+	form.Set("sourceUrl", "https://mangadex.org/title/injected")
+	form.Set("status", "reading")
+
+	crossSite := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{name: "Sec-Fetch-Site cross-site", headers: map[string]string{"Sec-Fetch-Site": "cross-site"}},
+		{name: "foreign Origin", headers: map[string]string{"Origin": "http://evil.example"}},
+	}
+	for _, tc := range crossSite {
+		t.Run("POST "+tc.name, func(t *testing.T) {
+			res := postForm(t, app, "/v1/trackers", form, tc.headers)
+			if res.StatusCode != http.StatusForbidden {
+				body, _ := io.ReadAll(res.Body)
+				t.Fatalf("expected 403, got %d (body: %s)", res.StatusCode, body)
+			}
+		})
+	}
+	if got := countTrackers(t, db); got != 0 {
+		t.Fatalf("the refused creates must not have run, found %d trackers", got)
+	}
+
+	id := seedGuardTracker(t, db, 1, "Guarded API Tracker")
+	path := "/v1/trackers/" + strconv.FormatInt(id, 10)
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		t.Run(method+" cross-site", func(t *testing.T) {
+			req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Sec-Fetch-Site", "cross-site")
+			res, err := app.Test(req, 10000)
+			if err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+			if res.StatusCode != http.StatusForbidden {
+				body, _ := io.ReadAll(res.Body)
+				t.Fatalf("expected 403, got %d (body: %s)", res.StatusCode, body)
+			}
+		})
+	}
+	if got := countTrackers(t, db); got != 1 {
+		t.Fatalf("the refused delete must not have run, found %d trackers", got)
+	}
+
+	// Reads are never refused, and a client that sends neither header (curl,
+	// a script) is not a browser being used against the reader.
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/trackers", nil)
+	readReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	readRes, err := app.Test(readReq, 10000)
+	if err != nil {
+		t.Fatalf("GET /v1/trackers: %v", err)
+	}
+	if readRes.StatusCode != http.StatusOK {
+		t.Fatalf("cross-site read: expected 200, got %d", readRes.StatusCode)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/trackers", strings.NewReader(
+		`{"title":"Scripted","sourceId":1,"sourceUrl":"https://mangadex.org/title/scripted","status":"reading"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes, err := app.Test(createReq, 10000)
+	if err != nil {
+		t.Fatalf("POST /v1/trackers: %v", err)
+	}
+	if createRes.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createRes.Body)
+		t.Fatalf("headerless create: expected 201, got %d (body: %s)", createRes.StatusCode, body)
+	}
+}
+
 // Reads are never refused: a bookmarked dashboard URL opened from anywhere is a
 // GET.
 func TestDashboardReadsIgnoreOrigin(t *testing.T) {

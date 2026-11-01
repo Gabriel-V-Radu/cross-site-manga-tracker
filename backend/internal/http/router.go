@@ -42,8 +42,12 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	// along — so a form auto-submitted from any other site the reader has open
 	// could delete or rewrite trackers on the LAN instance. Browsers tell us
 	// where a request came from; refusing the ones from another site is the
-	// whole defence this app needs, since it has no login to protect.
+	// whole defence this app needs, since it has no login to protect. The JSON
+	// API needs it too: fiber's BodyParser also decodes a form-encoded body into
+	// the tracker request, so the same auto-submitted form could POST junk
+	// trackers to /v1/trackers.
 	app.Use("/dashboard", rejectCrossSiteWrites)
+	app.Use("/v1", rejectCrossSiteWrites)
 
 	health := handlers.NewHealthHandler(db)
 	trackers := handlers.NewTrackersHandler(db)

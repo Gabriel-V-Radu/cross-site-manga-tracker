@@ -64,6 +64,9 @@ in Docker and is used from any browser on the same network.
 - API usage (profile-aware):
    - Query parameter: `/v1/trackers?profile=profile1`
    - Header: `X-Profile-Key: profile1` or `X-Profile-ID: 1`
+   - Writes (POST, PUT, DELETE) that a browser marks as coming from another
+     site are refused with 403, on `/v1` as on the dashboard. curl and scripts
+     send no such marker and are unaffected.
 - A cookie stores the active profile in the browser for convenience.
 
 ## Notes
