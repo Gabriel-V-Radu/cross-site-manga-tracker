@@ -437,6 +437,13 @@ func (c *Connector) latestEnglishChapter(ctx context.Context, hid string) (*floa
 
 	var latest connectors.LatestReading
 	for _, entry := range chapters {
+		// The same guard every other connector applies before the accumulator,
+		// which ranks whatever it is given: a 0, a negative or a date-shaped junk
+		// number at the top of the listing would otherwise become the reported
+		// chapter, and a newly linked tracker has no jump guard to catch it.
+		if !connectors.ValidChapter(entry.Number) {
+			continue
+		}
 		var releaseAt *time.Time
 		if entry.CreatedAt > 0 {
 			createdAt := time.Unix(entry.CreatedAt, 0).UTC()

@@ -112,6 +112,68 @@ func TestMangaFireReportsNoChapterWhenNoEnglishRelease(t *testing.T) {
 	}
 }
 
+// The English listing's numbers go through the same ValidChapter guard every
+// other connector applies: a junk number at the top of the listing is skipped
+// for the real latest chapter, and a listing with nothing valid reports no
+// chapter rather than a 0.
+func TestMangaFireSkipsInvalidChapterNumbers(t *testing.T) {
+	cases := []struct {
+		name        string
+		items       string
+		wantChapter float64
+		wantRelease int64
+		wantNone    bool
+	}{
+		{
+			name: "junk number above the real latest",
+			items: `{"id":3,"number":20240501,"language":"en","createdAt":1783300000},
+				{"id":2,"number":54,"language":"en","createdAt":1783047602},
+				{"id":1,"number":53,"language":"en","createdAt":1782659714}`,
+			wantChapter: 54,
+			wantRelease: 1783047602,
+		},
+		{
+			name:     "only a prologue numbered 0",
+			items:    `{"id":1,"number":0,"language":"en","createdAt":1782659714}`,
+			wantNone: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece"}}`))
+			})
+			mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[` + tc.items + `],"meta":{"hasNext":false}}`))
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+			resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+			if err != nil {
+				t.Fatalf("resolve failed: %v", err)
+			}
+			if tc.wantNone {
+				if resolved.LatestChapter != nil || resolved.LastUpdatedAt != nil {
+					t.Fatalf("expected no chapter, got %v at %v", resolved.LatestChapter, resolved.LastUpdatedAt)
+				}
+				return
+			}
+			if resolved.LatestChapter == nil || *resolved.LatestChapter != tc.wantChapter {
+				t.Fatalf("latest chapter = %v, want %v", resolved.LatestChapter, tc.wantChapter)
+			}
+			if resolved.LastUpdatedAt == nil || !resolved.LastUpdatedAt.Equal(time.Unix(tc.wantRelease, 0).UTC()) {
+				t.Fatalf("release date = %v, want the upload of chapter %v", resolved.LastUpdatedAt, tc.wantChapter)
+			}
+		})
+	}
+}
+
 // The chapter listing is now what the reported number rests on, so a failure to
 // read it has to surface as a failed poll rather than as "no chapters" — which
 // the poller would take at face value.
