@@ -19,7 +19,7 @@ import (
 func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
@@ -50,7 +50,7 @@ func (h *DashboardHandler) EmptyModal(c *fiber.Ctx) error {
 func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
@@ -128,7 +128,7 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	tracker, err := parseTrackerFromForm(c)
@@ -211,7 +211,7 @@ type trackerCardFragmentData struct {
 func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -311,7 +311,7 @@ func hasResolvedSourceMetadata(tracker *models.Tracker) bool {
 func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
@@ -460,7 +460,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -482,7 +482,7 @@ func (h *DashboardHandler) DeleteFromForm(c *fiber.Ctx) error {
 func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
@@ -513,7 +513,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))

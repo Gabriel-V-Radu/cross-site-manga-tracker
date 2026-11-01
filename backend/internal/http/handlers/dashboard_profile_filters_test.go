@@ -491,6 +491,53 @@ func TestRenameTagFromMenuRefreshesFilterTagOptions(t *testing.T) {
 	}
 }
 
+// TestCreateTagFromMenuNamesTheConflictingField pins which of custom_tags' two
+// unique keys a refused create is blamed on. Any conflict used to be reported
+// as the icon whenever one was picked, yet the menu only offers free icons — so
+// a duplicate name with a free icon told the user the icon was taken.
+func TestCreateTagFromMenuNamesTheConflictingField(t *testing.T) {
+	cases := []struct {
+		name    string
+		tagName string
+		iconKey string
+		want    string
+	}{
+		{name: "duplicate name with a free icon", tagName: "FAVORITOS", iconKey: "icon_2", want: "A tag with that name already exists"},
+		{name: "duplicate name without an icon", tagName: "favoritos", want: "A tag with that name already exists"},
+		{name: "free name with a taken icon", tagName: "Another", iconKey: "icon_1", want: "That icon is already used by another tag"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			db, app, cleanup := setupTestApp(t)
+			defer cleanup()
+
+			if _, err := db.Exec(`INSERT INTO custom_tags (profile_id, name, icon_key) VALUES (1, 'Favoritos', 'icon_1')`); err != nil {
+				t.Fatalf("seed custom tag: %v", err)
+			}
+
+			form := url.Values{}
+			form.Set("tag_name", testCase.tagName)
+			if testCase.iconKey != "" {
+				form.Set("icon_key", testCase.iconKey)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/dashboard/profile/tags?profile=profile1", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			res, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("create tag request failed: %v", err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (body: %s)", res.StatusCode, string(body))
+			}
+			if got := strings.TrimSpace(string(body)); got != testCase.want {
+				t.Fatalf("message = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestProfileFilterTagsPrioritizesIconTags(t *testing.T) {
 	db, app, cleanup := setupTestApp(t)
 	defer cleanup()

@@ -35,7 +35,7 @@ const (
 func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	profiles, err := h.profileResolver.ListProfiles(c.Context())
@@ -73,7 +73,7 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	name := strings.TrimSpace(c.FormValue("profile_name"))
@@ -94,7 +94,7 @@ func (h *DashboardHandler) RenameProfileFromForm(c *fiber.Ctx) error {
 func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	return h.renderProfileMenu(c, activeProfile, "", "")
@@ -103,7 +103,7 @@ func (h *DashboardHandler) ProfileMenuModal(c *fiber.Ctx) error {
 func (h *DashboardHandler) ProfileFilterTagsPartial(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	profileTags, err := h.trackerRepo.ListProfileTags(c.Context(), activeProfile.ID)
@@ -118,7 +118,7 @@ func (h *DashboardHandler) ProfileFilterLinkedSitesPartial(c *fiber.Ctx) error {
 	// The list is not per-profile, but resolving still has to happen: it is
 	// what rejects an unknown profile and refreshes the active-profile cookie.
 	if _, err := h.profileResolver.Resolve(c); err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	linkedSites, err := h.listLinkedSites(c.Context())
@@ -155,7 +155,7 @@ func (h *DashboardHandler) SwitchProfileFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	tagName := strings.TrimSpace(c.FormValue("tag_name"))
@@ -177,7 +177,13 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 	if _, err := h.trackerRepo.CreateProfileTag(c.Context(), activeProfile.ID, tagName, iconKey); err != nil {
 		lowerErr := strings.ToLower(err.Error())
 		if strings.Contains(lowerErr, "unique") {
-			if iconKey != nil {
+			// custom_tags has two unique keys, (profile, name) and (profile,
+			// icon), and SQLite names the columns of the one that failed. Any
+			// conflict used to be blamed on the icon whenever one was picked —
+			// but the menu only offers icons still free, so with an icon picked
+			// the conflict is almost always the name, and the user went on
+			// trying other icons that failed the same way.
+			if strings.Contains(lowerErr, "custom_tags.icon_key") {
 				return h.fail(c, fiber.StatusBadRequest, "That icon is already used by another tag", err)
 			}
 			return h.fail(c, fiber.StatusBadRequest, "A tag with that name already exists", err)
@@ -191,7 +197,7 @@ func (h *DashboardHandler) CreateTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
@@ -225,7 +231,7 @@ func (h *DashboardHandler) RenameTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	tagID, err := strconv.ParseInt(strings.TrimSpace(c.FormValue("tag_id")), 10, 64)
@@ -247,7 +253,7 @@ func (h *DashboardHandler) DeleteTagFromMenu(c *fiber.Ctx) error {
 func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	linkedSites, err := h.listLinkedSites(c.Context())

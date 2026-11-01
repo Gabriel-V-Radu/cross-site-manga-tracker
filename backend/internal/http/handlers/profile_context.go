@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,33 @@ import (
 )
 
 const activeProfileCookieName = "active_profile_id"
+
+// unknownProfileError is a request naming a profile that does not exist — the
+// caller's mistake, and a 400. It is a type of its own so it can be told apart
+// from a lookup that failed: both used to come back as one undifferentiated
+// error, so a database fault was answered "Invalid profile" and logged only at
+// debug level, which left the Pi's logs empty while every request failed. The
+// text stays exactly what it was, because the JSON API returns it verbatim.
+type unknownProfileError string
+
+func (e unknownProfileError) Error() string { return string(e) }
+
+// isUnknownProfile reports whether Resolve failed because the request named no
+// existing profile, as opposed to the profile lookup itself failing.
+func isUnknownProfile(err error) bool {
+	var unknown unknownProfileError
+	return errors.As(err, &unknown)
+}
+
+// failProfile answers a request whose profile could not be resolved: a profile
+// that does not exist is a 400, anything else is the database failing and a
+// 500, which fail logs at error level where the operator will see it.
+func (h *DashboardHandler) failProfile(c *fiber.Ctx, err error) error {
+	if isUnknownProfile(err) {
+		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+	}
+	return h.fail(c, fiber.StatusInternalServerError, "Failed to load profile", err)
+}
 
 type profileContextResolver struct {
 	repo *repository.ProfileRepository
@@ -49,7 +77,7 @@ func (r *profileContextResolver) Resolve(c *fiber.Ctx) (*models.Profile, error) 
 		return nil, fmt.Errorf("resolve default profile: %w", err)
 	}
 	if profile == nil {
-		return nil, fmt.Errorf("no profiles available")
+		return nil, unknownProfileError("no profiles available")
 	}
 
 	r.setActiveProfileCookie(c, profile.ID)
@@ -71,7 +99,7 @@ func (r *profileContextResolver) resolveFromQuery(c *fiber.Ctx) (*models.Profile
 		return nil, err
 	}
 	if profile == nil {
-		return nil, fmt.Errorf("invalid profile")
+		return nil, unknownProfileError("invalid profile")
 	}
 	return profile, nil
 }
@@ -83,7 +111,7 @@ func (r *profileContextResolver) resolveFromHeaders(c *fiber.Ctx) (*models.Profi
 			return nil, err
 		}
 		if profile == nil {
-			return nil, fmt.Errorf("invalid X-Profile-ID")
+			return nil, unknownProfileError("invalid X-Profile-ID")
 		}
 		return profile, nil
 	}
@@ -94,7 +122,7 @@ func (r *profileContextResolver) resolveFromHeaders(c *fiber.Ctx) (*models.Profi
 			return nil, err
 		}
 		if profile == nil {
-			return nil, fmt.Errorf("invalid X-Profile-Key")
+			return nil, unknownProfileError("invalid X-Profile-Key")
 		}
 		return profile, nil
 	}

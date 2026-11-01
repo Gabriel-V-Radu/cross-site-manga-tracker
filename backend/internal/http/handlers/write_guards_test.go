@@ -246,6 +246,38 @@ func TestProfileHeaderWinsOverCookie(t *testing.T) {
 	}
 }
 
+// A profile that does not exist is the caller's mistake and a 400, but a
+// profile lookup that fails is the database failing. Both used to answer 400
+// "Invalid profile", logged at debug only, so a broken database showed up as a
+// misleading message in the browser and nothing in the Pi's logs.
+func TestProfileLookupFailureIsAServerError(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	get := func(target string) (int, string) {
+		t.Helper()
+		res, err := app.Test(httptest.NewRequest(http.MethodGet, target, nil), 10000)
+		if err != nil {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		return res.StatusCode, strings.TrimSpace(string(body))
+	}
+
+	if status, body := get("/dashboard/trackers?profile=nobody"); status != http.StatusBadRequest || body != "Invalid profile" {
+		t.Fatalf("unknown profile: got %d %q, want 400 \"Invalid profile\"", status, body)
+	}
+
+	// The profile lookup is the first query of every request; with its table
+	// gone it fails the way a locked or unreadable database does.
+	if _, err := db.Exec(`ALTER TABLE profiles RENAME TO profiles_unavailable`); err != nil {
+		t.Fatalf("hide profiles table: %v", err)
+	}
+	if status, body := get("/dashboard/trackers?profile=profile1"); status != http.StatusInternalServerError || body != "Failed to load profile" {
+		t.Fatalf("failed lookup: got %d %q, want 500 \"Failed to load profile\"", status, body)
+	}
+}
+
 func firstLines(text string, n int) string {
 	lines := strings.SplitN(text, "\n", n+1)
 	if len(lines) > n {

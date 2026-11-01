@@ -14,7 +14,7 @@ import (
 func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	activeProfile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
