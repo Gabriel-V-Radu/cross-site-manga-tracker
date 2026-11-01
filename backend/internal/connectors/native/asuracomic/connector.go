@@ -146,9 +146,24 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if len(results) >= query.Limit {
 			break
 		}
+		// Each series page waits its turn in the shared per-host pacing, so a
+		// dashboard search has budget for only a handful. Once it is spent
+		// every further fetch fails at once, and carrying on would only skip
+		// the remaining series one by one.
+		if ctx.Err() != nil {
+			break
+		}
 
+		// The match is settled from the browse page alone: the series page
+		// adds no alternate titles, only the same name the anchor and slug
+		// already carry. Fetching first spent the budget on every /comics/
+		// link on the page, nav and sidebar entries included, before a real
+		// hit further down got its turn.
 		seriesSlugTitle := strings.ReplaceAll(seriesID, "-", " ")
 		anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
+		if !query.Matches(anchorTitle, seriesSlugTitle, seriesID) {
+			continue
+		}
 
 		resolved, resolveErr := c.resolveBySeriesIDExact(ctx, seriesID)
 		// A series with no chapter out yet is still a real hit; only a page
@@ -157,13 +172,15 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			continue
 		}
 
-		if !query.Matches(resolved.Title, resolved.SourceItemID, anchorTitle, seriesSlugTitle) {
-			continue
-		}
-
 		results = append(results, *resolved)
 	}
 
+	// A search that ran out of time before finding anything is a failure, not
+	// "no matches": the form then says the search failed instead of telling
+	// the user Asura does not have the title.
+	if len(results) == 0 && ctx.Err() != nil {
+		return nil, fmt.Errorf("asuracomic search: %w", ctx.Err())
+	}
 	return results, nil
 }
 

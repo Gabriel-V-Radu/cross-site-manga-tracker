@@ -3,8 +3,11 @@ package asuracomic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -420,6 +423,86 @@ func TestAsuraComicResolveChapterURLVerifiesAgainstTheSeriesPage(t *testing.T) {
 	}
 	if !errors.Is(err, connectors.ErrChapterNotFound) {
 		t.Fatalf("expected the typed not-found verdict, got %v", err)
+	}
+}
+
+// TestAsuraComicSearchFetchesOnlyMatchingSeries pins that the match is settled
+// from the browse page before any series page is fetched. Every fetch costs a
+// turn in the per-host pacing, and reading the nav and sidebar /comics/ links
+// first used up a dashboard search's budget before the real hit got its turn.
+func TestAsuraComicSearchFetchesOnlyMatchingSeries(t *testing.T) {
+	var mu sync.Mutex
+	var fetched []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<body>
+  <nav>
+    <a href="/comics/popular-one-11111111">Popular One</a>
+    <a href="/comics/popular-two-22222222">Popular Two</a>
+    <a href="/comics/popular-three-33333333">Popular Three</a>
+    <a href="/comics/popular-four-44444444">Popular Four</a>
+  </nav>
+  <a href="/comics/omniscient-reader-7f873ca6">Omniscient Reader</a>
+</body>
+</html>`))
+	})
+	mux.HandleFunc("/comics/", func(w http.ResponseWriter, r *http.Request) {
+		seriesID := strings.TrimPrefix(r.URL.Path, "/comics/")
+		mu.Lock()
+		fetched = append(fetched, seriesID)
+		mu.Unlock()
+		fmt.Fprintf(w, `<html><head><meta property="og:title" content="Omniscient Reader - Asura Scans"></head><body><a href="/comics/%s/chapter/250">Chapter 250</a></body></html>`, seriesID)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	results, err := conn.SearchByTitle(context.Background(), "omniscient reader", 10)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].SourceItemID != "omniscient-reader-7f873ca6" {
+		t.Fatalf("expected the one matching series, got %+v", results)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fetched) != 1 || fetched[0] != "omniscient-reader-7f873ca6" {
+		t.Fatalf("expected only the matching series page to be fetched, got %v", fetched)
+	}
+}
+
+// TestAsuraComicSearchReportsATimeoutInsteadOfNoMatches pins that a search
+// whose budget ran out before anything was read returns the deadline as an
+// error, so the form says the search failed instead of "No matches found".
+func TestAsuraComicSearchReportsATimeoutInsteadOfNoMatches(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><body><a href="/comics/slow-series-7f873ca6">Slow Series</a><a href="/comics/slow-series-two-12345678">Slow Series Two</a></body></html>`))
+	})
+	mux.HandleFunc("/comics/", func(_ http.ResponseWriter, r *http.Request) {
+		// Held until the client gives up, with a cap so a missed cancellation
+		// cannot hang the test.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 10 * time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	results, err := conn.SearchByTitle(ctx, "slow series", 10)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the deadline as the error, got results %+v and error %v", results, err)
 	}
 }
 

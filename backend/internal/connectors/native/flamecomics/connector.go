@@ -141,16 +141,43 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
+	// /latest is a listing, not a search: every candidate costs a series page,
+	// and each page waits its turn in the shared per-host pacing, so a
+	// dashboard search has budget for only a handful. Walking the listing in
+	// page order spent that budget on whatever came first and answered "no
+	// matches" for a title further down. Entries whose listed title already
+	// answers the query are read first; the rest are read while budget
+	// remains, for the alternate titles only a series page carries.
+	ordered := make([]seriesEntry, 0, len(entries))
+	var unmatched []seriesEntry
+	for _, entry := range entries {
+		if query.Matches(entry.Title, entry.SeriesID) {
+			ordered = append(ordered, entry)
+		} else {
+			unmatched = append(unmatched, entry)
+		}
+	}
+	ordered = append(ordered, unmatched...)
+
 	results := make([]connectors.MangaResult, 0, query.Limit)
 	seen := map[string]struct{}{}
-	for _, entry := range entries {
+	for _, entry := range ordered {
 		if len(results) >= query.Limit {
 			break
 		}
+		// Once the budget is spent every further fetch fails at once, so
+		// carrying on would only skip the remaining entries one by one.
+		if ctx.Err() != nil {
+			break
+		}
 
+		// A series anchored under several texts is read once, whatever that
+		// read answered: fetching the same page again costs another turn in
+		// the pacing and cannot change the answer.
 		if _, ok := seen[entry.SeriesID]; ok {
 			continue
 		}
+		seen[entry.SeriesID] = struct{}{}
 
 		resolved, resolveErr := c.resolveBySeriesID(ctx, entry.SeriesID)
 		// A series with no chapter out yet is still a real hit; only a page
@@ -163,9 +190,14 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		}
 
 		results = append(results, *resolved)
-		seen[entry.SeriesID] = struct{}{}
 	}
 
+	// A search that ran out of time before finding anything is a failure, not
+	// "no matches": the form then says the search failed instead of telling
+	// the user Flame does not have the title.
+	if len(results) == 0 && ctx.Err() != nil {
+		return nil, fmt.Errorf("flamecomics search: %w", ctx.Err())
+	}
 	return results, nil
 }
 

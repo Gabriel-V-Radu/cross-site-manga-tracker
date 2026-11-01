@@ -3,8 +3,11 @@ package flamecomics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +120,105 @@ func TestFlameComicsResolveChapterURLWithNestedAnchorMarkup(t *testing.T) {
 
 	if chapterURL != "https://flamecomics.xyz/series/22/2dd2ff4ef56a0e99" {
 		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+}
+
+// TestFlameComicsSearchReadsListingMatchesFirst pins the search order: every
+// series page costs a turn in the per-host pacing, so the entries whose listed
+// title already answers the query are read before the rest of /latest, and a
+// series anchored twice is read once. Walking the listing in page order spent
+// a dashboard search's whole budget on the first few entries and answered "no
+// matches" for a title ninth on the page.
+func TestFlameComicsSearchReadsListingMatchesFirst(t *testing.T) {
+	var listing strings.Builder
+	listing.WriteString(`<!DOCTYPE html><html><body>`)
+	for id := 1; id <= 30; id++ {
+		title := fmt.Sprintf("Series Number %d", id)
+		if id == 9 {
+			title = "Omniscient Reader"
+		}
+		fmt.Fprintf(&listing, `<a href="/series/%d">%s</a>`, id, title)
+	}
+	// The same series anchored a second time, under its alternate name.
+	listing.WriteString(`<a href="/series/9">Omniscient Reader's Viewpoint</a>`)
+	listing.WriteString(`</body></html>`)
+
+	var mu sync.Mutex
+	var fetched []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/latest", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(listing.String()))
+	})
+	mux.HandleFunc("/series/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/series/")
+		mu.Lock()
+		fetched = append(fetched, id)
+		mu.Unlock()
+		title := "Series Number " + id
+		if id == "9" {
+			title = "Omniscient Reader"
+		}
+		fmt.Fprintf(w, `<html><head><meta property="og:title" content="%s - Flame Comics"></head><body><a href="/series/%s/abcdef12">Chapter 10</a></body></html>`, title, id)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"flamecomics.xyz"}, &http.Client{Timeout: 5 * time.Second})
+	results, err := conn.SearchByTitle(context.Background(), "omniscient reader", 8)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].SourceItemID != "9" {
+		t.Fatalf("expected series 9 as the only result, got %+v", results)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fetched) == 0 || fetched[0] != "9" {
+		t.Fatalf("expected the listing match to be read first, got fetch order %v", fetched)
+	}
+	reads := 0
+	for _, id := range fetched {
+		if id == "9" {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("expected series 9 to be read once, read %d times", reads)
+	}
+	if len(fetched) != 30 {
+		t.Fatalf("expected the rest of the listing to be read for alternate titles while budget remained, got %d reads", len(fetched))
+	}
+}
+
+// TestFlameComicsSearchReportsATimeoutInsteadOfNoMatches pins that a search
+// whose budget ran out before anything matched returns the deadline as an
+// error, so the form says the search failed instead of "No matches found".
+func TestFlameComicsSearchReportsATimeoutInsteadOfNoMatches(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/latest", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><body><a href="/series/1">Slow Series</a><a href="/series/2">Another Slow Series</a></body></html>`))
+	})
+	mux.HandleFunc("/series/", func(_ http.ResponseWriter, r *http.Request) {
+		// Held until the client gives up, with a cap so a missed cancellation
+		// cannot hang the test.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"flamecomics.xyz"}, &http.Client{Timeout: 10 * time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	results, err := conn.SearchByTitle(ctx, "slow series", 8)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the deadline as the error, got results %+v and error %v", results, err)
 	}
 }
 
