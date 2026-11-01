@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -15,8 +16,16 @@ func NewHealthHandler(db *sql.DB) *HealthHandler {
 	return &HealthHandler{db: db}
 }
 
+// healthPingTimeout bounds the database check. The pool holds one connection,
+// so a plain Ping made while that connection is held waits for it with no
+// deadline: a wedged connection used to leave every probe hanging, one more
+// blocked goroutine per minute, instead of answering 503.
+const healthPingTimeout = 2 * time.Second
+
 func (h *HealthHandler) Check(c *fiber.Ctx) error {
-	if err := h.db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(c.Context(), healthPingTimeout)
+	defer cancel()
+	if err := h.db.PingContext(ctx); err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"status": "degraded",
 			"db":     "down",

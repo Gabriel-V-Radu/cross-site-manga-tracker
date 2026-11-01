@@ -59,6 +59,12 @@ func run() int {
 		poller.Start(pollerCtx)
 	}
 
+	// Cancelled by the defers on the way out, before the database closes, so
+	// the watch never pings a closed pool.
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	defer watchdogCancel()
+	dbWedged := watchDatabase(watchdogCtx, db.PingContext, dbWatchdogInterval, dbWatchdogTimeout, dbWatchdogMaxFailures)
+
 	// Listen returns nil on graceful Shutdown, so anything on this channel is a
 	// real failure (port taken, socket error). Without it the process would keep
 	// running headless — poller alive, no HTTP — and Docker would never restart it.
@@ -81,6 +87,9 @@ func run() int {
 	case err := <-serverErr:
 		slog.Error("server stopped unexpectedly", "error", err)
 		exitCode = 1
+	case err := <-dbWedged:
+		slog.Error("database unreachable, shutting down so the container restarts", "error", err, "consecutive_failures", dbWatchdogMaxFailures)
+		exitCode = 1
 	}
 	pollerCancel()
 	poller.StopWait(2 * time.Second)
@@ -90,4 +99,58 @@ func run() int {
 		slog.Error("shutdown error", "error", err)
 	}
 	return exitCode
+}
+
+// A ping waits for the pool's one connection, so it fails only when that
+// connection stayed held for the whole timeout. Five of those a minute apart
+// is a connection stuck for five minutes, not a slow write or a busy scan.
+const (
+	dbWatchdogInterval    = time.Minute
+	dbWatchdogTimeout     = 10 * time.Second
+	dbWatchdogMaxFailures = 5
+)
+
+// watchDatabase pings the database every interval and reports on the returned
+// channel once maxFailures pings in a row have failed; a success resets the
+// count. Docker's healthcheck cannot do this: plain Engine and compose only
+// label a container unhealthy and never restart it, so a process whose single
+// SQLite connection was stuck behind a lost transaction kept listening, and
+// serving nothing, until someone SSHed in. run treats the report like a dead
+// listener — the normal shutdown path, then a non-zero exit, which is what
+// `restart: unless-stopped` acts on. The report is buffered so the goroutine
+// never blocks on a run that has already moved on, and the watch ends with
+// ctx.
+func watchDatabase(ctx context.Context, ping func(context.Context) error, interval, timeout time.Duration, maxFailures int) <-chan error {
+	wedged := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		failures := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			pingCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := ping(pingCtx)
+			cancel()
+			if err == nil {
+				failures = 0
+				continue
+			}
+			// A ping cut short by shutdown says nothing about the database.
+			if ctx.Err() != nil {
+				return
+			}
+			failures++
+			slog.Warn("database ping failed", "error", err, "consecutive_failures", failures)
+			if failures >= maxFailures {
+				wedged <- err
+				return
+			}
+		}
+	}()
+	return wedged
 }

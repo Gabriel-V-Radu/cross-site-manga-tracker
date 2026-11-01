@@ -13,9 +13,13 @@ services:
     volumes:
       - ./backend/data:/app/data
     restart: unless-stopped
-    # restart only fires on exit. A process that is listening but wedged (the
-    # single SQLite connection stuck behind a lost transaction) stays down for
-    # good without this; /health is what deploy.ps1 already polls.
+    # The healthcheck only labels the container (healthy/unhealthy in
+    # `docker compose ps`): plain Engine and compose never restart on it, and
+    # restart only fires when the process exits. A process that is listening
+    # but wedged (the single SQLite connection stuck behind a lost
+    # transaction) is restarted by the server's own database watchdog
+    # (backend/cmd/api/main.go), which shuts down with a non-zero exit after
+    # five failed pings a minute apart. deploy.ps1 polls /health itself.
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
       interval: 60s
