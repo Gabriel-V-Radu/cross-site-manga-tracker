@@ -42,6 +42,9 @@ in Docker and is used from any browser on the same network.
    - Double-click `stop.cmd`, or run `./scripts/stop.ps1`
 - Restart the app:
    - Double-click `restart.cmd`, or run `./scripts/restart.ps1`
+   - Runs the test gate, then the deploy above. The running container is
+     replaced only after the new image builds, so a failed build leaves the
+     app up.
    - Hard refresh restart: `./scripts/restart.ps1 -NoCache`
 - Manual fallback:
    - `docker compose down --remove-orphans`

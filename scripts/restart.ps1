@@ -10,13 +10,13 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
-$stopScript = Join-Path $scriptDir "stop.ps1"
 $deployScript = Join-Path $scriptDir "deploy.ps1"
 
-# The test gate runs BEFORE the container is stopped. Stopping first and then
-# failing the gate is what turns a restart into an outage that stays an outage:
-# the app is already down when the throw happens, and re-running this script
-# fails the same way. -SkipTests is the way back up when the gate is the problem.
+# The test gate runs BEFORE anything touches the container. Stopping first and
+# then failing the gate is what turns a restart into an outage that stays an
+# outage: the app is already down when the throw happens, and re-running this
+# script fails the same way. -SkipTests is the way back up when the gate is the
+# problem.
 if ($SkipTests) {
     Write-Host "Skipping the test gate (-SkipTests)."
 }
@@ -37,7 +37,11 @@ else {
     }
 }
 
-& $stopScript
+# No separate stop: the deploy's `up -d --force-recreate` replaces the
+# container, and only after its build succeeded. Running stop.ps1 here took the
+# app down before that build, which can still fail after the gate passed
+# (Docker Hub or the Go module proxy unreachable), leaving it down behind a
+# message saying the running container was left untouched.
 
 # Already gated above, so the deploy must not run it a second time.
 $deployParams = @{ SkipTests = $true }
