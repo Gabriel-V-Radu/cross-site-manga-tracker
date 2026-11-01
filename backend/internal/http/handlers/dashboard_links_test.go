@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
+	"github.com/gofiber/fiber/v2"
 )
 
 func TestLinksQueueAcceptFlow(t *testing.T) {
@@ -167,6 +169,147 @@ func (u unreachableConnector) SearchByTitle(context.Context, string, int) ([]con
 }
 func (u unreachableConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
 	return nil, errors.New("behind a browser challenge")
+}
+
+// healthCountingConnector is a healthy site that counts its health checks, to
+// observe how often the "broken right now" sweep actually runs.
+type healthCountingConnector struct {
+	key    string
+	checks *atomic.Int32
+}
+
+func (h healthCountingConnector) Key() string  { return h.key }
+func (h healthCountingConnector) Name() string { return h.key }
+func (h healthCountingConnector) Kind() string { return connectors.KindNative }
+func (h healthCountingConnector) HealthCheck(context.Context) error {
+	h.checks.Add(1)
+	return nil
+}
+func (h healthCountingConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (h healthCountingConnector) ResolveByURL(context.Context, string) (*connectors.MangaResult, error) {
+	return nil, errors.New("not used")
+}
+
+func linksRequest(t *testing.T, app *fiber.App, method string, target string) (int, string) {
+	t.Helper()
+	res, err := app.Test(httptest.NewRequest(method, target, nil), -1)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
+}
+
+// TestBrokenSourceSweepIsCachedWhenNothingIsBroken pins the cache for the
+// usual answer, an empty one: it used to be stored as nil and never counted
+// as cached, so every queue load re-checked every site. The cached empty set
+// must still match nothing rather than widen to the whole library.
+func TestBrokenSourceSweepIsCachedWhenNothingIsBroken(t *testing.T) {
+	checks := &atomic.Int32{}
+	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
+		if err := registry.Register(healthCountingConnector{key: "comick", checks: checks}); err != nil {
+			t.Fatalf("register connector: %v", err)
+		}
+	})
+	defer cleanup()
+
+	var comickID, mangafireID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
+	}
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'mangafire'`).Scan(&mangafireID); err != nil {
+		t.Fatalf("look up mangafire source: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+		VALUES (1, 'Unlinked Series', ?, 'https://mangafire.to/manga/unlinked', 'reading')
+	`, mangafireID); err != nil {
+		t.Fatalf("seed tracker: %v", err)
+	}
+
+	queueURL := "/dashboard/links/queue?source=" + toString(int(comickID)) + "&primary=broken"
+	for attempt := 1; attempt <= 2; attempt++ {
+		status, body := linksRequest(t, app, "GET", queueURL)
+		if status != 200 {
+			t.Fatalf("queue load %d status = %d: %s", attempt, status, body)
+		}
+		if strings.Contains(body, "Unlinked Series") {
+			t.Fatalf("queue load %d listed a tracker whose primary is not broken: %s", attempt, body)
+		}
+	}
+	if got := checks.Load(); got != 1 {
+		t.Fatalf("health checks = %d over two queue loads, want 1: the empty sweep was not cached", got)
+	}
+}
+
+// TestLinkScanStatusRefreshesQueueOnlyFromRunningPoll pins the queue refresh
+// after a scan: any poll from the running status that finds the scan over
+// carries it, however late it arrives, and the page-load request never does.
+func TestLinkScanStatusRefreshesQueueOnlyFromRunningPoll(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	const queueRefresh = `hx-get="/dashboard/links/queue"`
+
+	status, body := linksRequest(t, app, "GET", "/dashboard/links/scan-status")
+	if status != 200 {
+		t.Fatalf("page-load status = %d: %s", status, body)
+	}
+	if strings.Contains(body, queueRefresh) {
+		t.Fatalf("the page-load status request carried the queue refresh: %s", body)
+	}
+
+	status, body = linksRequest(t, app, "GET", "/dashboard/links/scan-status?poll=1")
+	if status != 200 {
+		t.Fatalf("poll status = %d: %s", status, body)
+	}
+	if !strings.Contains(body, queueRefresh) {
+		t.Fatalf("a running-status poll that found no scan running did not refresh the queue: %s", body)
+	}
+}
+
+// TestStartLinkScanExplainsARefusedStart pins that a Scan click that starts
+// nothing says so instead of silently showing whatever status there was.
+func TestStartLinkScanExplainsARefusedStart(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	// The test registry is empty, so the source exists but its connector does
+	// not, and Start refuses.
+	var comickID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
+	}
+
+	status, body := linksRequest(t, app, "POST", "/dashboard/links/scan?source="+toString(int(comickID)))
+	if status != 200 {
+		t.Fatalf("scan status = %d: %s", status, body)
+	}
+	if !strings.Contains(body, "The scan could not start") {
+		t.Fatalf("a refused start rendered no notice: %s", body)
+	}
+}
+
+// TestLinksPageKeepsItsProfileAndLoadsErrorHandler pins two page-level
+// wirings: the way back names the page's profile instead of trusting the
+// cookie another tab rewrites, and the script that shows failed requests is
+// loaded (htmx alone drops every error response silently).
+func TestLinksPageKeepsItsProfileAndLoadsErrorHandler(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	status, body := linksRequest(t, app, "GET", "/dashboard/links?profile=profile2")
+	if status != 200 {
+		t.Fatalf("links page status = %d: %s", status, body)
+	}
+	if !strings.Contains(body, `href="/dashboard?profile=profile2"`) {
+		t.Fatalf("Back to dashboard does not carry the page's profile: %s", body)
+	}
+	if !strings.Contains(body, "/assets/links.js") {
+		t.Fatalf("the links page does not load links.js: %s", body)
+	}
 }
 
 // TestManualLinkAcceptsUnverifiableURL pins that the paste-a-URL fallback does

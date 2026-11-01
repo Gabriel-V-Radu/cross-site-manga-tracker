@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/linkscan"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gofiber/fiber/v2"
@@ -106,10 +108,17 @@ func (h *DashboardHandler) parseLinkScanScope(c *fiber.Ctx) linkScanScope {
 // unhealthySourceIDs health-checks every connector and returns the source ids
 // of the ones that failed. The sweep is cached briefly: it fires a request at
 // every site at once, which is not something a queue refresh should repeat.
+//
+// Both copies below are made with make+copy, never append onto nil: append
+// returns nil for an empty set, and the usual answer — nothing broken — then
+// never counted as cached, so every queue load and card click re-ran the whole
+// sweep. A nil set would also mean "no filter" to the repository, widening
+// "Broken right now" to the entire library instead of matching nothing.
 func (h *DashboardHandler) unhealthySourceIDs(ctx context.Context) []int64 {
 	h.sourceHealthMu.Lock()
-	if time.Now().Before(h.sourceHealthExpires) && h.sourceHealthUnhealthy != nil {
-		cached := append([]int64(nil), h.sourceHealthUnhealthy...)
+	if time.Now().Before(h.sourceHealthExpires) {
+		cached := make([]int64, len(h.sourceHealthUnhealthy))
+		copy(cached, h.sourceHealthUnhealthy)
 		h.sourceHealthMu.Unlock()
 		return cached
 	}
@@ -126,17 +135,24 @@ func (h *DashboardHandler) unhealthySourceIDs(ctx context.Context) []int64 {
 		}
 	}
 
+	sources, err := h.scannableSources(ctx)
+	if err != nil {
+		// Not cached: a failed source lookup says nothing about the sites, and
+		// pinning "none broken" for five minutes would hide every broken one.
+		slog.Warn("broken-source sweep could not list sources", "error", err)
+		return []int64{}
+	}
 	ids := []int64{}
-	if sources, err := h.scannableSources(ctx); err == nil {
-		for _, source := range sources {
-			if unhealthyKeys[source.Key] {
-				ids = append(ids, source.ID)
-			}
+	for _, source := range sources {
+		if unhealthyKeys[source.Key] {
+			ids = append(ids, source.ID)
 		}
 	}
 
+	stored := make([]int64, len(ids))
+	copy(stored, ids)
 	h.sourceHealthMu.Lock()
-	h.sourceHealthUnhealthy = append([]int64(nil), ids...)
+	h.sourceHealthUnhealthy = stored
 	h.sourceHealthExpires = time.Now().Add(5 * time.Minute)
 	h.sourceHealthMu.Unlock()
 
@@ -198,8 +214,12 @@ type linkScanStatusData struct {
 	Done           int
 	WithCandidates int
 	Stopped        bool
+	Stopping       bool
 	LastError      string
 	JustFinished   bool
+	// Notice says why a Scan click did not start the scope it asked for; the
+	// running scan's own status alone read as if it had.
+	Notice string
 }
 
 // linkCardResponseData renders one mutated review card (or its removal) plus
@@ -455,25 +475,40 @@ func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 
 	if err := h.linkScanner.Start(profile.ID, source.ID, source.Key, source.Name, h.parseLinkScanScope(c).Filter); err != nil {
 		// An already-running scan is not a failure worth a dead end: show the
-		// live status instead.
-		return h.renderLinkScanStatus(c, false)
+		// live status instead, with a notice — on its own that status read as
+		// if the click had started the new scope, which it never did.
+		notice := "A scan is still running; start the new one once it finishes."
+		if !errors.Is(err, linkscan.ErrScanRunning) {
+			slog.Warn("link scan did not start", "source", source.Key, "error", err)
+			notice = "The scan could not start; try again in a moment."
+		}
+		return h.renderLinkScanStatus(c, false, notice)
 	}
 	h.rememberLinkScanScope(c, source.ID)
-	return h.renderLinkScanStatus(c, false)
+	// A scope with nothing to check finishes before this render; counting it
+	// as the end of a scan refreshes the queue for it like any other.
+	return h.renderLinkScanStatus(c, true, "")
 }
 
 // StopLinkScan winds down a running scan after the tracker it is on; what it
-// already stored stands.
+// already stored stands. The Stop button exists only on the running status,
+// so a scan already over by now is the transition the queue refresh is for.
 func (h *DashboardHandler) StopLinkScan(c *fiber.Ctx) error {
 	h.linkScanner.Stop()
-	return h.renderLinkScanStatus(c, false)
+	return h.renderLinkScanStatus(c, true, "")
 }
 
+// LinkScanStatus answers the page-load request and the running status's polls.
+// Only the polls carry poll=1 (hx-vals on the running div).
 func (h *DashboardHandler) LinkScanStatus(c *fiber.Ctx) error {
-	return h.renderLinkScanStatus(c, true)
+	return h.renderLinkScanStatus(c, c.Query("poll") == "1", "")
 }
 
-func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, fromPoll bool) error {
+// renderLinkScanStatus renders the status line. afterRunning says the request
+// comes from a moment the scan was known to be running, so a scan found
+// finished now is the transition edge, and that render carries the one-shot
+// queue refresh.
+func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, afterRunning bool, notice string) error {
 	progress := h.linkScanner.Snapshot()
 	data := linkScanStatusData{
 		Running:        progress.Running,
@@ -483,15 +518,23 @@ func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, fromPoll bool) err
 		Done:           progress.Done,
 		WithCandidates: progress.WithCandidates,
 		Stopped:        progress.Stopped,
+		Stopping:       progress.Stopping,
 		LastError:      progress.LastError,
-		// A poll that finds the scan freshly finished is the transition edge:
-		// that render carries the one-shot queue refresh. The recency window
-		// keeps a later page load from re-triggering it.
-		JustFinished: fromPoll && !progress.Running && progress.FinishedAt != nil &&
-			time.Since(*progress.FinishedAt) < 10*time.Second,
+		Notice:         notice,
+		// No recency window: a locked phone or a throttled background tab
+		// polls minutes after the scan ends, and a window measured from
+		// FinishedAt skipped the refresh for good, leaving the pre-scan queue
+		// under a "Last scan" line. The page-load request never sends poll=1,
+		// so it cannot re-trigger the refresh.
+		JustFinished: afterRunning && !progress.Running,
 	}
 	return h.render(c, "links_scan_status_partial.html", data)
 }
+
+// staleSuggestionMessage answers an Accept or Reject on a candidate that is no
+// longer pending: decided in another tab, or dropped by a rescan. links.js
+// shows it inside the card that was clicked, so it is written for the reader.
+const staleSuggestionMessage = "That candidate is no longer pending; reload the queue to see the current ones."
 
 func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
@@ -512,7 +555,7 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the suggestion", err)
 	}
 	if accepted == nil {
-		return h.fail(c, fiber.StatusNotFound, "suggestion not found", nil)
+		return h.fail(c, fiber.StatusNotFound, staleSuggestionMessage, nil)
 	}
 	h.invalidateLinkLookups()
 
@@ -535,7 +578,7 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the suggestion", err)
 	}
 	if suggestion == nil {
-		return h.fail(c, fiber.StatusNotFound, "suggestion not found", nil)
+		return h.fail(c, fiber.StatusNotFound, staleSuggestionMessage, nil)
 	}
 
 	if err := h.linkSuggestionRepo.DecideSuggestion(c.Context(), profile.ID, suggestionID, repository.LinkSuggestionRejected); err != nil {

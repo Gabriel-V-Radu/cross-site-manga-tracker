@@ -1,18 +1,28 @@
 {{if .Running}}
 <!-- hx-target="this" everywhere in this partial: the div lives inside the
-     scope form, whose hx-target would otherwise be inherited. -->
+     scope form, whose hx-target would otherwise be inherited.
+     poll=1 marks this div's own polls: the first one to find the scan over is
+     the transition, whenever it arrives, and gets the queue refresh below. The
+     page-load request never sends it. With a notice showing, polls slow down
+     so the notice can be read before the next swap replaces it. -->
 <div id="link-scan-status" class="link-scan-status link-scan-status--running"
      hx-get="/dashboard/links/scan-status"
-     hx-trigger="every 2s"
+     hx-vals='{"poll": "1"}'
+     hx-trigger="{{if .Notice}}every 6s{{else}}every 2s{{end}}"
      hx-target="this"
      hx-swap="outerHTML">
     <span class="link-scan-status__spinner" aria-hidden="true"></span>
+    {{if .Stopping}}
+    Stopping after the current series: {{.Done}}/{{.Total}} checked, {{.WithCandidates}} with candidates
+    {{else}}
     Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
     <button type="button" class="action-btn link-scan-status__stop"
             hx-post="/dashboard/links/scan/stop"
             hx-target="closest .link-scan-status"
             hx-swap="outerHTML">Stop</button>
+    {{end}}
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
+    {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>{{end}}
 </div>
 {{else}}
 <div id="link-scan-status" class="link-scan-status">
@@ -20,6 +30,7 @@
     Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Stopped}} — stopped early{{end}}.
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
     {{end}}
+    {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>{{end}}
     {{if .JustFinished}}
     <span hx-get="/dashboard/links/queue"
           hx-include="#links-scope"

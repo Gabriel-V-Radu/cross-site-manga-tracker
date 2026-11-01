@@ -11,6 +11,7 @@
     <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
     <link rel="stylesheet" href="{{assetURL "dashboard.css"}}">
     <script src="{{assetURL "htmx.min.js"}}" defer></script>
+    <script src="{{assetURL "links.js"}}" defer></script>
 </head>
 
 {{/* Same header as the dashboard page: every request names this page's profile. */}}
@@ -28,7 +29,9 @@
                     Active Profile
                     <input type="text" value="{{.ActiveProfile.Name}}" readonly>
                 </label>
-                <a class="action-btn" href="/dashboard">Back to dashboard</a>
+                {{/* Named explicitly: without it the dashboard falls back to the
+                     profile cookie, which another tab's requests keep rewriting. */}}
+                <a class="action-btn" href="/dashboard?profile={{.ActiveProfile.Key}}">Back to dashboard</a>
             </div>
         </header>
 

@@ -104,7 +104,7 @@
                 hx-include="#links-scope"
                 hx-target="closest .link-card"
                 hx-swap="outerHTML"
-                hx-confirm="Hide this series from the review queue?">Dismiss</button>
+                hx-confirm="Hide this series from the review queue and from future scans of this source?">Dismiss</button>
     </footer>
 </article>
 {{end}}
@@ -122,7 +122,9 @@
 
 {{if .NoCandidates}}
 <h2 class="links-section-heading">No candidate found</h2>
-<p class="links-section-hint">The scan found nothing usable for these series. Paste the series URL yourself — any supported site works — or dismiss them.</p>
+{{/* Not every series here was searched: a stopped scan, a narrower scan scope, a
+     source never scanned and trackers added since all land here too. */}}
+<p class="links-section-hint">No candidate is pending for these series (not scanned yet, or the scan found nothing usable). Paste the series URL yourself — any supported site works — or dismiss them.</p>
 {{range .NoCandidates}}
 {{template "link_nomatch_row" .}}
 {{end}}
