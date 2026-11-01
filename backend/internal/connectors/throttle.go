@@ -213,7 +213,7 @@ func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	res, err := t.base.RoundTrip(req)
-	t.throttler.observe(host, time.Now(), isThrottleFailure(res, err))
+	t.throttler.observe(host, time.Now(), isThrottleFailure(req.Context(), res, err))
 	return res, err
 }
 
@@ -222,9 +222,17 @@ func (t *throttledTransport) RoundTrip(req *http.Request) (*http.Response, error
 // circuit is the site being unreachable, refusing us, or dying server-side.
 // A caller giving up (its context cancelled or timed out) says nothing about
 // the host, so it must not count toward opening the circuit.
-func isThrottleFailure(res *http.Response, err error) bool {
+//
+// Whether the caller gave up is read from the request's context, not from the
+// error: Go's dial and read timeouts match context.DeadlineExceeded under
+// errors.Is, so testing the error made a host that stopped accepting
+// connections indistinguishable from an impatient caller. Such a host never
+// opened the circuit, and every tracker on it spent a full dial timeout per
+// cycle — seen on the Pi when a Cloudflare address went dark and the Asura and
+// MangaFire shards took 30 seconds a tracker.
+func isThrottleFailure(ctx context.Context, res *http.Response, err error) bool {
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			return false
 		}
 		return true

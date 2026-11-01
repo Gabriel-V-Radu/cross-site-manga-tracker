@@ -3,6 +3,8 @@ package connectors
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -218,6 +220,48 @@ func TestThrottledTransportReleasesSlotOnCancelledWait(t *testing.T) {
 	}
 	if wait > time.Second {
 		t.Fatalf("follow-up wait = %v, want at most one gap: the cancelled slot was not released", wait)
+	}
+}
+
+// A host that stops accepting connections must open the circuit even though
+// Go's dial timeout error matches context.DeadlineExceeded; only the caller's
+// own context ending is "the caller gave up".
+func TestThrottledTransportCountsDialTimeoutsButNotCallerDeadlines(t *testing.T) {
+	// A deadline already past makes the dialer give up before any syscall, so
+	// this is Go's own dial-timeout error without depending on the network.
+	_, dialErr := (&net.Dialer{Deadline: time.Now().Add(-time.Second)}).Dial("tcp", "127.0.0.1:9")
+	if !errors.Is(dialErr, context.DeadlineExceeded) {
+		t.Fatalf("precondition: a dial timeout should match context.DeadlineExceeded, got %v", dialErr)
+	}
+
+	roundTrips := func(th *throttler, ctx context.Context, n int, failure error) {
+		transport := &throttledTransport{throttler: th, base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, failure
+		})}
+		for i := 0; i < n; i++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://a.example/x", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = transport.RoundTrip(req)
+		}
+	}
+
+	dark := newTestThrottler()
+	dark.gap = time.Millisecond
+	roundTrips(dark, context.Background(), 3, fmt.Errorf("request failed: %w", dialErr))
+	var cooling *SourceCoolingDownError
+	if _, _, err := dark.reserve("a.example", time.Now()); !errors.As(err, &cooling) {
+		t.Fatalf("three dial timeouts with the caller still waiting must open the circuit, got %v", err)
+	}
+
+	impatient := newTestThrottler()
+	impatient.gap = time.Millisecond
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	roundTrips(impatient, expired, 3, context.DeadlineExceeded)
+	if _, _, err := impatient.reserve("a.example", time.Now()); err != nil {
+		t.Fatalf("a caller whose own deadline passed says nothing about the host: %v", err)
 	}
 }
 
