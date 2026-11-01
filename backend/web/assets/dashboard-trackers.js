@@ -143,6 +143,25 @@ document.addEventListener('DOMContentLoaded', function () {
             }, 300);
         };
 
+        // The search box is the form's only text field and the form has no
+        // submit button, so Enter in it is an implicit submission. htmx does not
+        // catch it (the form's trigger is explicit), and with no action the
+        // browser navigated to /dashboard?q=…: the page that came back had the
+        // search, status, sort, tags and view all reset. The search is live
+        // anyway, so Enter just runs it now instead of after the debounce.
+        filtersForm.addEventListener('submit', function (event) {
+            event.preventDefault();
+            if (searchDebounceTimer) {
+                window.clearTimeout(searchDebounceTimer);
+                searchDebounceTimer = null;
+            }
+            var submitPageInput = document.getElementById('page-input');
+            if (submitPageInput) {
+                submitPageInput.value = '1';
+            }
+            dispatchTrackersChanged();
+        });
+
         filtersForm.addEventListener('change', function (event) {
             var target = event && event.target;
             if (!target || target.name === 'page') {
@@ -273,6 +292,60 @@ document.addEventListener('click', function (event) {
     closeDropdownIfOutside('filter-tags-dropdown');
     closeDropdownIfOutside('filter-sites-dropdown');
 });
+
+// The tag menu is re-rendered by the server whenever a tag is created, renamed
+// or deleted, and the server does not know which boxes were ticked: every box
+// came back unticked while the list behind it stayed filtered by the old
+// selection — and after a rename or delete, by a name that no longer exists,
+// so the page read "No trackers found" with no filter showing. The ticks are
+// carried across the swap by name, case-insensitively as the list filters
+// them, and a ticked tag that is gone takes its filter with it.
+var tickedTagNamesBeforeSwap = null;
+
+document.body.addEventListener('htmx:beforeSwap', function (event) {
+    var target = event && event.detail ? event.detail.target : null;
+    if (!target || !target.closest || !target.closest('#filter-tags-dropdown')) {
+        return;
+    }
+
+    // Prototype-less, so a tag called "constructor" is not found ticked.
+    tickedTagNamesBeforeSwap = Object.create(null);
+    Array.prototype.forEach.call(target.querySelectorAll('input[name="tags"]:checked'), function (box) {
+        tickedTagNamesBeforeSwap[String(box.value).toLowerCase()] = true;
+    });
+});
+
+var restoreTickedFilterTags = function (menu) {
+    var wanted = tickedTagNamesBeforeSwap;
+    tickedTagNamesBeforeSwap = null;
+    if (!wanted) {
+        return;
+    }
+
+    var present = Object.create(null);
+    Array.prototype.forEach.call(menu.querySelectorAll('input[name="tags"]'), function (box) {
+        var name = String(box.value).toLowerCase();
+        if (wanted[name]) {
+            box.checked = true;
+            present[name] = true;
+        }
+    });
+
+    var lostTickedTag = Object.keys(wanted).some(function (name) {
+        return !present[name];
+    });
+    if (!lostTickedTag) {
+        return;
+    }
+
+    // The list was fetched with the old names before the menu came back; ask
+    // again so it matches the ticks the menu now shows.
+    var lostTagPageInput = document.getElementById('page-input');
+    if (lostTagPageInput) {
+        lostTagPageInput.value = '1';
+    }
+    window.dispatchTrackersChanged('system');
+};
 
 var normalizeRatingValue = function (value) {
     var numericValue = Number(value);
@@ -697,6 +770,7 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
     }
 
     if (target.closest && target.closest('#filter-tags-dropdown')) {
+        restoreTickedFilterTags(target);
         window.updateFilterTagsSummary();
     }
     if (target.closest && target.closest('#filter-sites-dropdown')) {

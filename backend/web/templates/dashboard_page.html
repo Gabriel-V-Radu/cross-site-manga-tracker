@@ -53,7 +53,10 @@ two tabs on different profiles kept acting on each other's library.
                   hx-target="#trackers-zone"
                   hx-trigger="load, trackersChanged from:body"
                   class="filters-grid">
-                <label>
+                {{/* "for" pins the caption to the input: the clear button sits in
+                     this label too, and a label with no "for" forwards a caption
+                     click to whichever control comes first. */}}
+                <label for="dashboard-search-input">
                     Search
                     <span class="search-input-wrap">
                         <input type="text" id="dashboard-search-input" name="q" placeholder="Title">
@@ -80,16 +83,24 @@ two tabs on different profiles kept acting on each other's library.
                         {{end}}
                     </select>
                 </label>
-                <label>
+                {{/*
+                Sites and Tags are captioned groups, not labels: a <label> with no
+                "for" labels its first checkbox, so a click on the caption ticked
+                the first site or tag inside the closed dropdown and filtered the
+                list by it.
+                */}}
+                <div class="field-group">
                     Sites
                     <details id="filter-sites-dropdown" class="filter-multi-select">
                         <summary id="filter-sites-summary">0</summary>
-                        <div class="filter-multi-select__menu filter-multi-select__menu--sites"
-                             hx-get="/dashboard/profile/filter-linked-sites"
-                             hx-trigger="load, trackersChanged from:body"
-                             hx-target="this"
-                             hx-swap="innerHTML"
-                             hx-include="#profile-filter, #tracker-filters input[name='sites']:checked">
+                        {{/*
+                        Rendered once, with the page: the site list is global and
+                        nothing changes it without a reload. The menu used to
+                        re-fetch itself on every trackersChanged, silent cover
+                        refreshes included, and a response landing between two
+                        quick ticks put the checkboxes back to the older selection.
+                        */}}
+                        <div class="filter-multi-select__menu filter-multi-select__menu--sites">
                             {{if gt (len .LinkedSites) 0}}
                             {{range .LinkedSites}}
                             <label class="filter-multi-select__option">
@@ -102,8 +113,8 @@ two tabs on different profiles kept acting on each other's library.
                             {{end}}
                         </div>
                     </details>
-                </label>
-                <label class="filters-grid__tags-row">
+                </div>
+                <div class="field-group filters-grid__tags-row">
                     Tags
                     <details id="filter-tags-dropdown" class="filter-multi-select">
                         <summary id="filter-tags-summary">0</summary>
@@ -125,7 +136,7 @@ two tabs on different profiles kept acting on each other's library.
                             {{end}}
                         </div>
                     </details>
-                </label>
+                </div>
                 <input type="hidden" name="profile" id="profile-filter" value="{{.ActiveProfile.Key}}">
                 <input type="hidden" name="view" id="view-input" value="grid">
                 <input type="hidden" name="page" id="page-input" value="1">

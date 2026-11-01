@@ -28,7 +28,11 @@ window.editProfileTagName = function (button) {
         window.alert('Tag name must be 40 characters or less');
         return;
     }
-    if (nextName.toLowerCase() === currentName.toLowerCase()) {
+    // Compared exactly: the name is unique without regard to case, but a rename
+    // that only fixes capitalisation ('isekai' to 'Isekai') updates the same
+    // row and is accepted by the server. A case-blind check dropped it with no
+    // request and no message.
+    if (nextName === currentName) {
         return;
     }
 

@@ -230,7 +230,12 @@ h1 {
     color: var(--ink-soft);
 }
 
-label {
+/* .field-group is a caption over a group of controls (a dropdown of checkboxes,
+   an icon picker). It looks like a label but must not be one: a <label> with no
+   "for" forwards a click on its caption to its first control, which ticked a
+   hidden filter checkbox or reset the picked tag icon to None. */
+label,
+.field-group {
     display: grid;
     gap: 6px;
     font-size: 11px;
@@ -1198,7 +1203,8 @@ input:focus, select:focus {
     gap: 8px;
 }
 
-.tracker-form label {
+.tracker-form label,
+.tracker-form .field-group {
     gap: 4px;
     font-size: 10px;
     letter-spacing: 0.14em;
