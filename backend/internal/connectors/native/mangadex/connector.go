@@ -63,6 +63,10 @@ const (
 	latestChapterFeedLimit = 100
 )
 
+// feedWindowLimit is the API's ceiling on offset+limit for a list endpoint: a
+// request reaching past it answers 400, so a paged read stops there.
+const feedWindowLimit = 10000
+
 // Connector reads MangaDex through its JSON API. The embedded Site supplies
 // Key, Name, Kind, the SiteInfo methods and the URL helpers; apiBaseURL is
 // where requests go (the live API, or a test server).
@@ -130,25 +134,30 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 
 	title, relatedTitles := pickTitles(payload.Data.Attributes.Title, payload.Data.Attributes.AltTitles)
 
-	// lastChapter outlives the English feed: a licensed series whose chapters
-	// were pulled, and a oneshot whose only chapter has a null number, keep
-	// serving a number here while the feed — the sole source of release dates —
-	// answers empty. Such a series legitimately comes back with a chapter and no
-	// LastUpdatedAt, which is what trackers.latest_chapter_seen_at exists to
-	// cover; attributes.updatedAt is not a substitute, it tracks metadata edits.
-	latestChapter := parseChapterNumber(payload.Data.Attributes.LastChapter)
 	// A feed that could not be read is a failed resolve, not an empty one: a 429
 	// or a timeout here used to come back as a result with no chapter and no
 	// date, which the poller records as a successful check — no fallback to the
 	// tracker's other sources, no warning, the cycle quietly lost. An empty feed
 	// (a licensed series, a oneshot) is still a legitimate answer; that is the
 	// (nil, nil, nil) return below, not an error.
-	feedLatestChapter, latestReleaseAt, err := c.fetchLatestChapterFromFeed(ctx, titleID)
+	latestChapter, latestReleaseAt, err := c.fetchLatestChapterFromFeed(ctx, titleID)
 	if err != nil {
 		return nil, err
 	}
+	// lastChapter outlives the English feed: a licensed series whose chapters
+	// were pulled, and a oneshot whose only chapter has a null number, keep
+	// serving a number here while the feed — the sole source of release dates —
+	// answers empty. Such a series legitimately comes back with a chapter and no
+	// LastUpdatedAt, which is what trackers.latest_chapter_seen_at exists to
+	// cover; attributes.updatedAt is not a substitute, it tracks metadata edits.
+	//
+	// It is only ever that stand-in, never preferred over the feed: lastChapter
+	// is the original run's final chapter, set once the series ends in its own
+	// language and blind to translation. A manhwa finished at 150 in Korea with
+	// the English scanlation at 80 used to report 150 dated with chapter 80's
+	// release, and then never moved as 81 to 149 came out.
 	if latestChapter == nil {
-		latestChapter = feedLatestChapter
+		latestChapter = parseChapterNumber(payload.Data.Attributes.LastChapter)
 	}
 
 	return &connectors.MangaResult{
@@ -195,9 +204,14 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			continue
 		}
 
-		latestChapter := parseChapterNumber(item.Attributes.LastChapter)
-		if latestChapter == nil {
-			latestChapter, _, _ = c.fetchLatestChapterFromFeed(ctx, item.ID)
+		// Same precedence as ResolveByURL: the English feed's number, and the
+		// record's language-blind lastChapter only when the feed has none. A feed
+		// that could not be read leaves the result without a chapter rather than
+		// falling back to lastChapter, which may be the original run's final
+		// number; the form then asks for the chapter through ResolveByURL.
+		latestChapter, _, feedErr := c.fetchLatestChapterFromFeed(ctx, item.ID)
+		if feedErr == nil && latestChapter == nil {
+			latestChapter = parseChapterNumber(item.Attributes.LastChapter)
 		}
 
 		items = append(items, connectors.MangaResult{
@@ -228,26 +242,46 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	var payload mangaFeedResponse
-	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(titleID, chapterLookupFeedLimit), &payload); err != nil {
-		return "", fmt.Errorf("fetch mangadex feed: %w", err)
-	}
-
-	for _, chapterItem := range payload.Data {
-		parsedChapter := parseChapterNumber(chapterItem.Attributes.Chapter)
-		if parsedChapter == nil {
-			continue
-		}
-		if !connectors.SameChapter(*parsedChapter, chapter) {
-			continue
-		}
-
-		chapterID := strings.TrimSpace(chapterItem.ID)
-		if chapterID == "" {
-			continue
+	// The feed holds one entry per group upload, so a series with two groups a
+	// chapter fills a 500-entry page with its newest 250 chapters, and a
+	// last-read chapter far behind the latest sits on a later page. Only the
+	// first page used to be read, and a miss there was reported as
+	// ErrChapterNotFound — the verdict that drops MangaDex from the reading
+	// chain for that chapter. The feed is sorted by chapter descending, so
+	// paging stops once a page ends below the target; it also stops at a short
+	// page (the end of the feed) and at the API's offset+limit ceiling, past
+	// which every request is refused.
+	for offset := 0; offset+chapterLookupFeedLimit <= feedWindowLimit; offset += chapterLookupFeedLimit {
+		var payload mangaFeedResponse
+		if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(titleID, chapterLookupFeedLimit, offset, false), &payload); err != nil {
+			return "", fmt.Errorf("fetch mangadex feed: %w", err)
 		}
 
-		return c.HomeURL() + "/chapter/" + chapterID, nil
+		var lastParsed *float64
+		for _, chapterItem := range payload.Data {
+			parsedChapter := parseChapterNumber(chapterItem.Attributes.Chapter)
+			if parsedChapter == nil {
+				continue
+			}
+			lastParsed = parsedChapter
+			if !connectors.SameChapter(*parsedChapter, chapter) {
+				continue
+			}
+
+			chapterID := strings.TrimSpace(chapterItem.ID)
+			if chapterID == "" {
+				continue
+			}
+
+			return c.HomeURL() + "/chapter/" + chapterID, nil
+		}
+
+		if len(payload.Data) < chapterLookupFeedLimit {
+			break
+		}
+		if lastParsed != nil && *lastParsed < chapter {
+			break
+		}
 	}
 
 	return "", fmt.Errorf("chapter %s: %w", connectors.FormatChapter(chapter), connectors.ErrChapterNotFound)
@@ -353,7 +387,7 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 	}
 
 	var payload mangaFeedResponse
-	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(mangaID, latestChapterFeedLimit), &payload); err != nil {
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.feedURL(mangaID, latestChapterFeedLimit, 0, true), &payload); err != nil {
 		// A feed the API says does not exist is an empty feed, not an outage:
 		// the record answered, there is simply nothing to read. Every other
 		// failure — a rate limit, a timeout, a 5xx — is the site not answering
@@ -382,16 +416,25 @@ func (c *Connector) fetchLatestChapterFromFeed(ctx context.Context, mangaID stri
 }
 
 // feedURL builds a chapter feed request. Both callers share one builder so the
-// filters stay identical: English only, external-only chapters excluded because
-// they have no MangaDex page to link to, and every content rating listed
+// filters stay identical: English only, and every content rating listed
 // because the API's default set hides erotica and pornographic entries, which
 // would silently report a stale latest chapter for those series.
-func (c *Connector) feedURL(mangaID string, limit int) string {
+//
+// External chapters (an official MangaPlus release listed with a link out) are
+// the one filter that differs. Tracking counts them: they are released English
+// chapters, and leaving them out made a simulcast series look stalled at its
+// last fan scan, a lower number the poller then applied as a correction. The
+// chapter-link lookup excludes them because they have no MangaDex page to link
+// to. Including them means leaving includeExternalUrl unset: measured on the
+// live API, includeExternalUrl=1 answers with the external chapters alone.
+func (c *Connector) feedURL(mangaID string, limit int, offset int, includeExternal bool) string {
 	values := url.Values{}
 	values.Set("limit", strconv.Itoa(limit))
-	values.Set("offset", "0")
+	values.Set("offset", strconv.Itoa(offset))
 	values.Set("order[chapter]", "desc")
-	values.Set("includeExternalUrl", "0")
+	if !includeExternal {
+		values.Set("includeExternalUrl", "0")
+	}
 	values.Add("translatedLanguage[]", "en")
 	values.Add("contentRating[]", "safe")
 	values.Add("contentRating[]", "suggestive")
