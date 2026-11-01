@@ -2,6 +2,7 @@ package asuracomic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -102,8 +103,18 @@ func (c *Connector) AbsoluteURL(raw string) string {
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.searchPageURL("nano"))
-	return err
+	body, err := c.fetchPage(ctx, c.searchPageURL("nano"))
+	if err != nil {
+		return err
+	}
+	// A 200 only proves the host answers. After a redesign the browse page
+	// still loads while none of its series links match, and every search and
+	// resolve quietly comes back empty, so a page that parses to no series at
+	// all is reported as the connector being broken.
+	if len(collectUniqueSeriesIDs(body)) == 0 {
+		return fmt.Errorf("asuracomic browse page parsed no series")
+	}
+	return nil
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
@@ -140,7 +151,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
 
 		resolved, resolveErr := c.resolveBySeriesIDExact(ctx, seriesID)
-		if resolveErr != nil {
+		// A series with no chapter out yet is still a real hit; only a page
+		// that could not be read is skipped.
+		if resolveErr != nil && !errors.Is(resolveErr, connectors.ErrNoChaptersListed) {
 			continue
 		}
 
@@ -182,9 +195,6 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	}
 	if canonicalID := strings.TrimSpace(result.SourceItemID); canonicalID != "" {
 		seriesID = canonicalID
-	}
-	if result.LatestChapter == nil {
-		return "", fmt.Errorf("no chapters listed for %s", seriesID)
 	}
 	chapterSegment := connectors.FormatChapter(chapter)
 	if chapter > *result.LatestChapter {
@@ -238,7 +248,13 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		return nil, err
 	}
 
-	return c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
+	// resolveBySeriesIDExact hands its result back beside a no-chapters error
+	// for search's sake; a resolve answers with a result only on success.
+	result, err = c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, error) {
@@ -258,7 +274,7 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		lastUpdatedAt = extractLastUpdatedAt(body)
 	}
 
-	return &connectors.MangaResult{
+	result := &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  seriesID,
 		Title:         title,
@@ -266,7 +282,16 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
-	}, nil
+	}
+	// A series page that loads but yields no chapter is a failed resolve, not
+	// "nothing new": Asura has redesigned before, and once its chapter links
+	// stop matching every Asura tracker would be stamped as checked with no
+	// log line and no turn for its other sources. The result still comes back
+	// beside the error so search can list a series with no chapter out yet.
+	if latestChapter == nil {
+		return result, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
+	}
+	return result, nil
 }
 
 func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) (string, error) {

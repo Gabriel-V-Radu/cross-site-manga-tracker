@@ -133,3 +133,21 @@ func TestHTTPStatusErrorAsRecoversTheURL(t *testing.T) {
 		t.Fatalf("Error() = %q, want %q", err.Error(), want)
 	}
 }
+
+// TestErrNoChaptersListedThroughWrapping: the scrapers wrap the verdict with the
+// series it came from, and search still has to recognize it to keep a series
+// with no chapter out yet. It must never pass for "chapter not found", which
+// tells the reading chain the site answered about one specific chapter.
+func TestErrNoChaptersListedThroughWrapping(t *testing.T) {
+	wrapped := fmt.Errorf("resolve: %w", fmt.Errorf("series nano-machine-7f873ca6: %w", ErrNoChaptersListed))
+
+	if !errors.Is(wrapped, ErrNoChaptersListed) {
+		t.Fatalf("expected the wrapped verdict to match, got %v", wrapped)
+	}
+	if errors.Is(wrapped, ErrChapterNotFound) {
+		t.Fatal("no chapters listed must not read as chapter not found")
+	}
+	if errors.Is(fmt.Errorf("chapter 5: %w", ErrChapterNotFound), ErrNoChaptersListed) {
+		t.Fatal("chapter not found must not read as no chapters listed")
+	}
+}

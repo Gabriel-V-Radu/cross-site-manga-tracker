@@ -422,3 +422,70 @@ func TestAsuraComicResolveChapterURLVerifiesAgainstTheSeriesPage(t *testing.T) {
 		t.Fatalf("expected the typed not-found verdict, got %v", err)
 	}
 }
+
+// TestAsuraComicHealthCheckRequiresAParsedSeries pins that a browse page which
+// loads but carries no series link (a redesign) fails the health check, so the
+// connector shows as broken instead of healthy while every resolve comes back
+// empty.
+func TestAsuraComicHealthCheckRequiresAParsedSeries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div class="new-layout">Nano Machine</div></body></html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err == nil {
+		t.Fatal("expected a browse page with no series link to fail the health check")
+	}
+}
+
+// TestAsuraComicChapterlessSeriesPageFailsResolveButNotSearch pins both sides
+// of the no-chapters verdict: the poll path reports the page as a failed
+// resolve (so the poller logs it and asks the tracker's other sources), while
+// search still lists the series, which may simply have no chapter out yet.
+func TestAsuraComicChapterlessSeriesPageFailsResolveButNotSearch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><a href="/comics/new-series-7f873ca6">New Series</a></body></html>`))
+	})
+	mux.HandleFunc("/comics/new-series-7f873ca6", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="New Series - Asura Scans">
+</head>
+<body>
+  <h1>New Series</h1>
+  <div>Coming soon</div>
+</body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"asurascans.com", "asuracomic.net"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := conn.ResolveByURL(context.Background(), "https://asurascans.com/comics/new-series-7f873ca6")
+	if !errors.Is(err, connectors.ErrNoChaptersListed) {
+		t.Fatalf("expected the no-chapters verdict, got result %v and error %v", resolved, err)
+	}
+	if resolved != nil {
+		t.Fatalf("a failed resolve must not hand back a result, got %+v", resolved)
+	}
+
+	results, err := conn.SearchByTitle(context.Background(), "new series", 10)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].SourceItemID != "new-series-7f873ca6" {
+		t.Fatalf("expected the chapterless series to stay in the results, got %+v", results)
+	}
+	if results[0].Title != "New Series" || results[0].LatestChapter != nil {
+		t.Fatalf("expected title New Series with no chapter, got %q / %v", results[0].Title, results[0].LatestChapter)
+	}
+}

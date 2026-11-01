@@ -2,16 +2,29 @@ package mgeko
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func TestMgekoConnectorResolveSearchAndChapterURL(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/browse-comics/", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<body>
+  <ul class="novel-list grid col col2">
+    <li class="novel-item">
+      <a href="/manga/another-series/" title="Another Series"><h4 class="novel-title text2row">Another Series</h4></a>
+    </li>
+  </ul>
+</body>
+</html>`))
 	})
 	mux.HandleFunc("/search/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`
@@ -204,5 +217,124 @@ func TestMgekoConnectorResolveChapterURLSupportsDecimalChapter(t *testing.T) {
 	}
 	if chapterURL != "https://www.mgeko.cc/reader/en/sample-series-chapter-67-5-eng-li/" {
 		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+}
+
+// TestMgekoHealthCheckRequiresAParsedSeries pins that a browse page which
+// loads without a single novel-item row (the markup search parses) fails the
+// health check instead of reporting the connector healthy.
+func TestMgekoHealthCheckRequiresAParsedSeries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/browse-comics/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div class="comic-card">Another Series</div></body></html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err == nil {
+		t.Fatal("expected a browse page with no novel-item row to fail the health check")
+	}
+}
+
+// mgekoMangaPage is a manga page as the site serves it: title and cover, but
+// no /reader/en/ chapter links, so it cannot stand in for the all-chapters page.
+const mgekoMangaPage = `
+<!DOCTYPE html>
+<html>
+<body>
+  <h1 class="novel-title">Sample Series</h1>
+</body>
+</html>`
+
+// TestMgekoResolveFailsWhenNoChapterCouldBeRead pins that an all-chapters page
+// which failed, or parsed to nothing, is a failed resolve when the manga page
+// has no chapter links to fall back on. It used to come back as a success with
+// no chapter: the poller stamped the tracker checked, logged nothing and never
+// asked its other sources.
+func TestMgekoResolveFailsWhenNoChapterCouldBeRead(t *testing.T) {
+	cases := []struct {
+		name        string
+		allChapters http.HandlerFunc
+		check       func(t *testing.T, err error)
+	}{
+		{
+			name: "all-chapters request fails",
+			allChapters: func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			},
+			check: func(t *testing.T, err error) {
+				if !connectors.IsHTTPStatus(err, http.StatusServiceUnavailable) {
+					t.Fatalf("expected the 503 to be returned, got %v", err)
+				}
+			},
+		},
+		{
+			name: "all-chapters page parses to nothing",
+			allChapters: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div class="chapters-moved"></div></body></html>`))
+			},
+			check: func(t *testing.T, err error) {
+				if !errors.Is(err, connectors.ErrNoChaptersListed) {
+					t.Fatalf("expected the no-chapters verdict, got %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/manga/sample-series/", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(mgekoMangaPage))
+			})
+			mux.HandleFunc("/manga/sample-series/all-chapters/", tc.allChapters)
+
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
+			resolved, err := conn.ResolveByURL(context.Background(), "https://www.mgeko.cc/manga/sample-series/")
+			if err == nil {
+				t.Fatalf("expected a failed resolve, got %+v", resolved)
+			}
+			if resolved != nil {
+				t.Fatalf("a failed resolve must not hand back a result, got %+v", resolved)
+			}
+			tc.check(t, err)
+		})
+	}
+}
+
+// TestMgekoResolveFallsBackToMangaPageChapters pins the fallback that stays: a
+// failed all-chapters page is not an error while the manga page itself links
+// chapters to read the latest from.
+func TestMgekoResolveFallsBackToMangaPageChapters(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/manga/sample-series/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<body>
+  <h1 class="novel-title">Sample Series</h1>
+  <a href="/reader/en/sample-series-chapter-12-eng-li/"><time datetime="Jan. 4, 2026, 8:00 p.m.">1 month</time></a>
+</body>
+</html>`))
+	})
+	mux.HandleFunc("/manga/sample-series/all-chapters/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
+	resolved, err := conn.ResolveByURL(context.Background(), "https://www.mgeko.cc/manga/sample-series/")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if resolved.LatestChapter == nil || *resolved.LatestChapter != 12 {
+		t.Fatalf("expected latest chapter 12 from the manga page, got %v", resolved.LatestChapter)
 	}
 }

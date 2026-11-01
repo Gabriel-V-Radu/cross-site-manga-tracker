@@ -35,3 +35,12 @@ func IsHTTPStatus(err error, statusCode int) bool {
 func IsNotFound(err error) bool {
 	return IsHTTPStatus(err, http.StatusNotFound)
 }
+
+// ErrNoChaptersListed is the verdict for a series page that loaded but parsed
+// to no chapter at all. That means the site changed its markup or the page is
+// not the series we think it is (a redirect to the home page), not that
+// nothing new came out, so a resolve returns it as a failure: the poller then
+// logs it and tries the tracker's other sources instead of quietly stamping
+// the tracker as checked. Search paths, where a series with no chapter out yet
+// is still a real hit, check for it with errors.Is and keep the result.
+var ErrNoChaptersListed = errors.New("no chapters listed")

@@ -107,10 +107,26 @@ const apostropheNovelPageHTML = `
 </body>
 </html>`
 
+// noChapterMetaNovelPageHTML is a novel page that loads but no longer carries
+// the og:novel:lastest_chapter_url meta the latest chapter is read from.
+const noChapterMetaNovelPageHTML = `
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+  <meta property="og:title" content="Star Odyssey">
+</head>
+<body>
+  <h1 class="tit">Star Odyssey</h1>
+</body>
+</html>`
+
 func newTestServer() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/home", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>ok</body></html>`))
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><h3 class="tit"><a href="/novel/star-odyssey" title="Star Odyssey">Star Odyssey</a></h3></body></html>`))
+	})
+	mux.HandleFunc("/novel/no-chapter-meta", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(noChapterMetaNovelPageHTML))
 	})
 	mux.HandleFunc("/search", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(searchResultsHTML))
@@ -315,6 +331,49 @@ func TestResolveChapterURLReportsAnImpossibleChapterAsNotCarried(t *testing.T) {
 	}
 	if !errors.Is(err, connectors.ErrChapterNotFound) {
 		t.Fatalf("error must wrap ErrChapterNotFound, got %v", err)
+	}
+}
+
+// TestFreeWebNovelHealthCheckRequiresANovelLink pins that the health check
+// reads the home page instead of trusting its status: a 200 page with no
+// /novel/{slug} link (a challenge page, a redesign) reports the connector as
+// broken.
+func TestFreeWebNovelHealthCheckRequiresANovelLink(t *testing.T) {
+	server := newTestServer()
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"freewebnovel.com"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("health check failed on a home page that links novels: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/home", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>Just a moment...</body></html>`))
+	})
+	bare := httptest.NewServer(mux)
+	defer bare.Close()
+
+	conn = NewConnectorWithOptions(bare.URL, []string{"freewebnovel.com"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err == nil {
+		t.Fatal("expected a home page with no novel link to fail the health check")
+	}
+}
+
+// TestFreeWebNovelResolveWithoutLatestChapterMetaFails pins that a novel page
+// missing og:novel:lastest_chapter_url is a failed resolve, so the poller logs
+// it and asks the tracker's other sources instead of stamping it as checked.
+func TestFreeWebNovelResolveWithoutLatestChapterMetaFails(t *testing.T) {
+	server := newTestServer()
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"freewebnovel.com"}, &http.Client{Timeout: 5 * time.Second})
+	resolved, err := conn.ResolveByURL(context.Background(), "https://freewebnovel.com/novel/no-chapter-meta")
+	if !errors.Is(err, connectors.ErrNoChaptersListed) {
+		t.Fatalf("expected the no-chapters verdict, got result %v and error %v", resolved, err)
+	}
+	if resolved != nil {
+		t.Fatalf("a failed resolve must not hand back a result, got %+v", resolved)
 	}
 }
 

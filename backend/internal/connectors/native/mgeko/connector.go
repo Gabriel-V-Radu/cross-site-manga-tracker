@@ -103,8 +103,17 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/browse-comics/")
-	return err
+	body, err := c.fetchPage(ctx, c.baseURL+"/browse-comics/")
+	if err != nil {
+		return err
+	}
+	// A 200 only proves the host answers. The browse page lists its series in
+	// the same novel-item rows search parses, so a page without one means the
+	// markup moved and search is coming back empty.
+	if !novelItemPattern.MatchString(body) {
+		return fmt.Errorf("mgeko browse page parsed no series")
+	}
+	return nil
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
@@ -228,6 +237,14 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 			lastUpdatedAt = fallbackUpdated
 		}
 	}
+	// The manga page links only some chapters, often none at all, so the
+	// fallback cannot stand in for an all-chapters page that failed (a 503, a
+	// timeout) or parsed to nothing. Answering "success, no chapter" there
+	// would stamp the tracker as checked with no log line and no turn for its
+	// other sources. latestChapter is only nil here when chapterErr is set.
+	if latestChapter == nil {
+		return nil, fmt.Errorf("fetch all chapters: %w", chapterErr)
+	}
 
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
@@ -249,7 +266,7 @@ func (c *Connector) fetchChapterEntries(ctx context.Context, slug string) ([]cha
 
 	entries := parseChapterEntries(allChaptersBody, time.Now().UTC())
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("no chapter entries found")
+		return nil, fmt.Errorf("all chapters page: %w", connectors.ErrNoChaptersListed)
 	}
 
 	for index := range entries {

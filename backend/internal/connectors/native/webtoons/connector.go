@@ -298,6 +298,15 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 		latest.Add(float64(entry.Number), parseWebtoonsDate(entry.DateRaw))
 	}
 	latestChapter, latestUpdatedAt := latest.Result()
+	// An episode list with no episode row is not a series with nothing new: a
+	// pulled or region-locked title redirects to the site's home page, which
+	// answers 200, and a markup change does the same to every title. Taken as
+	// a success it would stamp the tracker as checked with no log line and no
+	// turn for its other sources. Search does not need the result: it already
+	// holds the title, link and cover from the search API.
+	if latestChapter == nil {
+		return nil, fmt.Errorf("webtoons title %d: %w", titleNo, connectors.ErrNoChaptersListed)
+	}
 
 	sourceItemID := strconv.Itoa(titleNo)
 	return &connectors.MangaResult{

@@ -2,10 +2,13 @@ package flamecomics
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func TestFlameComicsConnectorResolveAndSearch(t *testing.T) {
@@ -114,5 +117,64 @@ func TestFlameComicsResolveChapterURLWithNestedAnchorMarkup(t *testing.T) {
 
 	if chapterURL != "https://flamecomics.xyz/series/22/2dd2ff4ef56a0e99" {
 		t.Fatalf("unexpected chapter url: %s", chapterURL)
+	}
+}
+
+// TestFlameComicsHealthCheckRequiresAParsedSeries pins that a /latest page
+// which loads but carries no series link (a markup change) fails the health
+// check instead of reporting the connector healthy.
+func TestFlameComicsHealthCheckRequiresAParsedSeries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/latest", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div id="__next"></div></body></html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"flamecomics.xyz"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err == nil {
+		t.Fatal("expected a /latest page with no series link to fail the health check")
+	}
+}
+
+// TestFlameComicsChapterlessSeriesPageFailsResolveButNotSearch pins both sides
+// of the no-chapters verdict: the poll path reports a failed resolve, while
+// search still lists a series that has no chapter out yet.
+func TestFlameComicsChapterlessSeriesPageFailsResolveButNotSearch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/latest", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><a href="/series/200">Brand New Series</a></body></html>`))
+	})
+	mux.HandleFunc("/series/200", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta property="og:title" content="Brand New Series - Flame Comics">
+</head>
+<body><div>No chapters yet</div></body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"flamecomics.xyz"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := conn.ResolveByURL(context.Background(), "https://flamecomics.xyz/series/200")
+	if !errors.Is(err, connectors.ErrNoChaptersListed) {
+		t.Fatalf("expected the no-chapters verdict, got result %v and error %v", resolved, err)
+	}
+	if resolved != nil {
+		t.Fatalf("a failed resolve must not hand back a result, got %+v", resolved)
+	}
+
+	results, err := conn.SearchByTitle(context.Background(), "brand new series", 8)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].SourceItemID != "200" || results[0].LatestChapter != nil {
+		t.Fatalf("expected the chapterless series in the results with no chapter, got %+v", results)
 	}
 }

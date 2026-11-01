@@ -2,10 +2,13 @@ package webtoons
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 func TestWebtoonsConnectorSearchResolveAndChapterURL(t *testing.T) {
@@ -184,6 +187,55 @@ func TestWebtoonsConnectorSearchResolveAndChapterURL(t *testing.T) {
 	expectedChapterURL := "https://www.webtoons.com/en/romance/maybe-meant-to-be/ep-112/viewer?title_no=4208&episode_no=112"
 	if chapterURL != expectedChapterURL {
 		t.Fatalf("expected chapter url %s, got %s", expectedChapterURL, chapterURL)
+	}
+}
+
+// TestWebtoonsEpisodeListWithoutEpisodesFailsResolveButNotSearch pins the
+// pulled-title case: the episode list lands on the home page (200, no episode
+// rows). The poll path must report a failed resolve rather than a successful
+// check, while search keeps the hit built from the search API's own fields.
+func TestWebtoonsEpisodeListWithoutEpisodesFailsResolveButNotSearch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/en/search/immediate", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"result":{"searchedList":[{"titleNo":4208,"title":"Maybe Meant to Be","thumbnailMobile":"/thumb.jpg","searchMode":"TITLE"}]},"success":true}`))
+	})
+	mux.HandleFunc("/episodeList", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+	<link rel="canonical" href="https://www.webtoons.com/en/" />
+	<meta property="og:title" content="WEBTOON" />
+</head>
+<body><div class="home">Popular series</div></body>
+</html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := connector.ResolveByURL(context.Background(), "https://www.webtoons.com/en/romance/maybe-meant-to-be/list?title_no=4208")
+	if !errors.Is(err, connectors.ErrNoChaptersListed) {
+		t.Fatalf("expected the no-chapters verdict, got result %v and error %v", resolved, err)
+	}
+
+	results, err := connector.SearchByTitle(context.Background(), "Maybe Meant to Be", 8)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected the search hit to survive, got %d results", len(results))
+	}
+	if results[0].Title != "Maybe Meant to Be" {
+		t.Fatalf("expected the search API title, got %q", results[0].Title)
+	}
+	if results[0].URL != "https://www.webtoons.com/episodeList?titleNo=4208" {
+		t.Fatalf("expected the canonical episode list URL, got %q", results[0].URL)
+	}
+	if results[0].LatestChapter != nil {
+		t.Fatalf("expected no chapter, got %v", *results[0].LatestChapter)
 	}
 }
 

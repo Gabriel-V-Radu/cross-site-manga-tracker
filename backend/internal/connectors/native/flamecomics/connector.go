@@ -2,6 +2,7 @@ package flamecomics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -94,8 +95,17 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/latest")
-	return err
+	body, err := c.fetchPage(ctx, c.baseURL+"/latest")
+	if err != nil {
+		return err
+	}
+	// A 200 only proves the host answers. After a markup change /latest still
+	// loads while none of its series links match, and search goes quietly
+	// empty, so a page that parses to no series is reported as broken.
+	if len(c.collectSeriesEntries(body)) == 0 {
+		return fmt.Errorf("flamecomics latest page parsed no series")
+	}
+	return nil
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
@@ -103,7 +113,13 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	if err != nil {
 		return nil, err
 	}
-	return c.resolveBySeriesID(ctx, seriesID)
+	// resolveBySeriesID hands its result back beside a no-chapters error for
+	// search's sake; a resolve answers with a result only on success.
+	result, err := c.resolveBySeriesID(ctx, seriesID)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
@@ -137,7 +153,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		}
 
 		resolved, resolveErr := c.resolveBySeriesID(ctx, entry.SeriesID)
-		if resolveErr != nil {
+		// A series with no chapter out yet is still a real hit; only a page
+		// that could not be read is skipped.
+		if resolveErr != nil && !errors.Is(resolveErr, connectors.ErrNoChaptersListed) {
 			continue
 		}
 		if !query.Matches(append([]string{resolved.Title, entry.Title, resolved.SourceItemID}, resolved.RelatedTitles...)...) {
@@ -283,7 +301,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 
 	latestChapter, latestReleaseAt := extractLatestChapterAndReleaseAt(body, seriesID)
 
-	return &connectors.MangaResult{
+	result := &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  seriesID,
 		Title:         title,
@@ -292,7 +310,16 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestReleaseAt,
-	}, nil
+	}
+	// A series page that loads but yields no chapter is a failed resolve, not
+	// "nothing new": after a markup change every Flame tracker would otherwise
+	// be stamped as checked with no log line and no turn for its other
+	// sources. The result still comes back beside the error so search can list
+	// a series with no chapter out yet.
+	if latestChapter == nil {
+		return result, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
+	}
+	return result, nil
 }
 
 func extractLatestChapterAndReleaseAt(body string, seriesID string) (*float64, *time.Time) {

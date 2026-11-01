@@ -47,6 +47,7 @@ var (
 	searchTitleAnchorPattern = regexp.MustCompile(`(?is)<h3[^>]*class=["'][^"']*\btit\b[^"']*["'][^>]*>\s*<a[^>]+href=["']/novel/([^"'/?#]+)["'][^>]*>(.*?)</a>`)
 	searchImgSrcPattern      = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["'][^>]*>`)
 	chapterHrefPattern       = regexp.MustCompile(`(?is)/novel/[^"'/]+/chapter-([0-9]+)`)
+	novelLinkPattern         = regexp.MustCompile(`(?i)href=["'](?:https?://[^"'/]+)?/novel/[^"'/?#]+`)
 
 	ogTitlePattern       = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:title["'][^>]*content="([^"]*)"`)
 	ogImagePattern       = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:image["'][^>]*content="([^"]*)"`)
@@ -172,13 +173,21 @@ func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) 
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	_, err := c.fetchPage(ctx, c.baseURL+"/home", "")
-	if err == nil {
-		c.warmMu.Lock()
-		c.warmed = true
-		c.warmMu.Unlock()
+	body, err := c.fetchPage(ctx, c.baseURL+"/home", "")
+	if err != nil {
+		return err
 	}
-	return err
+	c.warmMu.Lock()
+	c.warmed = true
+	c.warmMu.Unlock()
+	// A 200 only proves the host answers (Cloudflare can serve its own page
+	// with one). The home page links novels by their /novel/{slug} path, the
+	// scheme every resolve and chapter link here is built on, so a page with
+	// no such link means the site is not what the connector reads.
+	if !novelLinkPattern.MatchString(body) {
+		return fmt.Errorf("freewebnovel home page links no novel")
+	}
+	return nil
 }
 
 func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
@@ -286,6 +295,13 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	coverImageURL := c.AbsoluteURL(strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body))))
 
 	latestChapter := parseLatestChapterFromURL(connectors.FirstSubmatch(latestChapterURLPatt, body))
+	// Novel pages carry og:novel:lastest_chapter_url, so a page that loads
+	// without one is a markup change or not a novel page at all. Taken
+	// as a success it would stamp the tracker as checked with no log line and
+	// no turn for its other sources.
+	if latestChapter == nil {
+		return nil, fmt.Errorf("novel %s: %w", slug, connectors.ErrNoChaptersListed)
+	}
 	lastUpdatedAt := parseUpdateTime(connectors.FirstSubmatch(updateTimePattern, body))
 
 	return &connectors.MangaResult{
