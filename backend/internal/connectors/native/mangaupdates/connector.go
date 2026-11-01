@@ -121,9 +121,15 @@ type apiSeriesRecord struct {
 	} `json:"associated"`
 }
 
+// apiSearchResponse is a series search answer. HitTitle is the name the query
+// matched, which is often not the record's title: the primary title is
+// commonly the romanized original ("Shingeki no Kyojin") while an English
+// query matches one of the associated names ("Attack on Titan"), and search
+// records carry no associated names of their own.
 type apiSearchResponse struct {
 	Results []struct {
-		Record apiSeriesRecord `json:"record"`
+		Record   apiSeriesRecord `json:"record"`
+		HitTitle string          `json:"hit_title"`
 	} `json:"results"`
 }
 
@@ -242,20 +248,33 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, fmt.Errorf("search mangaupdates: %w", err)
 	}
 
-	results := make([]connectors.MangaResult, 0, len(response.Results))
+	results := make([]connectors.MangaResult, 0, min(query.Limit, len(response.Results)))
 	for _, item := range response.Results {
 		record := item.Record
-		if !query.Matches(record.Title) {
+		// The post-filter checks the matched name as well as the title: checking
+		// the title alone dropped every series whose primary title is romanized,
+		// so searching "Attack on Titan" found nothing.
+		if !query.Matches(record.Title, item.HitTitle) {
 			continue
 		}
 
+		seriesTitle := strings.TrimSpace(record.Title)
 		results = append(results, connectors.MangaResult{
 			SourceKey:     c.Key(),
 			SourceItemID:  strconv.FormatInt(record.SeriesID, 10),
-			Title:         strings.TrimSpace(record.Title),
+			Title:         seriesTitle,
+			RelatedTitles: searchutil.RelatedTitles(seriesTitle, []string{item.HitTitle}),
 			URL:           c.seriesURL(record.URL, record.SeriesID),
 			CoverImageURL: strings.TrimSpace(record.Image.URL.Original),
 		})
+
+		// The API has been measured answering a full page of 25 when asked for
+		// perpage 3, and matching on the hit title lets most of such a page
+		// through (every "Attack on Titan dj - ..." doujinshi), so the caller's
+		// limit is applied here.
+		if len(results) >= query.Limit {
+			break
+		}
 	}
 
 	return results, nil

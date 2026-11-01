@@ -176,6 +176,50 @@ func TestSearchByTitleFiltersToQuery(t *testing.T) {
 	}
 }
 
+// MangaUpdates often keeps the romanized original as the primary title and
+// matches an English query through an associated name, which it reports as
+// hit_title. The post-filter has to accept that name, or an English search
+// finds nothing; the matched name also rides along as a related title, and the
+// caller's limit holds even though the API answers a full page regardless.
+func TestSearchByTitleMatchesHitTitle(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/series/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"results": [
+			{"record": {"series_id": 55665, "title": "Shingeki no Kyojin",
+				"url": "https://www.mangaupdates.com/series/16ky/shingeki-no-kyojin"},
+				"hit_title": "Attack on Titan"},
+			{"record": {"series_id": 999, "title": "Something Else",
+				"url": "https://www.mangaupdates.com/series/0000rr/something-else"},
+				"hit_title": "Something Else"},
+			{"record": {"series_id": 77777, "title": "Shingeki no Kyojin dj - Melt",
+				"url": "https://www.mangaupdates.com/series/1nzl/melt"},
+				"hit_title": "Attack on Titan dj - Melt"}
+		]}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	connector := NewConnectorWithOptions(server.URL, []string{"mangaupdates.com"}, &http.Client{Timeout: 5 * time.Second})
+
+	results, err := connector.SearchByTitle(context.Background(), "Attack on Titan", 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 2 || results[0].Title != "Shingeki no Kyojin" || results[1].SourceItemID != "77777" {
+		t.Fatalf("results = %+v, want the two series matched through their hit title", results)
+	}
+	if len(results[0].RelatedTitles) != 1 || results[0].RelatedTitles[0] != "Attack on Titan" {
+		t.Fatalf("related titles = %v, want the matched name", results[0].RelatedTitles)
+	}
+
+	limited, err := connector.SearchByTitle(context.Background(), "Attack on Titan", 1)
+	if err != nil {
+		t.Fatalf("search with limit 1: %v", err)
+	}
+	if len(limited) != 1 || limited[0].SourceItemID != "55665" {
+		t.Fatalf("results = %+v, want only the first match", limited)
+	}
+}
+
 func TestParseChapterString(t *testing.T) {
 	cases := []struct {
 		raw  string
