@@ -46,26 +46,38 @@ func parseTagNames(raw string) []string {
 	return out
 }
 
+// parseTagNamesFromQuery reads the dashboard's tag filter, where every ticked
+// checkbox arrives as its own "tags" value carrying one whole tag name. Those
+// values are never split on commas: tag names may contain one, and joining the
+// values and re-splitting them turned a filter on "Isekai, OP" into a filter on
+// both "Isekai" and "OP" — two tags nobody had, so the list came back empty.
+// The JSON API's single comma-separated "?tags=a,b" goes through parseTagNames
+// instead and keeps its split.
 func parseTagNamesFromQuery(c *fiber.Ctx) []string {
 	queryValues := c.Context().QueryArgs().PeekMulti("tags")
 	if len(queryValues) == 0 {
-		return parseTagNames(c.Query("tags"))
-	}
-
-	values := make([]string, 0, len(queryValues))
-	for _, value := range queryValues {
-		trimmed := strings.TrimSpace(string(value))
-		if trimmed == "" {
-			continue
-		}
-		values = append(values, trimmed)
-	}
-
-	if len(values) == 0 {
 		return nil
 	}
 
-	return parseTagNames(strings.Join(values, ","))
+	out := make([]string, 0, len(queryValues))
+	seen := make(map[string]struct{}, len(queryValues))
+	for _, value := range queryValues {
+		tag := strings.TrimSpace(string(value))
+		normalized := strings.ToLower(tag)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, tag)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func parseSourceIDs(raw string) []int64 {

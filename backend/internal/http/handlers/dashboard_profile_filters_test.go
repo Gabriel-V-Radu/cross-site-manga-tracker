@@ -188,32 +188,7 @@ func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
 		t.Fatalf("seed tracker tags: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading&tags=favorite,priority", nil)
-	res, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("dashboard trackers request failed: %v", err)
-	}
-	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(res.Body)
-		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
-	html := string(body)
-
-	if !strings.Contains(html, "Tagged Match") {
-		t.Fatalf("expected AND tag filter response to include fully tagged tracker")
-	}
-	if strings.Contains(html, "Tagged Partial") {
-		t.Fatalf("expected AND tag filter response to exclude partially tagged tracker")
-	}
-	if !strings.Contains(html, "/assets/tag-icons/icon-star-gold.svg") {
-		t.Fatalf("expected tracker card to render tag icon overlay")
-	}
-
+	// The filter's checkboxes send one "tags" value per ticked tag.
 	reqMulti := httptest.NewRequest(http.MethodGet, "/dashboard/trackers?status=reading&tags=favorite&tags=priority", nil)
 	resMulti, err := app.Test(reqMulti)
 	if err != nil {
@@ -235,6 +210,74 @@ func TestDashboardTagFilterUsesAndSemanticsAndRendersIcons(t *testing.T) {
 	}
 	if strings.Contains(htmlMulti, "Tagged Partial") {
 		t.Fatalf("expected multi-tag query to exclude partially tagged tracker")
+	}
+	if !strings.Contains(htmlMulti, "/assets/tag-icons/icon-star-gold.svg") {
+		t.Fatalf("expected tracker card to render tag icon overlay")
+	}
+}
+
+// TestDashboardTagFilterKeepsACommaInsideOneTagName pins that a ticked tag is
+// filtered on by its whole name. The dashboard joined the ticked values with
+// commas and split them again, so "Isekai, OP" became a filter on both "Isekai"
+// and "OP" — tags nobody had — and the list came back empty. The JSON API's
+// single comma-separated form keeps its split.
+func TestDashboardTagFilterKeepsACommaInsideOneTagName(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	trackerIDs := map[string]int64{}
+	for _, title := range []string{"Comma Tagged", "Split Tagged"} {
+		result, err := db.Exec(`
+			INSERT INTO trackers (profile_id, title, source_id, source_url, status, last_read_chapter, latest_known_chapter)
+			VALUES (1, ?, 1, ?, 'reading', 1, 5)
+		`, title, "https://mangadex.org/title/"+strings.ReplaceAll(strings.ToLower(title), " ", "-"))
+		if err != nil {
+			t.Fatalf("seed %s: %v", title, err)
+		}
+		trackerIDs[title], _ = result.LastInsertId()
+	}
+
+	tagIDs := map[string]int64{}
+	for _, name := range []string{"Isekai, OP", "Isekai", "OP"} {
+		result, err := db.Exec(`INSERT INTO custom_tags (profile_id, name) VALUES (1, ?)`, name)
+		if err != nil {
+			t.Fatalf("seed tag %s: %v", name, err)
+		}
+		tagIDs[name], _ = result.LastInsertId()
+	}
+	if _, err := db.Exec(`
+		INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (?, ?), (?, ?), (?, ?)
+	`, trackerIDs["Comma Tagged"], tagIDs["Isekai, OP"],
+		trackerIDs["Split Tagged"], tagIDs["Isekai"],
+		trackerIDs["Split Tagged"], tagIDs["OP"]); err != nil {
+		t.Fatalf("seed tracker tags: %v", err)
+	}
+
+	get := func(target string) string {
+		t.Helper()
+		res, err := app.Test(httptest.NewRequest(http.MethodGet, target, nil))
+		if err != nil {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d (body: %s)", target, res.StatusCode, string(body))
+		}
+		return string(body)
+	}
+
+	// Exactly what the checkbox for "Isekai, OP" submits.
+	dashboard := get("/dashboard/trackers?status=reading&tags=" + url.QueryEscape("Isekai, OP"))
+	if !strings.Contains(dashboard, "Comma Tagged") {
+		t.Fatalf("expected the tracker tagged %q to match its own tag", "Isekai, OP")
+	}
+	if strings.Contains(dashboard, "Split Tagged") {
+		t.Fatalf("expected the filter not to be split into %q and %q", "Isekai", "OP")
+	}
+
+	api := get("/v1/trackers?status=reading&tags=" + url.QueryEscape("Isekai,OP"))
+	if !strings.Contains(api, "Split Tagged") || strings.Contains(api, "Comma Tagged") {
+		t.Fatalf("expected the API's comma-separated tags to stay split, got %s", api)
 	}
 }
 
