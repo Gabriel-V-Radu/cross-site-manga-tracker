@@ -42,6 +42,16 @@ two tabs on different profiles kept acting on each other's library.
                      the links page fell back to the cookie, which whichever tab
                      made the last request owns. */}}
                 <a class="action-btn" href="/dashboard/links?profile={{.ActiveProfile.Key}}">Link review</a>
+                {{/* Replaced by source_health_indicator.html on load, which then
+                     refreshes itself; the placeholder only holds the space. */}}
+                <span id="source-health-indicator"
+                      class="source-health-indicator"
+                      hx-get="/dashboard/sources/indicator"
+                      hx-trigger="load"
+                      hx-target="this"
+                      hx-swap="outerHTML">
+                    <button type="button" class="action-btn source-health-pill source-health-pill--unknown" disabled>Sources</button>
+                </span>
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/profile/menu"

@@ -12,6 +12,10 @@ import (
 type Registry struct {
 	mu         sync.RWMutex
 	connectors map[string]Connector
+	// board collects the poller's outcomes per source. It hangs off the
+	// registry because the poller and the dashboard already share this one
+	// object, so neither needs new wiring to reach it.
+	board *SourceHealthBoard
 }
 
 type Descriptor struct {
@@ -29,7 +33,16 @@ type HealthStatus struct {
 }
 
 func NewRegistry() *Registry {
-	return &Registry{connectors: map[string]Connector{}}
+	return &Registry{connectors: map[string]Connector{}, board: NewSourceHealthBoard()}
+}
+
+// HealthBoard returns the board the poller records its outcomes on. Nil for a
+// registry not built by NewRegistry; the board's methods accept that.
+func (r *Registry) HealthBoard() *SourceHealthBoard {
+	if r == nil {
+		return nil
+	}
+	return r.board
 }
 
 func (r *Registry) Register(connector Connector) error {

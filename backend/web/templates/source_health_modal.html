@@ -1,0 +1,48 @@
+<div class="modal-backdrop">
+    <div class="modal-card source-health-card" onclick="event.stopPropagation()">
+        <header class="profile-menu-header">
+            <h2>Source Health</h2>
+            <button type="button" class="close-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">&times;</button>
+        </header>
+
+        <div class="source-health-summary">
+            <span class="badge source-health-badge source-health-badge--{{.Indicator.Tone}}">{{.Indicator.Label}}</span>
+            {{if .CycleLine}}<p class="source-health-summary__cycle">{{.CycleLine}}</p>{{end}}
+            <button type="button"
+                    class="linked-btn source-health-summary__refresh"
+                    hx-get="/dashboard/sources"
+                    hx-target="#modal-zone"
+                    hx-swap="innerHTML">Refresh</button>
+        </div>
+        {{if .Notice}}<p class="source-health-notice">{{.Notice}}</p>{{end}}
+
+        <ul class="source-health-list">
+            {{range .Rows}}
+            <li class="source-health-row source-health-row--{{.Tone}}">
+                <div class="source-health-row__head">
+                    <span class="source-health-row__name">{{.Name}}</span>
+                    <span class="badge source-health-badge source-health-badge--{{.Tone}}">{{.StateLabel}}</span>
+                </div>
+                {{if .Reason}}<p class="source-health-row__reason">{{.Reason}}</p>{{end}}
+                {{range .Facts}}<p class="source-health-row__fact">{{.}}</p>{{end}}
+                {{if .Counts}}<p class="source-health-row__fact">{{.Counts}}</p>{{end}}
+                {{if .Coverage}}<p class="source-health-row__fact">{{.Coverage}}</p>{{end}}
+                {{if or .Unchecked .UncheckedMore}}
+                <p class="source-health-row__fact">Not checked last cycle:
+                    {{range $i, $title := .Unchecked}}{{if $i}}, {{end}}{{$title}}{{end}}{{if .UncheckedMore}}{{if .Unchecked}} and{{end}} {{.UncheckedMore}} more{{end}}</p>
+                {{end}}
+                {{if .LastError}}<code class="source-health-row__error" title="{{.LastError}}">{{.LastError}}</code>{{end}}
+            </li>
+            {{end}}
+        </ul>
+
+        {{if .Orphans}}
+        <section class="source-health-orphans">
+            <h3>Trackers on sites with no connector</h3>
+            {{range .Orphans}}
+            <p class="source-health-row__fact"><strong>{{.Key}}</strong>: {{.Count}} tracker(s) are never polled{{if .Trackers}} — {{range $i, $title := .Trackers}}{{if $i}}, {{end}}{{$title}}{{end}}{{end}}. Relink them to another site.</p>
+            {{end}}
+        </section>
+        {{end}}
+    </div>
+</div>

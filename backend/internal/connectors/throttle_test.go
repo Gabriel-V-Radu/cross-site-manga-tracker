@@ -60,6 +60,17 @@ func TestThrottlerOpensCircuitAfterConsecutiveFailures(t *testing.T) {
 	if cooling.Host != "a.example" {
 		t.Fatalf("error names host %q", cooling.Host)
 	}
+	if cooling.QueueFull {
+		t.Fatal("an open circuit is a real cooldown, not a full queue")
+	}
+
+	open := th.openCircuits(now.Add(time.Second))
+	if len(open) != 1 || open[0].Host != "a.example" || open[0].BlockedFor != time.Minute-time.Second {
+		t.Fatalf("openCircuits = %+v, want a.example blocked for 59s", open)
+	}
+	if open := th.openCircuits(now.Add(2 * time.Minute)); len(open) != 0 {
+		t.Fatalf("an expired block is not an open circuit: %+v", open)
+	}
 
 	// The block expires on its own.
 	if _, _, err := th.reserve("a.example", now.Add(2*time.Minute)); err != nil {
@@ -117,6 +128,11 @@ func TestThrottlerCapsQueueWait(t *testing.T) {
 			var cooling *SourceCoolingDownError
 			if !errors.As(err, &cooling) {
 				t.Fatalf("cap refusal should be a SourceCoolingDownError, got %v", err)
+			}
+			// The host did nothing wrong; the refusal has to say so, or
+			// anything classifying it reads a busy queue as an outage.
+			if !cooling.QueueFull {
+				t.Fatalf("cap refusal must be marked QueueFull: %v", cooling)
 			}
 			break
 		}

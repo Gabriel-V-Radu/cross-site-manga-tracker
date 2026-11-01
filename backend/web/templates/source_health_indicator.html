@@ -1,0 +1,18 @@
+{{/*
+The wrapper re-requests itself every minute and is replaced whole; the button
+inside opens the detail modal. Two elements because one element carries one
+hx-get. Everything here is read from memory, so the refresh costs nothing.
+*/}}
+<span id="source-health-indicator"
+      class="source-health-indicator"
+      hx-get="/dashboard/sources/indicator"
+      hx-trigger="every 60s"
+      hx-target="this"
+      hx-swap="outerHTML">
+    <button type="button"
+            class="action-btn source-health-pill source-health-pill--{{.Tone}}"
+            title="{{.Title}}"
+            hx-get="/dashboard/sources"
+            hx-target="#modal-zone"
+            hx-swap="innerHTML">{{.Label}}</button>
+</span>

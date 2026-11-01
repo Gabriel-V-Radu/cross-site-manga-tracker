@@ -47,7 +47,8 @@ func main() {
 	}
 
 	repo := repository.NewTrackerRepository(db)
-	poller := scheduler.NewPoller(repo, connectordefaults.NewRegistry(), scheduler.PollerConfig{}, logger)
+	registry := connectordefaults.NewRegistry()
+	poller := scheduler.NewPoller(repo, registry, scheduler.PollerConfig{}, logger)
 
 	trackers, err := repo.ListForPolling(context.Background())
 	if err != nil {
@@ -69,4 +70,24 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("poll cycle finished", "took", time.Since(started).Round(time.Second).String())
+
+	// The same verdicts the dashboard's source health panel would show after
+	// this cycle, so a rehearsal also says which sites the change left failing.
+	report := registry.SourceHealthReport(time.Now())
+	for _, source := range report.Sources {
+		logger.Info("source health",
+			"sourceKey", source.Key,
+			"state", source.State,
+			"reason", source.Reason,
+			"answered", source.Answered,
+			"failed", source.Failed,
+			"noChapter", source.NoChapter,
+			"refused", source.Refused,
+			"covered", source.Covered,
+			"unchecked", source.UncheckedCount,
+			"lastError", source.LastError)
+	}
+	for _, orphan := range report.Orphans {
+		logger.Warn("trackers on a source with no connector", "sourceKey", orphan.Key, "count", orphan.Count)
+	}
 }

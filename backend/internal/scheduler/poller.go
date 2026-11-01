@@ -104,6 +104,7 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 // busy and user-facing requests permanently behind it.
 func (p *Poller) Start(ctx context.Context) {
 	p.started.Store(true)
+	p.registry.HealthBoard().PollerStarted(p.interval)
 	p.logger.Info("poller started", "interval", p.interval.String())
 	go func() {
 		for {
@@ -152,10 +153,18 @@ type cycleStats struct {
 // pacing queue at depth one and so clear of the throttle's queue-wait cap.
 // Fallback resolves do cross into other shards' hosts; the throttle paces
 // those too, which is why pollResolveTimeout budgets for a full queue.
+//
+// Every outcome is also filed on the registry's health board, which is what
+// the dashboard's source health panel reads; the cycle is folded into its
+// verdicts only once every shard is done.
 func (p *Poller) RunOnce(ctx context.Context) error {
+	board := p.registry.HealthBoard()
+	board.BeginCycle()
 	trackers, err := p.repo.ListForPolling(ctx)
 	if err != nil {
-		return fmt.Errorf("load trackers for polling: %w", err)
+		err = fmt.Errorf("load trackers for polling: %w", err)
+		board.CycleFailed(err)
+		return err
 	}
 
 	shards := map[string][]repository.PollingTracker{}
@@ -186,6 +195,14 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	}
 	wg.Wait()
 
+	if ctx.Err() != nil {
+		// Shutdown cut the cycle short; its cancelled resolves would read as
+		// every site failing at once.
+		board.AbortCycle()
+	} else {
+		board.EndCycle()
+	}
+
 	if skipped := stats.skippedIdle.Load(); skipped > 0 {
 		p.logger.Debug("poll skipped idle trackers", "count", skipped)
 	}
@@ -207,13 +224,23 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		return
 	}
 
+	board := p.registry.HealthBoard()
+	series := connectors.TrackedSeries{ID: tracker.ID, Title: tracker.Title, ProfileID: tracker.ProfileID}
+
 	connector, ok := p.registry.Get(tracker.SourceKey)
 	if !ok {
+		// Silent in the log on purpose (one line per tracker per cycle), but
+		// not on the board: a tracker on a retired site is never checked
+		// again, and only the panel can tell the reader to relink it.
 		p.logger.Debug("connector missing for tracker", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
+		board.RecordMissingConnector(tracker.SourceKey, series)
 		return
 	}
 
 	result, resolveErr := p.resolveSource(ctx, connector, tracker.SourceURL)
+	if ctx.Err() == nil {
+		board.RecordResolve(tracker.SourceKey, connectors.RolePrimary, result, resolveErr)
+	}
 
 	// A source can go dark for reasons no retry fixes — a site put behind an
 	// interactive bot challenge, a domain that moved. When that happens, poll
@@ -239,6 +266,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			usedFallback = true
 			reporterSourceID = fallbackSource.SourceID
 		}
+		board.RecordPrimaryFailure(tracker.SourceKey, series, usedFallback)
 	}
 
 	if resolveErr != nil {
@@ -582,6 +610,7 @@ func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.P
 		}
 
 		result, err := p.resolveSource(ctx, connector, source.SourceURL)
+		p.registry.HealthBoard().RecordResolve(source.SourceKey, connectors.RoleFallback, result, err)
 		if err != nil {
 			p.logger.Debug("poll fallback source failed",
 				"trackerId", tracker.ID, "sourceKey", source.SourceKey, "error", err)

@@ -1306,6 +1306,104 @@ func TestPollerRunOnce_NoUpdateWhenPrimaryFailsWithoutAlternates(t *testing.T) {
 	}
 }
 
+// TestPollerRunOnce_FilesOutcomesOnTheHealthBoard pins what the dashboard's
+// source health panel is built from: every primary and fallback resolve is
+// filed against its source, a failed primary is counted as covered or left
+// unchecked, a tracker on a retired source is reported instead of skipped in
+// silence, and the verdict escalates from degraded to failing only when the
+// next cycle fails too.
+func TestPollerRunOnce_FilesOutcomesOnTheHealthBoard(t *testing.T) {
+	prev := 10.0
+	next := 12.0
+	repo := &fakeRepo{items: []repository.PollingTracker{
+		{
+			ID: 1, Title: "Covered", Status: "reading", ProfileID: 1,
+			SourceURL: "https://dark/a", SourceKey: "darksource", LatestKnownChapter: &prev,
+			AlternateSources: []repository.TrackerSourceRef{{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/a"}},
+		},
+		{ID: 2, Title: "Stranded", Status: "reading", ProfileID: 2, SourceURL: "https://dark/b", SourceKey: "darksource", LatestKnownChapter: &prev},
+		{ID: 3, Title: "Fine", Status: "reading", ProfileID: 1, SourceURL: "https://good/c", SourceKey: "goodsource", LatestKnownChapter: &prev},
+		{ID: 4, Title: "Retired", Status: "reading", ProfileID: 1, SourceURL: "https://gone/d", SourceKey: "retiredsource", LatestKnownChapter: &prev},
+	}}
+
+	registry := connectors.NewRegistry()
+	for _, connector := range []connectors.Connector{
+		scriptedConnector{key: "darksource", err: &connectors.HTTPStatusError{StatusCode: 503}},
+		scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{LatestChapter: &next}},
+		scriptedConnector{key: "goodsource", result: &connectors.MangaResult{LatestChapter: &next}},
+	} {
+		if err := registry.Register(connector); err != nil {
+			t.Fatalf("register %s: %v", connector.Key(), err)
+		}
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	rows := map[string]connectors.SourceHealth{}
+	report := registry.SourceHealthReport(time.Now())
+	for _, row := range report.Sources {
+		rows[row.Key] = row
+	}
+	if report.LastCycleFinishedAt.IsZero() || report.CycleRunning {
+		t.Fatalf("the cycle must be reported finished: %+v", report)
+	}
+	dark := rows["darksource"]
+	if dark.State != connectors.SourceStateDegraded || dark.Reason != "server error (HTTP 503)" || dark.Failed != 2 {
+		t.Fatalf("one cycle of failures marks the source degraded, got %+v", dark)
+	}
+	if dark.Covered != 1 || dark.UncheckedCount != 1 || len(dark.Unchecked) != 1 || dark.Unchecked[0].ID != 2 || dark.Unchecked[0].ProfileID != 2 {
+		t.Fatalf("coverage = %+v", dark)
+	}
+	if mirror := rows["mirrorsource"]; mirror.State != connectors.SourceStateOK || mirror.AsFallback != 1 {
+		t.Fatalf("the mirror answered as a fallback: %+v", mirror)
+	}
+	if good := rows["goodsource"]; good.State != connectors.SourceStateOK || good.Answered != 1 {
+		t.Fatalf("good = %+v", good)
+	}
+	if len(report.Orphans) != 1 || report.Orphans[0].Key != "retiredsource" || report.Orphans[0].Trackers[0].Title != "Retired" {
+		t.Fatalf("a tracker on a source with no connector is reported: %+v", report.Orphans)
+	}
+
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	for _, row := range registry.SourceHealthReport(time.Now()).Sources {
+		if row.Key == "darksource" && (row.State != connectors.SourceStateFailing || row.BadCycles != 2) {
+			t.Fatalf("a second failed cycle is failing: %+v", row)
+		}
+	}
+}
+
+// TestPollerRunOnce_CancelledCycleLeavesNoVerdict: shutdown cancels every
+// in-flight resolve, which must not read as every site failing at once.
+func TestPollerRunOnce_CancelledCycleLeavesNoVerdict(t *testing.T) {
+	prev := 10.0
+	repo := &fakeRepo{items: []repository.PollingTracker{
+		{ID: 1, Title: "A", Status: "reading", SourceURL: "https://dark/a", SourceKey: "darksource", LatestKnownChapter: &prev},
+	}}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "darksource", err: context.Canceled}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(ctx); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+	report := registry.SourceHealthReport(time.Now())
+	if !report.LastCycleFinishedAt.IsZero() || report.CycleRunning {
+		t.Fatalf("an aborted cycle is neither finished nor running: %+v", report)
+	}
+	if report.Sources[0].State != connectors.SourceStateUnknown {
+		t.Fatalf("an aborted cycle gives no verdict: %+v", report.Sources[0])
+	}
+}
+
 // coolingConnector declares itself cooling down and counts resolve calls, so a
 // test can prove the poller refused the request locally instead of asking a
 // site it already knows is dark.

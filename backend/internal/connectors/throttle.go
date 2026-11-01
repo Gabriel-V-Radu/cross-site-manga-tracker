@@ -65,9 +65,18 @@ var hostGapOverrides = map[string]time.Duration{
 type SourceCoolingDownError struct {
 	Host       string
 	RetryAfter time.Duration
+	// QueueFull marks a refusal that has nothing to do with the host: this
+	// process already has more requests queued for it than the pacing gap can
+	// drain within maxQueueWait. It used to read "cooling down after repeated
+	// failures" like a real outage, so a burst of cover lookups made a healthy
+	// site look broken to anything that classified the error.
+	QueueFull bool
 }
 
 func (e *SourceCoolingDownError) Error() string {
+	if e.QueueFull {
+		return fmt.Sprintf("%s request queue is full locally (would wait %s)", e.Host, e.RetryAfter.Round(time.Second))
+	}
 	return fmt.Sprintf("%s is cooling down after repeated failures (retry in %s)", e.Host, e.RetryAfter.Round(time.Second))
 }
 
@@ -129,7 +138,7 @@ func (t *throttler) reserve(host string, now time.Time) (slot time.Time, wait ti
 	if wait := start.Sub(now); wait > maxQueueWait {
 		// Refuse without claiming the slot, so the queue cannot grow past the
 		// cap. Not counted as a host failure — the host did nothing wrong.
-		return time.Time{}, 0, &SourceCoolingDownError{Host: host, RetryAfter: wait}
+		return time.Time{}, 0, &SourceCoolingDownError{Host: host, RetryAfter: wait, QueueFull: true}
 	}
 	state.nextAllowed = start.Add(t.gapFor(host))
 	return start, start.Sub(now), nil
@@ -262,6 +271,32 @@ func NewThrottledClient() *http.Client {
 // the server opens the circuit outright.
 func NoteHostRateLimited(host string) {
 	defaultThrottler.block(host, time.Now())
+}
+
+// HostCircuit is one host whose shared circuit is open right now.
+type HostCircuit struct {
+	Host       string
+	BlockedFor time.Duration
+}
+
+// OpenHostCircuits lists the hosts the shared throttle is refusing at now,
+// for the source health panel. It includes hosts no connector claims (cover
+// CDNs, MangaBaka); callers map them back to connectors themselves.
+func OpenHostCircuits(now time.Time) []HostCircuit {
+	return defaultThrottler.openCircuits(now)
+}
+
+func (t *throttler) openCircuits(now time.Time) []HostCircuit {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var open []HostCircuit
+	for host, state := range t.hosts {
+		if state.blockedUntil.After(now) {
+			open = append(open, HostCircuit{Host: host, BlockedFor: state.blockedUntil.Sub(now)})
+		}
+	}
+	return open
 }
 
 // block opens the circuit for host immediately, without waiting for the

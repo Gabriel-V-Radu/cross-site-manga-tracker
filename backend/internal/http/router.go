@@ -107,6 +107,8 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	app.Post("/dashboard/profile/tags", dashboard.CreateTagFromMenu)
 	app.Post("/dashboard/profile/tags/rename", dashboard.RenameTagFromMenu)
 	app.Post("/dashboard/profile/tags/delete", dashboard.DeleteTagFromMenu)
+	app.Get("/dashboard/sources", dashboard.SourceHealthModal)
+	app.Get("/dashboard/sources/indicator", dashboard.SourceHealthIndicator)
 	app.Get("/dashboard/links", dashboard.LinksPage)
 	app.Get("/dashboard/links/queue", dashboard.LinksQueuePartial)
 	app.Post("/dashboard/links/scan", dashboard.StartLinkScan)

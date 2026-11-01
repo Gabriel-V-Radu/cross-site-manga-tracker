@@ -95,7 +95,8 @@ h1 {
     gap: 6px;
     align-items: end;
     min-width: 0;
-    max-width: 420px;
+    /* Room for the profile name, Link review, the source health pill and Menu. */
+    max-width: 580px;
     width: 100%;
 }
 
@@ -118,6 +119,176 @@ h1 {
     font-size: 12px;
     height: 36px;
     padding: 7px 10px;
+}
+
+/* Source health: the toolbar pill and its detail modal. The tones reuse the
+   status badges' palette: green fine, amber problems, red failing. */
+.source-health-indicator {
+    display: flex;
+}
+
+/* Two classes, so .action-btn's later display: inline-block cannot win: as an
+   inline box the dot below would lose its width and height and vanish. */
+.action-btn.source-health-pill {
+    flex: 1 1 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.source-health-pill::before {
+    content: "";
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ink-soft);
+}
+
+.source-health-pill:disabled {
+    cursor: default;
+    opacity: 0.7;
+}
+
+.source-health-pill--ok::before {
+    background: #63e8ac;
+}
+
+.source-health-pill--degraded::before {
+    background: #f3a317;
+}
+
+.source-health-pill--failing {
+    border-color: rgba(255, 70, 70, 0.6);
+}
+
+.source-health-pill--failing::before {
+    background: #ff3a3a;
+    box-shadow: 0 0 0 3px rgba(255, 58, 58, 0.25);
+}
+
+.source-health-badge--ok {
+    background: rgba(11, 92, 64, 0.62);
+    border-color: rgba(93, 227, 166, 0.34);
+    color: #63e8ac;
+}
+
+.source-health-badge--degraded {
+    background: rgba(106, 81, 0, 0.82);
+    border-color: rgba(243, 163, 23, 0.36);
+    color: #f3a317;
+}
+
+.source-health-badge--failing {
+    background: rgba(89, 0, 0, 0.78);
+    border-color: rgba(255, 70, 70, 0.33);
+    color: #ff3a3a;
+}
+
+.source-health-badge--unknown {
+    border-color: var(--line-strong);
+    color: var(--ink-soft);
+}
+
+.source-health-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    margin-bottom: 12px;
+}
+
+.source-health-summary__cycle {
+    flex: 1 1 240px;
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-soft);
+}
+
+.source-health-notice {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(243, 163, 23, 0.36);
+    font-size: 13px;
+    color: #f3c26b;
+}
+
+.source-health-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 8px;
+}
+
+.source-health-row {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-left-width: 3px;
+    background: var(--card);
+}
+
+.source-health-row--failing {
+    border-left-color: #ff3a3a;
+}
+
+.source-health-row--degraded {
+    border-left-color: #f3a317;
+}
+
+.source-health-row--ok {
+    border-left-color: rgba(93, 227, 166, 0.6);
+}
+
+.source-health-row__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.source-health-row__name {
+    font-weight: 500;
+    letter-spacing: 0.04em;
+}
+
+.source-health-row__reason {
+    margin: 0;
+    font-size: 14px;
+    color: var(--ink);
+}
+
+.source-health-row__fact {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+}
+
+.source-health-row__error {
+    display: block;
+    padding: 6px 8px;
+    background: var(--field);
+    font-size: 12px;
+    color: #c9d3ea;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.source-health-orphans {
+    margin-top: 14px;
+    display: grid;
+    gap: 6px;
+}
+
+.source-health-orphans h3 {
+    margin: 0;
+    font-size: 14px;
 }
 
 .control-panel {

@@ -91,6 +91,19 @@ in Docker and is used from any browser on the same network.
   each match. Accepted links merge the source's alternate titles into the
   tracker, which is what makes later scans match better.
 
+## Source Health
+- The toolbar pill next to **Link review** says whether any site is failing
+  ("Sources OK", "1 source failing", "2 sources with problems"); click it for
+  each site's verdict, the reason (blocked, bot challenge, timed out, page
+  lists no chapters…), how long it has been failing, any cooldown, the last raw
+  error, and which of your trackers could not be checked.
+- It is built from the poller's real resolves, not a probe, and lives in
+  memory: after a restart it fills in again during the first poll cycle. With
+  `POLLING_ENABLED=false` (the local run config) it says "Polling off".
+- A site is degraded after one cycle where nothing got through (or a share of
+  its series failed) and failing when that repeats in the next cycle, or when
+  one cycle failed several series. `poll-once` prints the same verdicts.
+
 ## Operational Tools
 Three commands ship in the image next to the server (`/usr/local/bin` in the
 container) and can also be run from `backend/` with `go run ./cmd/<name>`:
