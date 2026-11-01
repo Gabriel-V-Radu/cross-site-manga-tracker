@@ -24,11 +24,11 @@ const (
 // (DefaultMaxFetchBytes when <= 0), plus the final URL after redirects. The
 // standard browser headers (User-Agent, Accept-Language) are applied only when
 // the request does not already carry them, so connectors with site-specific
-// header sets keep full control. A non-2xx answer is returned as an
-// *HTTPStatusError.
+// header sets keep full control. The User-Agent is the one UserAgentFor picks
+// for the request's host. A non-2xx answer is returned as an *HTTPStatusError.
 func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte, string, error) {
 	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", BrowserUserAgent)
+		req.Header.Set("User-Agent", UserAgentFor(req.URL.Hostname()))
 	}
 	if req.Header.Get("Accept-Language") == "" {
 		req.Header.Set("Accept-Language", acceptLanguage)

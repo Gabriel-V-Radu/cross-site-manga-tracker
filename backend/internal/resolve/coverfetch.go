@@ -176,7 +176,7 @@ func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (s
 	if err != nil {
 		return "", false
 	}
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
+	req.Header.Set("User-Agent", connectors.UserAgentFor(req.URL.Hostname()))
 	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
 
 	res, err := r.client.Do(req)
@@ -267,7 +267,7 @@ func (r *CoverResolver) probe(parent context.Context, coverURL string) bool {
 	if err != nil {
 		return false
 	}
-	req.Header.Set("User-Agent", connectors.BrowserUserAgent)
+	req.Header.Set("User-Agent", connectors.UserAgentFor(req.URL.Hostname()))
 	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
 	req.Header.Set("Range", "bytes=0-0")
 
