@@ -234,7 +234,7 @@ type linkCardResponseData struct {
 func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	sources, err := h.scannableSources(c.Context())
@@ -328,7 +328,7 @@ func (h *DashboardHandler) selectedLinkSource(c *fiber.Ctx, sources []models.Sou
 func (h *DashboardHandler) LinksQueuePartial(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	source, err := h.linkSourceFromRequest(c)
@@ -466,7 +466,7 @@ func toLinkSuggestionView(suggestion repository.LinkSuggestion) linkSuggestionVi
 func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
@@ -539,7 +539,7 @@ const staleSuggestionMessage = "That candidate is no longer pending; reload the 
 func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	suggestionID, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -565,7 +565,7 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 
 	suggestionID, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -591,7 +591,7 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
@@ -618,7 +618,7 @@ func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {
@@ -713,7 +713,7 @@ func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL stri
 func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return h.fail(c, fiber.StatusBadRequest, "Invalid profile", err)
+		return h.failProfile(c, err)
 	}
 	source, err := h.linkSourceFromRequest(c)
 	if err != nil {

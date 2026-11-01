@@ -40,10 +40,22 @@ func NewTrackersHandler(db *sql.DB) *TrackersHandler {
 	}
 }
 
+// failProfileJSON is the API's failProfile: an unknown profile is the
+// client's mistake and keeps its 400 with the same message as before, while a
+// lookup that failed is the database failing — a logged 500 that does not
+// hand the SQLite error text to the client.
+func failProfileJSON(c *fiber.Ctx, err error) error {
+	if isUnknownProfile(err) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+	logHandlerFailure(c, fiber.StatusInternalServerError, "failed to resolve profile", err)
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to load profile"})
+}
+
 func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		return failProfileJSON(c, err)
 	}
 
 	var req createTrackerRequest
@@ -79,7 +91,7 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 func (h *TrackersHandler) List(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		return failProfileJSON(c, err)
 	}
 
 	statuses := parseStatuses(c.Query("status"))
@@ -108,7 +120,7 @@ func (h *TrackersHandler) List(c *fiber.Ctx) error {
 func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		return failProfileJSON(c, err)
 	}
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -131,7 +143,7 @@ func (h *TrackersHandler) GetByID(c *fiber.Ctx) error {
 func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		return failProfileJSON(c, err)
 	}
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
@@ -190,7 +202,7 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 func (h *TrackersHandler) Delete(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+		return failProfileJSON(c, err)
 	}
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
