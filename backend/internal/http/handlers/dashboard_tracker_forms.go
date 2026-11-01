@@ -136,6 +136,9 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
 	tracker.ProfileID = activeProfile.ID
+	if tracker.SourceID, err = h.sourceIDForURL(c.Context(), tracker.SourceID, tracker.SourceURL); err != nil {
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
+	}
 
 	// Everything the form carries is checked before the first write. The tag
 	// selection and the pasted link used to be parsed after the INSERT, so a bad
@@ -338,6 +341,18 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	linkedSources, err := parseLinkedSourcesFromForm(c)
 	if err != nil {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
+
+	// Every pair is realigned on its URL, the linked ones too: a mismatched
+	// pair already stored comes back in linked_sources_json, and realigning it
+	// lets the dedupe below fold it into the real row instead of keeping it.
+	if tracker.SourceID, err = h.sourceIDForURL(c.Context(), tracker.SourceID, tracker.SourceURL); err != nil {
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
+	}
+	for i := range linkedSources {
+		if linkedSources[i].SourceID, err = h.sourceIDForURL(c.Context(), linkedSources[i].SourceID, linkedSources[i].SourceURL); err != nil {
+			return h.fail(c, fiber.StatusInternalServerError, "Failed to validate linked source", err)
+		}
 	}
 
 	// Parsed up front, like on create: a save is all-or-nothing as far as the
@@ -595,6 +610,28 @@ func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, tr
 		ViewMode:    viewMode,
 		ReplaceCard: card,
 	})
+}
+
+// sourceIDForURL returns the source a URL belongs to: the source of the
+// connector that claims its host, or sourceID unchanged when none does. The
+// form's Source select doubles as the site "Search by Title" searches, so
+// picking another site to search and then saving without choosing a result
+// stored that site's id beside the old URL — a pair no connector can read, so
+// the primary failed on every poll ("url does not belong to mangahub" for a
+// MangaFire link). The URL is what gets polled, so the URL wins.
+func (h *DashboardHandler) sourceIDForURL(ctx context.Context, sourceID int64, sourceURL string) (int64, error) {
+	connector, ok := h.connectorForURL(sourceURL)
+	if !ok {
+		return sourceID, nil
+	}
+	owner, err := h.sourceRepo.GetByKey(ctx, connector.Key())
+	if err != nil {
+		return 0, err
+	}
+	if owner == nil {
+		return sourceID, nil
+	}
+	return owner.ID, nil
 }
 
 func (h *DashboardHandler) listSourcesByID(ctx context.Context) (map[int64]models.Source, error) {
