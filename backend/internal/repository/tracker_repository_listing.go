@@ -411,7 +411,12 @@ func (r *TrackerRepository) MarkPollCheckedAt(ctx context.Context, trackerID int
 // who repoints the tracker's source mid-cycle must not have that edit
 // reverted by a write derived from the old source — worse, an unconditional
 // write could leave source_id (new) mismatched with source_url (old), a state
-// host validation rejects forever. The guard is the snapshot's source_id.
+// host validation rejects forever. The guard is the snapshot's source_id,
+// source_url and latest_known_chapter: a repoint to another series on the
+// same site, or a chapter repaired by hand, is as much an edit the stale
+// write would revert as a change of site. The chapter is compared with IS so
+// a snapshot with no chapter still matches a row with none, and a REAL read
+// back into a float64 binds to the identical value, so equality is exact.
 //
 // The trackers UPDATE, the stale-mirror DELETE, and the mirror upsert run in
 // one transaction: they describe a single poll outcome, and a crash between
@@ -483,7 +488,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 				ELSE latest_release_at
 			END,
 			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND source_id = ?
+		WHERE id = ? AND source_id = ? AND source_url = ? AND latest_known_chapter IS ?
 	`, sourceItemIDValue, sourceURLValue,
 		latestKnownChapter, latestKnownChapter, checkedAt, checkedAt,
 		latestKnownChapter,
@@ -491,7 +496,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		pendingLower, pendingLower, checkedAt, checkedAt,
 		pendingLower,
 		update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt,
-		update.TrackerID, update.SnapshotSourceID)
+		update.TrackerID, update.SnapshotSourceID, update.SnapshotSourceURL, update.SnapshotLatestKnownChapter)
 	if err != nil {
 		return false, fmt.Errorf("update polling state: %w", err)
 	}
@@ -501,7 +506,8 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		return false, fmt.Errorf("polling state rows affected: %w", err)
 	}
 	if affected == 0 {
-		// The tracker was repointed (or deleted) after the poll snapshotted it.
+		// The tracker was repointed, had its chapter repaired, or was deleted
+		// after the poll snapshotted it.
 		// Nothing was written, and the mirror statements below are derived from
 		// the same stale snapshot, so they must be skipped too.
 		return false, nil

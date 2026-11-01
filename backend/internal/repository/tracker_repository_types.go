@@ -68,13 +68,21 @@ type TrackerSourceRef struct {
 type PollingUpdate struct {
 	TrackerID int64
 
-	// SnapshotSourceID is the tracker's source_id as it stood when the poll
-	// cycle loaded it. UpdatePollingState refuses to write unless the row
-	// still carries this source: a cycle can run for tens of minutes, and a
-	// write computed from a stale snapshot must not revert a mid-cycle user
-	// edit. Unlike SourceID it is set on fallback polls too — it identifies
-	// the snapshot, not the source being mirrored.
-	SnapshotSourceID int64
+	// SnapshotSourceID, SnapshotSourceURL and SnapshotLatestKnownChapter are
+	// the tracker's source_id, source_url and latest_known_chapter exactly as
+	// they stood when the poll cycle loaded it. UpdatePollingState refuses to
+	// write unless the row still carries all three: a cycle can run for tens
+	// of minutes, and a write computed from a stale snapshot must not revert a
+	// mid-cycle edit. The source_id alone missed a repoint on the same site
+	// (fixing a wrong MangaUpdates match keeps source_id, and the stale poll
+	// wrote the old series' URL and chapter back) and a hand repair of the
+	// chapter (repair-latest-chapter, or the edit form), which the poll
+	// overwrote with the junk number it had snapshotted. Unlike SourceID and
+	// CurrentSourceURL they are set on fallback polls too: they identify the
+	// snapshot, not the source being mirrored.
+	SnapshotSourceID           int64
+	SnapshotSourceURL          string
+	SnapshotLatestKnownChapter *float64
 
 	// SourceID and CurrentSourceURL mirror the primary source into
 	// tracker_sources. Both are left zero by a fallback poll, which must not

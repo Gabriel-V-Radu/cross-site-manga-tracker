@@ -30,13 +30,17 @@ func openPollingTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// pollingSeedURL is the source_url seedPollingTracker stores, which a poll's
+// write has to name as its snapshot for the stale-write guard to let it in.
+const pollingSeedURL = "https://mangadex.org/title/polling"
+
 func seedPollingTracker(t *testing.T, db *sql.DB, latestKnownChapter float64) int64 {
 	t.Helper()
 
 	result, err := db.Exec(`
 		INSERT INTO trackers (title, source_id, source_url, status, latest_known_chapter)
 		VALUES (?, ?, ?, ?, ?)
-	`, "Polling Tracker", 1, "https://mangadex.org/title/polling", "reading", latestKnownChapter)
+	`, "Polling Tracker", 1, pollingSeedURL, "reading", latestKnownChapter)
 	if err != nil {
 		t.Fatalf("seed tracker: %v", err)
 	}
@@ -76,9 +80,10 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 		t.Fatalf("expected the seeded tracker to carry no first-seen timestamp")
 	}
 
+	seeded := 19.0
 	newChapter := 20.0
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, SnapshotSourceURL: pollingSeedURL, SnapshotLatestKnownChapter: &seeded, LatestKnownChapter: &newChapter, ClearLatestReleaseAt: true, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -94,7 +99,7 @@ func TestUpdatePollingStateStampsChapterSeenAtWhenChapterMoves(t *testing.T) {
 	// re-stamping on every cycle is exactly the drift that made a dateless tracker
 	// look freshly updated forever.
 	laterCheck := discoveredAt.Add(6 * time.Hour)
-	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, SnapshotSourceURL: pollingSeedURL, SnapshotLatestKnownChapter: &newChapter, LatestKnownChapter: &newChapter, CheckedAt: laterCheck}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -113,10 +118,11 @@ func TestUpdatePollingStateKeepsChapterSeenAtWhenReleaseDateIsKnown(t *testing.T
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 19)
 
+	seeded := 19.0
 	newChapter := 20.0
 	releasedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	discoveredAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, SnapshotSourceURL: pollingSeedURL, SnapshotLatestKnownChapter: &seeded, LatestKnownChapter: &newChapter, LatestReleaseAt: &releasedAt, CheckedAt: discoveredAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -144,10 +150,11 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 19)
 
+	seeded := 19.0
 	newChapter := 20.0
 	reporter := int64(3)
 	checkedAt := time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC)
-	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, SnapshotSourceURL: pollingSeedURL, SnapshotLatestKnownChapter: &seeded, LatestKnownChapter: &newChapter, LatestChapterSourceID: &reporter, CheckedAt: checkedAt}); err != nil {
 		t.Fatalf("update polling state: %v", err)
 	}
 
@@ -159,7 +166,7 @@ func TestUpdatePollingStateRecordsAndKeepsChapterReporter(t *testing.T) {
 		t.Fatalf("expected reporter source %d to be recorded, got %#v", reporter, tracker.LatestChapterSourceID)
 	}
 
-	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
+	if _, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{TrackerID: trackerID, SnapshotSourceID: 1, SnapshotSourceURL: pollingSeedURL, SnapshotLatestKnownChapter: &newChapter, LatestKnownChapter: &newChapter, CheckedAt: checkedAt.Add(time.Hour)}); err != nil {
 		t.Fatalf("update polling state again: %v", err)
 	}
 
@@ -190,15 +197,18 @@ func TestUpdatePollingStateSkipsWhenSourceChangedMidCycle(t *testing.T) {
 		t.Fatalf("simulate user edit: %v", err)
 	}
 
+	seeded := 19.0
 	staleChapter := 20.0
 	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
-		TrackerID:          trackerID,
-		SnapshotSourceID:   1,
-		SourceID:           1,
-		CurrentSourceURL:   "https://mangadex.org/title/polling",
-		SourceURL:          "https://mangadex.org/title/polling-canonical",
-		LatestKnownChapter: &staleChapter,
-		CheckedAt:          time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+		TrackerID:                  trackerID,
+		SnapshotSourceID:           1,
+		SnapshotSourceURL:          pollingSeedURL,
+		SnapshotLatestKnownChapter: &seeded,
+		SourceID:                   1,
+		CurrentSourceURL:           pollingSeedURL,
+		SourceURL:                  "https://mangadex.org/title/polling-canonical",
+		LatestKnownChapter:         &staleChapter,
+		CheckedAt:                  time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatalf("update polling state: %v", err)
@@ -239,7 +249,7 @@ func TestUpdatePollingStateUpsertsMirrorRow(t *testing.T) {
 	repo := repository.NewTrackerRepository(db)
 	trackerID := seedPollingTracker(t, db, 19)
 
-	oldURL := "https://mangadex.org/title/polling"
+	oldURL := pollingSeedURL
 	if _, err := db.Exec(`
 		INSERT INTO tracker_sources (tracker_id, source_id, source_url)
 		VALUES (?, 1, ?)
@@ -247,18 +257,21 @@ func TestUpdatePollingStateUpsertsMirrorRow(t *testing.T) {
 		t.Fatalf("seed stale mirror row: %v", err)
 	}
 
+	seeded := 19.0
 	newChapter := 20.0
 	itemID := "canonical-item"
 	newURL := "https://mangadex.org/title/polling-canonical"
 	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
-		TrackerID:          trackerID,
-		SnapshotSourceID:   1,
-		SourceID:           1,
-		CurrentSourceURL:   oldURL,
-		SourceItemID:       &itemID,
-		SourceURL:          newURL,
-		LatestKnownChapter: &newChapter,
-		CheckedAt:          time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+		TrackerID:                  trackerID,
+		SnapshotSourceID:           1,
+		SnapshotSourceURL:          oldURL,
+		SnapshotLatestKnownChapter: &seeded,
+		SourceID:                   1,
+		CurrentSourceURL:           oldURL,
+		SourceItemID:               &itemID,
+		SourceURL:                  newURL,
+		LatestKnownChapter:         &newChapter,
+		CheckedAt:                  time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatalf("update polling state: %v", err)
@@ -294,5 +307,134 @@ func TestUpdatePollingStateUpsertsMirrorRow(t *testing.T) {
 	}
 	if len(mirrors) != 1 {
 		t.Fatalf("expected exactly the canonical mirror row, got %v", mirrors)
+	}
+}
+
+// TestUpdatePollingStateSkipsWhenSameSiteURLChangedMidCycle covers the edit
+// the source_id guard missed: the user fixes a wrong match by pointing the
+// tracker at another series on the same site. source_id is unchanged, so the
+// stale write used to pass and put the old series' URL and chapter back,
+// re-inserting its mirror row beside the user's.
+func TestUpdatePollingStateSkipsWhenSameSiteURLChangedMidCycle(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 19)
+
+	userURL := "https://mangadex.org/title/the-right-series"
+	if _, err := db.Exec(`UPDATE trackers SET source_url = ? WHERE id = ?`, userURL, trackerID); err != nil {
+		t.Fatalf("simulate user edit: %v", err)
+	}
+
+	seeded := 19.0
+	staleChapter := 40.0
+	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
+		TrackerID:                  trackerID,
+		SnapshotSourceID:           1,
+		SnapshotSourceURL:          pollingSeedURL,
+		SnapshotLatestKnownChapter: &seeded,
+		SourceID:                   1,
+		CurrentSourceURL:           pollingSeedURL,
+		SourceURL:                  "https://mangadex.org/title/polling-canonical",
+		LatestKnownChapter:         &staleChapter,
+		CheckedAt:                  time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+	if applied {
+		t.Fatalf("expected the stale write to be skipped after a same-site repoint")
+	}
+
+	var sourceURL string
+	var latest sql.NullFloat64
+	if err := db.QueryRow(`SELECT source_url, latest_known_chapter FROM trackers WHERE id = ?`, trackerID).Scan(&sourceURL, &latest); err != nil {
+		t.Fatalf("read tracker after skipped write: %v", err)
+	}
+	if sourceURL != userURL {
+		t.Fatalf("expected the user's url to survive, got %q", sourceURL)
+	}
+	if !latest.Valid || latest.Float64 != seeded {
+		t.Fatalf("expected the chapter to stay %.0f, got %#v", seeded, latest)
+	}
+
+	var mirrored int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM tracker_sources WHERE tracker_id = ?`, trackerID).Scan(&mirrored); err != nil {
+		t.Fatalf("count mirror rows: %v", err)
+	}
+	if mirrored != 0 {
+		t.Fatalf("expected no mirror row for the old series, got %d", mirrored)
+	}
+}
+
+// TestUpdatePollingStateSkipsWhenChapterRepairedMidCycle covers
+// repair-latest-chapter run beside the live server (and the same edit made in
+// the form): the cycle snapshotted the junk number, and its write would put it
+// back after the repair had already reported success.
+func TestUpdatePollingStateSkipsWhenChapterRepairedMidCycle(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 2024)
+
+	if _, err := db.Exec(`UPDATE trackers SET latest_known_chapter = 271 WHERE id = ?`, trackerID); err != nil {
+		t.Fatalf("simulate repair: %v", err)
+	}
+
+	junk := 2024.0
+	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
+		TrackerID:                  trackerID,
+		SnapshotSourceID:           1,
+		SnapshotSourceURL:          pollingSeedURL,
+		SnapshotLatestKnownChapter: &junk,
+		LatestKnownChapter:         &junk,
+		CheckedAt:                  time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+	if applied {
+		t.Fatalf("expected the stale write to be skipped after the repair")
+	}
+
+	var latest sql.NullFloat64
+	if err := db.QueryRow(`SELECT latest_known_chapter FROM trackers WHERE id = ?`, trackerID).Scan(&latest); err != nil {
+		t.Fatalf("read tracker after skipped write: %v", err)
+	}
+	if !latest.Valid || latest.Float64 != 271 {
+		t.Fatalf("expected the repaired chapter 271 to survive, got %#v", latest)
+	}
+}
+
+// TestUpdatePollingStateAppliesOverAMissingChapter pins the IS comparison: a
+// tracker with no chapter yet must still accept its first poll, which `= NULL`
+// would never match.
+func TestUpdatePollingStateAppliesOverAMissingChapter(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	trackerID := seedPollingTracker(t, db, 0)
+	if _, err := db.Exec(`UPDATE trackers SET latest_known_chapter = NULL WHERE id = ?`, trackerID); err != nil {
+		t.Fatalf("clear seeded chapter: %v", err)
+	}
+
+	firstChapter := 12.0
+	applied, err := repo.UpdatePollingState(context.Background(), repository.PollingUpdate{
+		TrackerID:          trackerID,
+		SnapshotSourceID:   1,
+		SnapshotSourceURL:  pollingSeedURL,
+		LatestKnownChapter: &firstChapter,
+		CheckedAt:          time.Date(2026, 8, 11, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("update polling state: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected the first poll of a chapterless tracker to apply")
+	}
+
+	var latest sql.NullFloat64
+	if err := db.QueryRow(`SELECT latest_known_chapter FROM trackers WHERE id = ?`, trackerID).Scan(&latest); err != nil {
+		t.Fatalf("read tracker: %v", err)
+	}
+	if !latest.Valid || latest.Float64 != firstChapter {
+		t.Fatalf("expected chapter %.0f, got %#v", firstChapter, latest)
 	}
 }

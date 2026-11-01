@@ -10,6 +10,12 @@
 // confirmation), latest_chapter_seen_at falls back to the release date or the
 // tracker's creation (the stored timestamp belonged to the junk number's
 // arrival, not a real release), and the reporting source is cleared.
+//
+// It is safe to run beside the live server. A poll cycle works from a
+// snapshot taken when it started, but its write only applies while the row
+// still holds the chapter it snapshotted, so a cycle already under way skips
+// a repaired tracker instead of writing the junk number back, and the next
+// cycle polls from the repaired value.
 package main
 
 import (

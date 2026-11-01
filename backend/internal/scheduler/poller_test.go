@@ -30,7 +30,9 @@ type fakeRepo struct {
 	updatedPendingLower *float64
 	markedChecked       []int64
 
-	updatedSnapshotSourceID int64
+	updatedSnapshotSourceID  int64
+	updatedSnapshotSourceURL string
+	updatedSnapshotLatest    *float64
 }
 
 func (f *fakeRepo) ListForPolling(context.Context) ([]repository.PollingTracker, error) {
@@ -51,6 +53,8 @@ func (f *fakeRepo) UpdatePollingState(_ context.Context, update repository.Polli
 	f.clearedReleaseAt = update.ClearLatestReleaseAt
 	f.updatedPendingLower = update.PendingLowerChapter
 	f.updatedSnapshotSourceID = update.SnapshotSourceID
+	f.updatedSnapshotSourceURL = update.SnapshotSourceURL
+	f.updatedSnapshotLatest = update.SnapshotLatestKnownChapter
 	return true, nil
 }
 
@@ -387,6 +391,15 @@ func TestPollerRunOnce_UpdatesPollingState(t *testing.T) {
 	if repo.updatedSnapshotSourceID != 7 {
 		t.Fatalf("expected the snapshot source id 7 to guard the write, got %d", repo.updatedSnapshotSourceID)
 	}
+	// So do its URL and chapter as read, not the canonical URL or the new
+	// chapter this poll writes: those guard a same-site repoint and a hand
+	// repair of the chapter.
+	if repo.updatedSnapshotSourceURL != "https://example" {
+		t.Fatalf("expected the snapshot source url to guard the write, got %q", repo.updatedSnapshotSourceURL)
+	}
+	if repo.updatedSnapshotLatest == nil || *repo.updatedSnapshotLatest != prev {
+		t.Fatalf("expected the snapshot chapter %.1f to guard the write, got %#v", prev, repo.updatedSnapshotLatest)
+	}
 }
 
 func TestPollerRunOnce_LeavesReleaseDateUnsetWhenChapterNotAdvanced(t *testing.T) {
@@ -571,6 +584,14 @@ func TestPollerRunOnce_FallsBackToAlternateSource(t *testing.T) {
 	// the snapshot's primary source id to know the tracker was not repointed.
 	if repo.updatedSnapshotSourceID != 7 {
 		t.Fatalf("expected the fallback write to carry the snapshot source id 7, got %d", repo.updatedSnapshotSourceID)
+	}
+	// The same goes for the snapshot's URL and chapter, although the fallback
+	// blanks the URL it would otherwise write.
+	if repo.updatedSnapshotSourceURL != "https://blocked/series" {
+		t.Fatalf("expected the fallback write to carry the snapshot source url, got %q", repo.updatedSnapshotSourceURL)
+	}
+	if repo.updatedSnapshotLatest == nil || *repo.updatedSnapshotLatest != prev {
+		t.Fatalf("expected the fallback write to carry the snapshot chapter %.1f, got %#v", prev, repo.updatedSnapshotLatest)
 	}
 }
 

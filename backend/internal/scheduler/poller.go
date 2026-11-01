@@ -356,19 +356,26 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		currentSourceURL = ""
 	}
 
+	// The Snapshot fields come straight from the tracker as the cycle read
+	// it, not from canonicalSourceURL or currentSourceURL: the first is what
+	// this poll wants to write and both are blanked on a fallback, while the
+	// stale-write guard has to name what the row held, whichever source
+	// answered.
 	applied, err := p.repo.UpdatePollingState(ctx, repository.PollingUpdate{
-		TrackerID:             tracker.ID,
-		SnapshotSourceID:      tracker.SourceID,
-		SourceID:              sourceID,
-		CurrentSourceURL:      currentSourceURL,
-		SourceItemID:          canonicalSourceItemID,
-		SourceURL:             canonicalSourceURL,
-		LatestKnownChapter:    latest,
-		LatestChapterSourceID: latestChapterSourceID,
-		LatestReleaseAt:       latestReleaseAt,
-		ClearLatestReleaseAt:  clearLatestReleaseAt,
-		PendingLowerChapter:   outcome.pendingLower,
-		CheckedAt:             now,
+		TrackerID:                  tracker.ID,
+		SnapshotSourceID:           tracker.SourceID,
+		SnapshotSourceURL:          tracker.SourceURL,
+		SnapshotLatestKnownChapter: tracker.LatestKnownChapter,
+		SourceID:                   sourceID,
+		CurrentSourceURL:           currentSourceURL,
+		SourceItemID:               canonicalSourceItemID,
+		SourceURL:                  canonicalSourceURL,
+		LatestKnownChapter:         latest,
+		LatestChapterSourceID:      latestChapterSourceID,
+		LatestReleaseAt:            latestReleaseAt,
+		ClearLatestReleaseAt:       clearLatestReleaseAt,
+		PendingLowerChapter:        outcome.pendingLower,
+		CheckedAt:                  now,
 	})
 	if err != nil {
 		p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
