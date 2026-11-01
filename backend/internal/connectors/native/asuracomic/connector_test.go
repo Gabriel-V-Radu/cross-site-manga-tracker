@@ -256,6 +256,11 @@ func TestAsuraComicConnectorUsesPublishedAtFromHTMLSerializedChapters(t *testing
 		t.Fatalf("resolve failed: %v", err)
 	}
 
+	// The site serves the raw apostrophe inside a double-quoted og:title; the
+	// title used to be cut off there ("A Villain").
+	if resolved.Title != "A Villain's Will to Survive" {
+		t.Fatalf("expected the full apostrophe title, got %q", resolved.Title)
+	}
 	if resolved.LatestChapter == nil || *resolved.LatestChapter != 49 {
 		t.Fatalf("expected latest chapter 49, got %v", resolved.LatestChapter)
 	}

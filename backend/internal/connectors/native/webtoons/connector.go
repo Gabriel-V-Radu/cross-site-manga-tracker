@@ -43,8 +43,8 @@ var site = connectors.Site{
 
 var (
 	canonicalPattern    = regexp.MustCompile(`(?is)<link\s+[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']`)
-	metaTitlePattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
-	metaImagePattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']`)
+	metaTitlePattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content="([^"]+)"`)
+	metaImagePattern    = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:image["'][^>]*content="([^"]+)"`)
 	titleHeadingPattern = regexp.MustCompile(`(?is)<h1[^>]*class=["'][^"']*subj[^"']*["'][^>]*>(.*?)</h1>`)
 	episodeItemPattern  = regexp.MustCompile(`(?is)<li[^>]*class=["'][^"']*_episodeItem[^"']*["'][^>]*data-episode-no=["'](\d+)["'][^>]*>(.*?)</li>`)
 	episodeHrefPattern  = regexp.MustCompile(`(?is)href=["']([^"']*episode_no=\d+[^"']*)["']`)
@@ -307,6 +307,10 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 		canonicalURL = c.canonicalEpisodeListURL(titleNo)
 	}
 
+	// metaTitlePattern (like metaImagePattern) reads the value from double
+	// quotes only, so a raw apostrophe does not end the title: search puts
+	// this title over the search API's, and a value class that also stopped
+	// at ' cut it off there.
 	title := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaTitlePattern, body)))
 	if title == "" {
 		title = strings.TrimSpace(html.UnescapeString(connectors.CleanText(connectors.FirstSubmatch(titleHeadingPattern, body))))

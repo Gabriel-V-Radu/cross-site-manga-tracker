@@ -393,6 +393,50 @@ func TestWebtoonsResolveChapterURLReportsAFailedPageFetch(t *testing.T) {
 	}
 }
 
+// TestWebtoonsApostropheTitleIsNotCutOff pins that a raw apostrophe inside a
+// double-quoted og:title stays part of the title. Search replaces the search
+// API's title with the page's, so a cut-off page title ("A Villain") used to
+// overwrite a correct one.
+func TestWebtoonsApostropheTitleIsNotCutOff(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/en/search/immediate", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"result":{"searchedList":[{"titleNo":5000,"title":"A Villain's Will to Survive","thumbnailMobile":"/thumb.jpg","searchMode":"TITLE"}]},"success":true}`))
+	})
+	mux.HandleFunc("/episodeList", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><head>
+	<link rel="canonical" href="https://www.webtoons.com/en/fantasy/a-villains-will-to-survive/list?title_no=5000" />
+	<meta property="og:title" content="A Villain's Will to Survive" />
+	<meta property="og:image" content="https://swebtoon-phinf.pstatic.net/cover's.jpg" />
+</head><body>
+	<li class="_episodeItem" data-episode-no="49"><a href="https://www.webtoons.com/en/fantasy/a-villains-will-to-survive/ep-49/viewer?title_no=5000&episode_no=49"><span class="date">Mar 20, 2026</span></a></li>
+</body></html>`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	connector := NewConnectorWithOptions(server.URL, []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
+
+	resolved, err := connector.ResolveByURL(context.Background(), "https://www.webtoons.com/en/fantasy/a-villains-will-to-survive/list?title_no=5000")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if resolved.Title != "A Villain's Will to Survive" {
+		t.Fatalf("expected the full apostrophe title, got %q", resolved.Title)
+	}
+	if resolved.CoverImageURL != "https://swebtoon-phinf.pstatic.net/cover's.jpg" {
+		t.Fatalf("expected the full cover URL, got %q", resolved.CoverImageURL)
+	}
+
+	results, err := connector.SearchByTitle(context.Background(), "villain's will", 8)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "A Villain's Will to Survive" {
+		t.Fatalf("expected the full apostrophe title in search, got %+v", results)
+	}
+}
+
 func TestWebtoonsConnectorRejectsNonWebtoonsURL(t *testing.T) {
 	connector := NewConnectorWithOptions("https://www.webtoons.com", []string{"webtoons.com"}, &http.Client{Timeout: 5 * time.Second})
 	if _, err := connector.ResolveByURL(context.Background(), "https://example.com/en/romance/maybe-meant-to-be/list?title_no=4208"); err == nil {

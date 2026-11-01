@@ -42,9 +42,9 @@ var (
 	chapterPublishedRawPattern       = regexp.MustCompile(`(?is)"name":\s*(\d+(?:\.\d+)?).*?"published_at":"([^"]+)"`)
 	chapterPublishedEscNumberPattern = regexp.MustCompile(`(?is)\\"number\\":\s*(?:\[0,)?\s*(\d+(?:\.\d+)?)\s*\]?[^\r\n]*?\\"published_at\\":\s*(?:\[0,)?\\"([^\\"]+)\\"\]?`)
 	chapterPublishedHTMLPattern      = regexp.MustCompile(`(?is)&quot;number&quot;:\s*\[0,(\d+(?:\.\d+)?)\].*?&quot;published_at&quot;:\s*\[0,&quot;([^&]+)&quot;\]`)
-	metaTitlePattern                 = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']`)
+	metaTitlePattern                 = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:title["'][^>]*content="([^"]+)"`)
 	titleTagPattern                  = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
-	metaImagePattern                 = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content=["']([^"']+)["']`)
+	metaImagePattern                 = regexp.MustCompile(`(?is)<meta\s+[^>]*(?:property=["']og:image["']|name=["']twitter:image["'])[^>]*content="([^"]+)"`)
 	renderedCoverPattern             = regexp.MustCompile(`(?is)<img\s+[^>]*src=["']([^"']*asura-images/covers/[^"']+)["'][^>]*>`)
 	updatedOnPattern                 = regexp.MustCompile(`(?i)Updated\s+On\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4})`)
 	monthDayOrdinalYearPattern       = regexp.MustCompile(`(?i)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})`)
@@ -425,6 +425,10 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 }
 
 func extractTitle(body string) string {
+	// metaTitlePattern (like metaImagePattern) reads the value from double
+	// quotes only: Astro writes attributes double-quoted with raw apostrophes
+	// inside ("A Villain's Will to Survive"), and a value class that also
+	// stopped at ' cut the title off there.
 	title := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(metaTitlePattern, body)))
 	if title == "" {
 		title = strings.TrimSpace(html.UnescapeString(connectors.CleanText(connectors.FirstSubmatch(titleTagPattern, body))))
