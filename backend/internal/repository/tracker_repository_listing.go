@@ -133,17 +133,22 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	args = append(args, options.ProfileID)
 
 	if strings.TrimSpace(options.Query) != "" {
+		// The query is lowered in Go with Unicode rules, so the columns go
+		// through unicode_lower (registered in the database package) rather
+		// than SQLite's ASCII-only LOWER(): with LOWER() a title starting with
+		// a non-ASCII capital ('Ōkami') stayed as it was and 'ōkami' could
+		// never find it.
 		normalizedQuery := searchutil.Normalize(options.Query)
 		if normalizedQuery != "" {
 			queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
 			if len(queryTokens) == 0 {
-				whereClauses = append(whereClauses, `(LOWER(trackers.title) LIKE ? OR LOWER(COALESCE(trackers.related_titles, '')) LIKE ?)`)
+				whereClauses = append(whereClauses, `(unicode_lower(trackers.title) LIKE ? OR unicode_lower(COALESCE(trackers.related_titles, '')) LIKE ?)`)
 				queryLike := "%" + normalizedQuery + "%"
 				args = append(args, queryLike, queryLike)
 			} else {
 				for _, token := range queryTokens {
 					tokenLike := "%" + token + "%"
-					whereClauses = append(whereClauses, `(LOWER(trackers.title) LIKE ? OR LOWER(COALESCE(trackers.related_titles, '')) LIKE ?)`)
+					whereClauses = append(whereClauses, `(unicode_lower(trackers.title) LIKE ? OR unicode_lower(COALESCE(trackers.related_titles, '')) LIKE ?)`)
 					args = append(args, tokenLike, tokenLike)
 				}
 			}
@@ -219,7 +224,8 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 	if len(options.TagNames) > 0 {
 		seenTagNames := make(map[string]struct{}, len(options.TagNames))
 		for _, tagName := range options.TagNames {
-			normalized := strings.TrimSpace(strings.ToLower(tagName))
+			name := strings.TrimSpace(tagName)
+			normalized := strings.ToLower(name)
 			if normalized == "" {
 				continue
 			}
@@ -228,15 +234,21 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 			}
 			seenTagNames[normalized] = struct{}{}
 
+			// The name is compared as stored, not through LOWER(): SQLite's
+			// lower() folds ASCII only, so 'Época' stayed 'Época' in SQL while
+			// Go had lowered the filter to 'época', and a tag starting with an
+			// accented capital never matched a single tracker. The column's
+			// NOCASE collation still makes the ASCII case irrelevant, which is
+			// exactly the rule the tag names are kept unique by.
 			whereClauses = append(whereClauses, `EXISTS (
 				SELECT 1
 				FROM tracker_tags tt
 				INNER JOIN custom_tags ct ON ct.id = tt.tag_id
 				WHERE tt.tracker_id = trackers.id
 				  AND ct.profile_id = ?
-				  AND LOWER(ct.name) = ?
+				  AND ct.name = ?
 			)`)
-			args = append(args, options.ProfileID, normalized)
+			args = append(args, options.ProfileID, name)
 		}
 	}
 

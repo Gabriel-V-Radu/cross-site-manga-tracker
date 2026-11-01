@@ -2,12 +2,37 @@ package database
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
+
+// unicode_lower is lower() with Go's Unicode case mapping. SQLite's built-in
+// lower() folds ASCII only, so a filter that lowers its input in Go and
+// compares it with LOWER(column) silently misses every value with a non-ASCII
+// capital: the title search lowered 'Ōkami' to 'ōkami' while SQL left the
+// column as 'Ōkami'. The driver attaches registered functions to every
+// connection opened afterwards and its registry takes no lock, so the one
+// registration happens here, before anything can call Open.
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction("unicode_lower", 1, unicodeLower)
+}
+
+func unicodeLower(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+	switch value := args[0].(type) {
+	case string:
+		return strings.ToLower(value), nil
+	case []byte:
+		return strings.ToLower(string(value)), nil
+	default:
+		// NULL stays NULL, and a number has no case to fold.
+		return value, nil
+	}
+}
 
 // TIMESTAMP COLUMNS HOLD TWO DIFFERENT SPELLINGS. Read this before writing a
 // query that does date arithmetic in SQL.
