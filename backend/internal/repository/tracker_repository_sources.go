@@ -128,6 +128,11 @@ func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64,
 		return fmt.Errorf("delete tracker sources: %w", err)
 	}
 
+	// An upsert rather than a plain INSERT: two entries of the list can name the
+	// same (source, url) — the edit form canonicalizes each link to the site's
+	// own URL, so a reader link and the series page become one — and the
+	// second used to trip the unique key and roll back the whole save. The
+	// duplicate folds into the first, keeping an item id either of them knew.
 	for _, source := range sources {
 		if strings.TrimSpace(source.SourceURL) == "" || source.SourceID <= 0 {
 			continue
@@ -135,6 +140,10 @@ func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64,
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
+			ON CONFLICT(tracker_id, source_id, source_url)
+			DO UPDATE SET
+				source_item_id = COALESCE(excluded.source_item_id, tracker_sources.source_item_id),
+				updated_at = CURRENT_TIMESTAMP
 		`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL)); err != nil {
 			return fmt.Errorf("insert tracker source: %w", err)
 		}

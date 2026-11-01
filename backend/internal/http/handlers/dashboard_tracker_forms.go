@@ -411,6 +411,12 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 
 	if !sameTrackerSources(existingSources, uniqueSources) {
 		primarySource, latestKnownChapter, latestReleaseAt, relatedTitles := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
+		// Canonicalizing can turn two links that looked different — a reader
+		// link and the series page, an old domain and the current one — into
+		// the same URL, and the second row then tripped tracker_sources' unique
+		// key and failed the whole save with every other edit in it. Folded
+		// again now that the URLs are the site's own.
+		uniqueSources = dedupeTrackerSources(uniqueSources)
 		tracker.SourceID = primarySource.SourceID
 		tracker.SourceItemID = primarySource.SourceItemID
 		tracker.SourceURL = primarySource.SourceURL

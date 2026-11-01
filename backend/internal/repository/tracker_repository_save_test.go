@@ -120,6 +120,48 @@ func TestSaveTrackerEditRollsBackAsAWhole(t *testing.T) {
 	}
 }
 
+// Two entries of the submitted list can name the same (source, url): the edit
+// form canonicalizes every link to the site's own URL, so a reader link and the
+// series page become one. The second used to trip tracker_sources' unique key
+// and roll back the whole save; it now folds into the first, keeping the item
+// id one of them knew.
+func TestSaveTrackerEditFoldsDuplicateSources(t *testing.T) {
+	db := openPollingTestDB(t)
+	repo := repository.NewTrackerRepository(db)
+	ctx := context.Background()
+	created := seedSaveTracker(t, repo)
+
+	itemID := "original.abc"
+	edited := *created
+	edited.Title = "Edited"
+	saved, err := repo.SaveTrackerEdit(ctx, 1, created.ID, &edited, repository.TrackerLinks{
+		Sources: []models.TrackerSource{
+			{SourceID: 2, SourceURL: "https://mangafire.to/manga/original.abc", SourceItemID: &itemID},
+			{SourceID: 2, SourceURL: "https://mangafire.to/manga/original.abc"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if saved == nil || saved.Title != "Edited" {
+		t.Fatalf("saved = %+v", saved)
+	}
+
+	var rows int
+	var storedItemID sql.NullString
+	if err := db.QueryRow(`
+		SELECT COUNT(1), MAX(source_item_id) FROM tracker_sources WHERE tracker_id = ? AND source_id = 2
+	`, created.ID).Scan(&rows, &storedItemID); err != nil {
+		t.Fatalf("load links: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("duplicate link stored %d times, want 1", rows)
+	}
+	if !storedItemID.Valid || storedItemID.String != itemID {
+		t.Fatalf("item id = %+v, want %q kept", storedItemID, itemID)
+	}
+}
+
 // A tracker the profile does not own is neither found nor written.
 func TestSaveTrackerEditRefusesAnotherProfilesTracker(t *testing.T) {
 	db := openPollingTestDB(t)
