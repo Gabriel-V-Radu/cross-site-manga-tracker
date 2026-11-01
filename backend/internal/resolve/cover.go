@@ -152,6 +152,10 @@ func (r *CoverResolver) Close() {
 // background fetch is still pending. The serving source is empty until a fetch
 // completes, so a first render shows the tracker's primary source and a later
 // one corrects it if a fallback answered instead.
+//
+// A cached cover whose serving source is neither the primary nor one of the
+// alternates passed here was borrowed from a source the tracker no longer
+// links, and is dropped and fetched again rather than served.
 func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (coverURL string, servingSourceKey string, waiting bool) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
@@ -160,10 +164,23 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 
 	cacheKey := coverCacheKey(trimmedSourceKey, sourceURL, sourceItemID)
 	if cachedURL, servingKey, found, ok := r.cachedWithSource(cacheKey); ok {
-		if found {
+		if !found {
+			return "", "", false
+		}
+		if coverSourceStillLinked(servingKey, trimmedSourceKey, alternates) {
 			return cachedURL, servingKey, false
 		}
-		return "", "", false
+		// The cover came from an alternate while the primary could not supply
+		// one, and is stored under the primary's key, where a local copy never
+		// expires. Once that alternate is unlinked — typically a wrong match the
+		// user just removed — nothing else would ever replace it: the card kept
+		// the wrong series' art indefinitely, even after the primary recovered.
+		// Conditional, so a cover a fetch landed since the read above is kept.
+		// The file stays on disk: it is named after its image URL, so another
+		// tracker's entry may be serving it.
+		r.dropCached(cacheKey, func(current coverEntry) bool {
+			return current.Found && current.SourceKey == servingKey
+		})
 	}
 
 	if strings.TrimSpace(sourceURL) == "" {
@@ -179,6 +196,22 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 		_, _ = r.fetch(ctx, generation, trimmedSourceKey, sourceURL, sourceItemID, alternates)
 	})
 	return "", "", true
+}
+
+// coverSourceStillLinked reports whether the source a cached cover came from is
+// one the tracker still links: its primary, or one of the alternates passed
+// with the lookup. An entry that names no source cannot be judged and is kept.
+func coverSourceStillLinked(servingKey, primaryKey string, alternates []repository.TrackerSourceRef) bool {
+	servingKey = strings.TrimSpace(servingKey)
+	if servingKey == "" || strings.EqualFold(servingKey, strings.TrimSpace(primaryKey)) {
+		return true
+	}
+	for _, alternate := range alternates {
+		if strings.EqualFold(servingKey, strings.TrimSpace(alternate.SourceKey)) {
+			return true
+		}
+	}
+	return false
 }
 
 // InvalidateNegatives drops every remembered "no cover found". Called whenever

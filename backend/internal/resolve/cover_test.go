@@ -522,3 +522,81 @@ func TestInvalidateNegativesVoidsANegativeAlreadyInFlight(t *testing.T) {
 		})
 	}
 }
+
+// TestLookupDropsACoverBorrowedFromAnUnlinkedSource pins which cached covers
+// still serve once the tracker's links change. A cover borrowed from an
+// alternate is stored under the primary's key, so before this a wrong match's
+// art kept serving after the user removed the link that supplied it.
+func TestLookupDropsACoverBorrowedFromAnUnlinkedSource(t *testing.T) {
+	const primaryKey, primaryURL = "mangafire", "https://mangafire.example/manga/a"
+	const borrowed = "https://cdn.example/borrowed.webp"
+	comick := repository.TrackerSourceRef{SourceID: 9, SourceKey: "comick", SourceURL: "https://comick.example/comic/a"}
+	mangahub := repository.TrackerSourceRef{SourceID: 10, SourceKey: "mangahub", SourceURL: "https://mangahub.example/manga/a"}
+
+	tests := []struct {
+		name       string
+		servedBy   string
+		alternates []repository.TrackerSourceRef
+		wantServed bool
+	}{
+		{name: "served by the primary with nothing linked", servedBy: primaryKey, wantServed: true},
+		{name: "served by an alternate still linked", servedBy: "comick", alternates: []repository.TrackerSourceRef{comick}, wantServed: true},
+		{name: "served by an alternate recorded in another case", servedBy: "ComicK", alternates: []repository.TrackerSourceRef{comick}, wantServed: true},
+		{name: "served by an alternate since unlinked", servedBy: "comick", wantServed: false},
+		{name: "served by an alternate replaced by another site", servedBy: "comick", alternates: []repository.TrackerSourceRef{mangahub}, wantServed: false},
+		// Nothing to judge it by, so it keeps serving.
+		{name: "no serving source recorded", servedBy: "", wantServed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// No connectors: the refetch a dropped cover queues finds nothing,
+			// which is what tells a dropped entry from one still served.
+			resolver := newCoverTestResolver(t, connectors.NewRegistry())
+			cacheKey := coverCacheKey(primaryKey, primaryURL, nil)
+			resolver.cacheResultFromSource(cacheKey, borrowed, test.servedBy, true, 12*time.Hour)
+
+			coverURL, _, waiting := resolver.Lookup(primaryKey, primaryURL, nil, test.alternates, "")
+			if test.wantServed {
+				if coverURL != borrowed || waiting {
+					t.Fatalf("expected the cached cover served, got %q (waiting=%v)", coverURL, waiting)
+				}
+				return
+			}
+
+			if coverURL != "" || !waiting {
+				t.Fatalf("expected the borrowed cover dropped and fetched again, got %q (waiting=%v)", coverURL, waiting)
+			}
+			waitQueueIdle(t, resolver.queue)
+			if cached, found, ok := resolver.cached(cacheKey); ok && found {
+				t.Fatalf("the borrowed cover %q is still served", cached)
+			}
+		})
+	}
+}
+
+// TestLookupDropsALocalCoverBorrowedFromAnUnlinkedSource pins the case that
+// made the wrong art permanent: a downloaded cover never expires, so nothing
+// but this check ever replaced one borrowed from a link since removed. The
+// file itself stays, since another tracker's entry may be serving it.
+func TestLookupDropsALocalCoverBorrowedFromAnUnlinkedSource(t *testing.T) {
+	resolver := newLocalCoverResolver(t, connectors.NewRegistry())
+
+	name := "borrowed.png"
+	if err := os.WriteFile(filepath.Join(resolver.dir, name), pngBytes, 0o644); err != nil {
+		t.Fatalf("write cover file: %v", err)
+	}
+	const primaryURL = "https://mangafire.example/manga/a"
+	cacheKey := coverCacheKey("mangafire", primaryURL, nil)
+	resolver.cacheLocal(cacheKey, "https://cdn.example/borrowed.png", name, "comick")
+
+	if coverURL, _, waiting := resolver.Lookup("mangafire", primaryURL, nil, nil, ""); coverURL != "" || !waiting {
+		t.Fatalf("expected the borrowed local cover dropped and fetched again, got %q (waiting=%v)", coverURL, waiting)
+	}
+	waitQueueIdle(t, resolver.queue)
+	if cached, found, ok := resolver.cached(cacheKey); ok && found {
+		t.Fatalf("the borrowed local cover %q is still served", cached)
+	}
+	if _, err := os.Stat(filepath.Join(resolver.dir, name)); err != nil {
+		t.Fatalf("expected the file left on disk: %v", err)
+	}
+}
