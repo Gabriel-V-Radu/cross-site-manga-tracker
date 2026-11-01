@@ -1337,8 +1337,8 @@ input:focus, select:focus {
     color: var(--accent);
 }
 
-/* A refused or failed htmx request, reported where the response would have
-   landed (dashboard-core.js showRequestError). */
+/* A refused or failed htmx request, reported beside the modal form that sent
+   it or atop the trackers zone (dashboard-core.js showRequestError). */
 .request-error {
     margin: 0 0 10px;
     padding: 8px 10px;

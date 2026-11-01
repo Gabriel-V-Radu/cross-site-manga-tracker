@@ -178,21 +178,67 @@ window.setDashboardViewMode = function (mode, shouldRefresh) {
 // indicator gone and no word of what went wrong — a tracker half-saved by a bad
 // pasted URL looked exactly like a hung request. The server answers every
 // refused request with a one-line message written for the reader (see
-// handlers.fail), so that text is what gets shown, inside whatever the request
-// was going to swap into: the modal's form when one is open, else a strip at
-// the top of the trackers zone.
-window.showRequestError = function (message) {
-    var text = String(message || '').trim() || 'The request failed. Please try again.';
-    var form = document.querySelector('#modal-zone .tracker-form, #modal-zone form');
-    var host = form || document.getElementById('trackers-zone') || document.body;
-    var existing = host.querySelector(':scope > .request-error');
-    if (!existing) {
-        existing = document.createElement('p');
-        existing.className = 'request-error';
-        existing.setAttribute('role', 'alert');
-        host.insertBefore(existing, host.firstChild);
+// handlers.fail), so that text is what gets shown: beside the modal form that
+// sent the request, else in a strip at the top of the trackers zone.
+//
+// The form is the one the request came from, not the first one in the modal.
+// Picking the first put a failed tag change from the Custom Tags pane above the
+// Switch-profile form in the other pane, and a refused Save above Title, out of
+// sight at the top of a modal that scrolls on its own — so the message goes
+// right above the buttons that were pressed, and is scrolled into view.
+var requestErrorHost = function (elt) {
+    // Without the requesting element only the old guess is possible; with one
+    // outside the modal (a card button, the list's own refresh) the message
+    // belongs to the trackers zone even while a modal happens to be open.
+    var fromModal = !elt || !elt.closest || !!elt.closest('#modal-zone');
+    var form = null;
+    if (fromModal) {
+        form = (elt && elt.closest && elt.closest('#modal-zone form')) ||
+            document.querySelector('#modal-zone .tracker-form, #modal-zone form');
     }
-    existing.textContent = text;
+    // A tag's Edit/Remove and a logo's Upload/Remove are one-button forms in a
+    // row with no room for a sentence; their section is the nearest place it
+    // can be read.
+    if (form && !form.classList.contains('tracker-form')) {
+        form = form.closest('section') || form;
+    }
+    return form || document.getElementById('trackers-zone') || document.body;
+};
+
+var requestErrorAnchor = function (host) {
+    var actions = host.querySelector(':scope > .modal-actions');
+    if (actions) {
+        return actions;
+    }
+    var heading = host.querySelector(':scope > h3');
+    if (heading) {
+        return heading.nextSibling;
+    }
+    return host.firstChild;
+};
+
+window.showRequestError = function (message, elt) {
+    var text = String(message || '').trim() || 'The request failed. Please try again.';
+    var host = requestErrorHost(elt);
+    var region = (host.closest && host.closest('#modal-zone')) || host;
+
+    // One message per region: an earlier failure from another form in the
+    // same modal would otherwise still be on screen, reading as current.
+    Array.prototype.forEach.call(region.querySelectorAll('.request-error'), function (node) {
+        node.remove();
+    });
+
+    var notice = document.createElement('p');
+    notice.className = 'request-error';
+    notice.setAttribute('role', 'alert');
+    notice.textContent = text;
+    host.insertBefore(notice, requestErrorAnchor(host));
+
+    // Only inside the modal, where the user just pressed something: a failed
+    // background refresh of the list must not yank the page to its top.
+    if (region.id === 'modal-zone' && typeof notice.scrollIntoView === 'function') {
+        notice.scrollIntoView({ block: 'nearest' });
+    }
 };
 
 document.body.addEventListener('htmx:responseError', function (event) {
@@ -204,11 +250,11 @@ document.body.addEventListener('htmx:responseError', function (event) {
     var message = (!looksLikeMarkup && body.length > 0 && body.length <= 300)
         ? body
         : ('Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : ''));
-    window.showRequestError(message);
+    window.showRequestError(message, event && event.detail ? event.detail.elt : null);
 });
 
-document.body.addEventListener('htmx:sendError', function () {
-    window.showRequestError('Could not reach the server. Check the connection and try again.');
+document.body.addEventListener('htmx:sendError', function (event) {
+    window.showRequestError('Could not reach the server. Check the connection and try again.', event && event.detail ? event.detail.elt : null);
 });
 
 // A successful swap into the modal or the trackers zone clears any error strip

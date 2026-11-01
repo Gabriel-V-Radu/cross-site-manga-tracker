@@ -30,6 +30,20 @@ window.renderLinkedSources = function (form) {
     list.innerHTML = html;
 };
 
+// What the last search pick (not the user) wrote into the chapter and item-id
+// fields, kept on the form so the next pick can tell its own leftovers from a
+// value the user typed or the edit form opened with: only the former may be
+// cleared (see applyTrackerSearchResult).
+var pickedTrackerFieldKeys = {
+    'input[name="latest_known_chapter"]': 'pickedLatestKnownChapter',
+    'input[name="source_item_id"]': 'pickedSourceItemId'
+};
+
+var rememberPickedTrackerField = function (form, selector, wrote) {
+    var field = form.querySelector(selector);
+    form.dataset[pickedTrackerFieldKeys[selector]] = (wrote && field) ? field.value : '';
+};
+
 window.parseRelatedTitlesDataset = function (rawValue) {
     var trimmed = String(rawValue || '').trim();
     if (!trimmed) {
@@ -180,6 +194,8 @@ window.addTrackerLinkedSource = function (button) {
         setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
         setField('input[name="latest_known_chapter"]', String(incomingLatest));
         setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
+        rememberPickedTrackerField(form, 'input[name="source_item_id"]', true);
+        rememberPickedTrackerField(form, 'input[name="latest_known_chapter"]', true);
 
         var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
         if (latestReleaseField && typeof latestReleaseAt !== 'undefined') {
@@ -302,6 +318,8 @@ window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
         chapterField.value = payload.latestChapter;
         chapterField.dispatchEvent(new Event('input', { bubbles: true }));
         chapterField.dispatchEvent(new Event('change', { bubbles: true }));
+        // Still the pick's number, not the user's: a later pick may replace it.
+        rememberPickedTrackerField(form, 'input[name="latest_known_chapter"]', true);
 
         var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
         if (latestReleaseField && payload.latestReleaseAt) {
@@ -326,11 +344,32 @@ window.applyTrackerSearchResult = function (button) {
         window.setTrackerFormField(form, selector, value, false);
     };
 
+    // Except over the previous pick's own leftovers. A result whose listing
+    // carries no chapter (MangaFire's never does) used to keep the number the
+    // previous pick wrote, and the lookup below, which only fills an empty
+    // field, then threw the right number away: the tracker was saved with the
+    // first series' chapter against the second series' URL. A number the user
+    // typed, or the edit form opened with, is still left alone.
+    var replacePickedField = function (selector, incoming) {
+        var field = form.querySelector(selector);
+        if (!field) {
+            return;
+        }
+        var value = String(incoming || '').trim();
+        var leftover = form.dataset[pickedTrackerFieldKeys[selector]];
+        if (value) {
+            setField(selector, value);
+        } else if (leftover && field.value === leftover) {
+            window.setTrackerFormField(form, selector, '', true);
+        }
+        rememberPickedTrackerField(form, selector, value !== '');
+    };
+
     setField('input[name="title"]', button.dataset.title || '');
     setField('input[name="source_url"]', button.dataset.url || '');
-    setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
+    replacePickedField('input[name="source_item_id"]', button.dataset.sourceItemId);
     setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
-    setField('input[name="latest_known_chapter"]', button.dataset.latestChapter || '');
+    replacePickedField('input[name="latest_known_chapter"]', button.dataset.latestChapter);
 
     var latestReleaseField = form.querySelector('input[name="latest_release_at"]');
     if (latestReleaseField) {
@@ -341,3 +380,19 @@ window.applyTrackerSearchResult = function (button) {
         window.fetchTrackerSourceChapter(form, button.dataset.sourceId, button.dataset.url || '');
     }
 };
+
+// The two title searches are text fields inside the tracker form, which has a
+// Save button, so Enter in either was an implicit submission: the edit form
+// saved as it stood and closed before any result appeared, and the new-tracker
+// form complained about empty required fields instead of searching. The search
+// already runs as the user types, so Enter in these boxes does nothing.
+document.addEventListener('keydown', function (event) {
+    if (!event || event.key !== 'Enter' || event.isComposing) {
+        return;
+    }
+    var target = event.target;
+    if (!target || !target.matches || !target.matches('#source-search-input, #linked-search-input')) {
+        return;
+    }
+    event.preventDefault();
+});

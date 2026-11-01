@@ -192,6 +192,84 @@ func TestDashboardSitesMenuIsRenderedOnceWithThePage(t *testing.T) {
 	}
 }
 
+// The edit form sends back the chapter numbers it opened with next to the
+// editable ones, so the save can tell a number the user changed from one the
+// poller advanced while the form was open. The two must render from the same
+// expression: an untouched field has to submit exactly the original's string.
+func TestEditTrackerModalSendsBackTheChaptersItOpenedWith(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	cases := []struct {
+		name     string
+		lastRead any
+		latest   any
+		wantRead string
+		wantNext string
+	}{
+		{name: "Fractional Chapters", lastRead: 7.5, latest: 12.25, wantRead: "7.5", wantNext: "12.25"},
+		{name: "Whole Chapters", lastRead: 40.0, latest: 41.0, wantRead: "40", wantNext: "41"},
+		{name: "No Chapters", lastRead: nil, latest: nil, wantRead: "", wantNext: ""},
+	}
+
+	inputValue := func(html, name string) (string, bool) {
+		pattern := regexp.MustCompile(`name="` + regexp.QuoteMeta(name) + `" value="([^"]*)"`)
+		match := pattern.FindStringSubmatch(html)
+		if match == nil {
+			return "", false
+		}
+		return match[1], true
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := seedMarkupTracker(t, db, tc.name, tc.lastRead, tc.latest)
+			html := getMarkup(t, app, "/dashboard/trackers/"+strconv.FormatInt(id, 10)+"/edit?profile=profile1")
+
+			for _, field := range []struct{ name, want string }{
+				{"last_read_chapter", tc.wantRead},
+				{"latest_known_chapter", tc.wantNext},
+			} {
+				visible, ok := inputValue(html, field.name)
+				if !ok {
+					t.Fatalf("expected the edit form to render %s", field.name)
+				}
+				original, ok := inputValue(html, field.name+"_original")
+				if !ok {
+					t.Fatalf("expected the edit form to render %s_original", field.name)
+				}
+				if visible != field.want || original != visible {
+					t.Fatalf("%s: visible %q, original %q, want both %q", field.name, visible, original, field.want)
+				}
+			}
+		})
+	}
+
+	newForm := getMarkup(t, app, "/dashboard/trackers/new?profile=profile1")
+	if strings.Contains(newForm, "_original") {
+		t.Fatalf("expected the new-tracker form to carry no original chapter values")
+	}
+}
+
+// "keyup changed" only compares the typed text, so each title search also
+// listens to its own site select: a new site used to leave the previous site's
+// results, or "Select a source first", on screen until the title was edited.
+func TestTrackerFormSearchesRerunWhenTheirSiteChanges(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	newForm := getMarkup(t, app, "/dashboard/trackers/new?profile=profile1")
+	if !strings.Contains(newForm, `id="tracker-source-select"`) || !strings.Contains(newForm, "change from:#tracker-source-select") {
+		t.Fatalf("expected the title search to re-run when the Source select changes")
+	}
+
+	id := seedMarkupTracker(t, db, "Search Trigger Tracker", 1.0, 2.0)
+	editForm := getMarkup(t, app, "/dashboard/trackers/"+strconv.FormatInt(id, 10)+"/edit?profile=profile1")
+	if !strings.Contains(editForm, `id="linked-source-id"`) || !strings.Contains(editForm, "change from:#linked-source-id") {
+		t.Fatalf("expected the additional-site search to re-run when Site to Add changes")
+	}
+}
+
 // The tag menu now submits a rename that only changes capitalisation (it used
 // to drop it client-side), so the server has to accept it: the name is unique
 // without regard to case, but the update is to the same row.

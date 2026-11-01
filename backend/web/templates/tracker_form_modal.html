@@ -19,7 +19,7 @@
 
             <label>
                 Source
-                <select name="source_id" required>
+                <select name="source_id" id="tracker-source-select" required>
                     <option value="">Select source</option>
                     {{range .Sources}}
                     <option value="{{.ID}}" {{if and $.Tracker (eq $.Tracker.SourceID .ID)}}selected{{end}}>{{.Name}}</option>
@@ -27,6 +27,11 @@
                 </select>
             </label>
 
+            {{/* Both searches also re-run when their site select changes: "changed"
+                 only compares the typed text, so a new site left the old site's
+                 results (or "Select a source first") on screen until the title was
+                 edited. Enter is kept from submitting the form in
+                 dashboard-linked-sources.js. */}}
             <label>
                 Search by Title (Auto-fill)
                 <input type="text"
@@ -36,7 +41,7 @@
                        autocomplete="off"
                        hx-get="/dashboard/trackers/search"
                        hx-target="#source-search-results"
-                       hx-trigger="keyup changed delay:350ms"
+                       hx-trigger="keyup changed delay:350ms, change from:#tracker-source-select"
                        hx-sync="this:replace"
                        hx-include="[name='source_id'], #source-search-input"
                        hx-indicator="#source-search-loading">
@@ -71,7 +76,7 @@
                        autocomplete="off"
                        hx-get="/dashboard/trackers/search"
                        hx-target="#linked-search-results"
-                       hx-trigger="keyup changed delay:350ms"
+                       hx-trigger="keyup changed delay:350ms, change from:#linked-source-id"
                        hx-sync="this:replace"
                        hx-vals='{"intent":"link"}'
                        hx-include="#linked-source-id, #linked-search-input"
@@ -166,6 +171,15 @@
                     <span class="field-note" data-chapter-lookup-note hidden></span>
                 </label>
             </div>
+            {{if eq .Mode "edit"}}
+            {{/* The chapter numbers as they stood when the form opened, rendered
+                 with exactly the expressions above so an untouched field submits
+                 the same string. The save compares the two: only a number the user
+                 changed is written, so a newer chapter the poller stored while the
+                 form was open is not overwritten with the one shown at open. */}}
+            <input type="hidden" name="last_read_chapter_original" value="{{if .Tracker}}{{chapterInputValue .Tracker.LastReadChapter}}{{end}}">
+            <input type="hidden" name="latest_known_chapter_original" value="{{if .Tracker}}{{chapterInputValue .Tracker.LatestKnownChapter}}{{end}}">
+            {{end}}
 
             <hr>
             <h3>Tags</h3>
