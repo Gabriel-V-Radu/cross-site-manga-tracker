@@ -47,10 +47,15 @@
     <p>Try a different filter, or add your first source entry.</p>
 </div>
 {{else}}
-{{if gt .TotalPages 1}}
+{{/* The result count and the connector shortcuts belong to the list, not to
+     paging: they used to sit inside the more-than-one-page condition, so any
+     filter down to a single page made both vanish. Only the page buttons depend
+     on there being pages. */}}
 <div class="pagination pagination--top">
     <p class="pagination-results">{{.TotalResults}} result{{if ne .TotalResults 1}}s{{end}}</p>
+    {{if gt .TotalPages 1}}
     {{template "pagination_controls" .}}
+    {{end}}
     <div class="pagination-site-links" aria-label="Connector websites">
         {{range .SiteLinks}}
         {{template "pagination_site_link" .}}
@@ -68,7 +73,6 @@
         {{end}}
     </div>
 </div>
-{{end}}
 
 {{if eq .ViewMode "list"}}
 <div id="cards-container-list" class="cards-list">

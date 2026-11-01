@@ -291,6 +291,15 @@ document.addEventListener('click', function (event) {
 
     closeDropdownIfOutside('filter-tags-dropdown');
     closeDropdownIfOutside('filter-sites-dropdown');
+
+    // The connector strip's "+N" menu is a <details> too, and nothing closed
+    // it: it stayed open over the cards, and while open it held off every
+    // silent cover refresh until the deferral cap ran out.
+    Array.prototype.forEach.call(document.querySelectorAll('details.site-links-more[open]'), function (menu) {
+        if (!menu.contains(event.target)) {
+            menu.removeAttribute('open');
+        }
+    });
 });
 
 // The tag menu is re-rendered by the server whenever a tag is created, renamed

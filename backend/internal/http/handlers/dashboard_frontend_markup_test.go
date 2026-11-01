@@ -192,6 +192,40 @@ func TestDashboardSitesMenuIsRenderedOnceWithThePage(t *testing.T) {
 	}
 }
 
+// A plain navigation carries no X-Profile-Key, so the profile has to ride in
+// the URL or the links page falls back to a cookie any other tab may own.
+func TestDashboardLinkReviewOpensThePageProfile(t *testing.T) {
+	_, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	html := getMarkup(t, app, "/dashboard?profile=profile2")
+	if !strings.Contains(html, `href="/dashboard/links?profile=profile2"`) {
+		t.Fatalf("expected the Link review link to name profile2")
+	}
+}
+
+// The result count and the connector shortcuts used to sit inside the
+// more-than-one-page condition, so filtering down to one page hid both.
+func TestTrackerListKeepsCountAndConnectorsOnASinglePage(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	seedMarkupTracker(t, db, "Single Page One", 1.0, 2.0)
+	seedMarkupTracker(t, db, "Single Page Two", 1.0, 3.0)
+
+	html := getMarkup(t, app, "/dashboard/trackers?status=all&profile=profile1")
+
+	if !strings.Contains(html, "2 results") {
+		t.Fatalf("expected the result count on a single page")
+	}
+	if !strings.Contains(html, `class="pagination-site-links"`) {
+		t.Fatalf("expected the connector shortcut row on a single page")
+	}
+	if strings.Contains(html, "pagination__group") || strings.Contains(html, "pagination--bottom") {
+		t.Fatalf("expected no page buttons when everything fits on one page")
+	}
+}
+
 // The edit form sends back the chapter numbers it opened with next to the
 // editable ones, so the save can tell a number the user changed from one the
 // poller advanced while the form was open. The two must render from the same
