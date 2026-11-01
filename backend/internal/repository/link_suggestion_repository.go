@@ -39,7 +39,7 @@ type LinkSuggestion struct {
 }
 
 // LinkScanTarget is a tracker a scan should look up on a source: it has no
-// link to that source yet, no accepted suggestion, and was not dismissed.
+// link to that source yet and was not dismissed.
 type LinkScanTarget struct {
 	TrackerID          int64
 	Title              string
@@ -86,8 +86,17 @@ type LinkScanFilter struct {
 }
 
 // linkableTrackersQuery selects a profile's trackers that still lack the given
-// source: not their primary, not already linked, not dismissed, no accepted
-// suggestion — narrowed by the filter.
+// source: not their primary, not already linked, not dismissed — narrowed by
+// the filter.
+//
+// An accepted suggestion does not exclude a tracker on its own. Accepting
+// always writes the link row in the same transaction, so while the link exists
+// the tracker_sources clause already keeps it out; the accepted row only
+// mattered once the user removed that link in the edit form (a wrong match),
+// and then it hid the tracker from every later scan and from the queue's
+// manual-link fallback for good. The accepted row still keeps that wrong URL
+// from coming back as a candidate: the scan skips decided URLs and the upsert
+// never reopens one.
 func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilter) (string, []any) {
 	query := `
 	SELECT t.id, t.title, t.related_titles, t.status, t.source_id, t.source_url,
@@ -102,7 +111,7 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 	  AND NOT EXISTS (
 	      SELECT 1 FROM source_link_suggestions marker
 	      WHERE marker.tracker_id = t.id AND marker.source_id = ?
-	        AND marker.status IN ('dismissed', 'accepted')
+	        AND marker.status = 'dismissed'
 	  )
 `
 	args := []any{sourceID, sourceID, profileID, sourceID}
@@ -179,8 +188,14 @@ func (r *LinkSuggestionRepository) ListScanTargets(ctx context.Context, profileI
 }
 
 // ReplacePendingSuggestions swaps a tracker's pending candidates for the given
-// set. Decided rows are untouched, and a candidate that was already rejected
-// stays rejected — the insert skips it rather than resurrecting it.
+// set. Decided rows are untouched, and a candidate that was already decided
+// stays decided — the upsert leaves it alone rather than resurrecting it.
+//
+// A candidate that is still in the set keeps its row and therefore its id. The
+// review cards post that id, and a rescan runs while the old queue is still on
+// screen, in the same title order: deleting and re-inserting every pending
+// row gave the cards the user was about to click new ids behind their back,
+// and each Accept or Reject then answered "not found".
 func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context, trackerID int64, sourceID int64, suggestions []LinkSuggestion) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -188,10 +203,26 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `
+	keep := make([]string, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		if candidateURL := strings.TrimSpace(suggestion.CandidateURL); candidateURL != "" {
+			keep = append(keep, candidateURL)
+		}
+	}
+
+	// Only the candidates the scan no longer reports go. An empty set clears
+	// them all with its own statement: "NOT IN ()" is not valid SQL.
+	deleteQuery := `
 		DELETE FROM source_link_suggestions
-		WHERE tracker_id = ? AND source_id = ? AND status = 'pending'
-	`, trackerID, sourceID); err != nil {
+		WHERE tracker_id = ? AND source_id = ? AND status = 'pending'`
+	deleteArgs := []any{trackerID, sourceID}
+	if len(keep) > 0 {
+		deleteQuery += ` AND candidate_url NOT IN (` + sqlPlaceholders(len(keep)) + `)`
+		for _, candidateURL := range keep {
+			deleteArgs = append(deleteArgs, candidateURL)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, deleteQuery, deleteArgs...); err != nil {
 		return fmt.Errorf("delete pending suggestions: %w", err)
 	}
 
@@ -205,11 +236,18 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 				(tracker_id, source_id, candidate_url, candidate_item_id, candidate_title,
 				 candidate_cover_url, candidate_latest_chapter, candidate_release_at, score, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-			ON CONFLICT(tracker_id, source_id, candidate_url) DO NOTHING
+			ON CONFLICT(tracker_id, source_id, candidate_url) DO UPDATE SET
+				candidate_item_id = excluded.candidate_item_id,
+				candidate_title = excluded.candidate_title,
+				candidate_cover_url = excluded.candidate_cover_url,
+				candidate_latest_chapter = excluded.candidate_latest_chapter,
+				candidate_release_at = excluded.candidate_release_at,
+				score = excluded.score
+			WHERE source_link_suggestions.status = 'pending'
 		`, trackerID, sourceID, candidateURL, suggestion.CandidateItemID, suggestion.CandidateTitle,
 			suggestion.CandidateCoverURL, suggestion.CandidateLatestChapter, suggestion.CandidateReleaseAt,
 			suggestion.Score); err != nil {
-			return fmt.Errorf("insert suggestion: %w", err)
+			return fmt.Errorf("upsert suggestion: %w", err)
 		}
 	}
 
@@ -217,6 +255,36 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 		return fmt.Errorf("commit replace pending suggestions tx: %w", err)
 	}
 	return nil
+}
+
+// DecidedCandidateURLs returns the candidate URLs the user already accepted or
+// rejected for a tracker on a source. The scan skips them before ranking: the
+// store would refuse to reopen them anyway, but only after they had taken the
+// top slots, so the next-best hits — often the right series — never reached
+// the queue.
+func (r *LinkSuggestionRepository) DecidedCandidateURLs(ctx context.Context, trackerID int64, sourceID int64) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT candidate_url FROM source_link_suggestions
+		WHERE tracker_id = ? AND source_id = ? AND status IN ('accepted', 'rejected')
+		  AND candidate_url != ''
+	`, trackerID, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("list decided candidate urls: %w", err)
+	}
+	defer rows.Close()
+
+	urls := make([]string, 0)
+	for rows.Next() {
+		var candidateURL string
+		if err := rows.Scan(&candidateURL); err != nil {
+			return nil, fmt.Errorf("scan decided candidate url: %w", err)
+		}
+		urls = append(urls, candidateURL)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate decided candidate urls: %w", err)
+	}
+	return urls, nil
 }
 
 // ListReviewQueue returns every tracker of the profile that still lacks the

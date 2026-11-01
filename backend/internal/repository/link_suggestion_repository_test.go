@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -258,6 +259,173 @@ func TestAcceptedSuggestionRemovesTrackerFromQueueOnceLinked(t *testing.T) {
 	}
 	if len(targets) != 0 {
 		t.Fatalf("scan targets after accept = %+v, want empty", targets)
+	}
+}
+
+// TestRescanKeepsSurvivingCandidateIDs pins that a rescan updates a candidate
+// it reports again in place: the review cards on screen post that row's id, so
+// a fresh id per scan turned every click on an already-rescanned card into a
+// "not found".
+func TestRescanKeepsSurvivingCandidateIDs(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	comick := sourceIDByKey(t, db, "comick")
+	trackerID := seedLinkTracker(t, db, "series")
+
+	const (
+		survivorURL = "https://comick.io/comic/survivor"
+		droppedURL  = "https://comick.io/comic/dropped"
+		newURL      = "https://comick.io/comic/new"
+		rejectedURL = "https://comick.io/comic/rejected"
+	)
+	readRow := func(url string) (id int64, title string, score float64, status string, found bool) {
+		t.Helper()
+		err := db.QueryRow(`
+			SELECT id, candidate_title, score, status FROM source_link_suggestions
+			WHERE tracker_id = ? AND source_id = ? AND candidate_url = ?
+		`, trackerID, comick, url).Scan(&id, &title, &score, &status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", 0, "", false
+		}
+		if err != nil {
+			t.Fatalf("read suggestion %q: %v", url, err)
+		}
+		return id, title, score, status, true
+	}
+
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, survivorURL, "Old Title", 0.6),
+		pendingSuggestion(trackerID, comick, droppedURL, "Dropped", 0.5),
+		pendingSuggestion(trackerID, comick, rejectedURL, "Rejected", 0.4),
+	}); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	survivorID, _, _, _, _ := readRow(survivorURL)
+	rejectedID, _, _, _, _ := readRow(rejectedURL)
+	if err := repo.DecideSuggestion(context.Background(), 1, rejectedID, repository.LinkSuggestionRejected); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, survivorURL, "New Title", 0.9),
+		pendingSuggestion(trackerID, comick, newURL, "New", 0.7),
+		pendingSuggestion(trackerID, comick, rejectedURL, "Rejected Again", 0.8),
+	}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	id, title, score, status, found := readRow(survivorURL)
+	if !found || id != survivorID {
+		t.Fatalf("surviving candidate id = %d (found %v), want the original %d", id, found, survivorID)
+	}
+	if title != "New Title" || score != 0.9 || status != repository.LinkSuggestionPending {
+		t.Fatalf("surviving candidate = %q %v %q, want the rescan's title and score, still pending", title, score, status)
+	}
+	if _, _, _, _, found := readRow(droppedURL); found {
+		t.Fatal("a candidate the rescan no longer reports is still stored")
+	}
+	if _, _, _, status, found := readRow(newURL); !found || status != repository.LinkSuggestionPending {
+		t.Fatalf("new candidate found=%v status=%q, want a pending row", found, status)
+	}
+	if _, title, _, status, _ := readRow(rejectedURL); status != repository.LinkSuggestionRejected || title != "Rejected" {
+		t.Fatalf("rejected candidate = %q %q, want it left rejected and untouched", title, status)
+	}
+
+	// A rescan that finds nothing clears every pending candidate and still
+	// leaves the decided one alone.
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, nil); err != nil {
+		t.Fatalf("empty rescan: %v", err)
+	}
+	var pending int
+	if err := db.QueryRow(`
+		SELECT COUNT(1) FROM source_link_suggestions
+		WHERE tracker_id = ? AND source_id = ? AND status = 'pending'
+	`, trackerID, comick).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending candidates after an empty rescan = %d, want 0", pending)
+	}
+	if _, _, _, status, found := readRow(rejectedURL); !found || status != repository.LinkSuggestionRejected {
+		t.Fatalf("an empty rescan touched the rejected candidate: found=%v status=%q", found, status)
+	}
+}
+
+// TestUnlinkedAcceptedTrackerReturnsToReview covers a wrong match accepted in
+// Link Review and then unlinked in the edit form: the tracker must come back to
+// that source's scan and queue, while the accepted URL stays out of the
+// candidates.
+func TestUnlinkedAcceptedTrackerReturnsToReview(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	comick := sourceIDByKey(t, db, "comick")
+	trackerID := seedLinkTracker(t, db, "series")
+
+	const (
+		wrongURL   = "https://comick.io/comic/wrong"
+		siblingURL = "https://comick.io/comic/sibling"
+		freshURL   = "https://comick.io/comic/fresh"
+	)
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, wrongURL, "Series", 1.0),
+		pendingSuggestion(trackerID, comick, siblingURL, "Series Side Story", 0.6),
+	}); err != nil {
+		t.Fatalf("store suggestions: %v", err)
+	}
+	var wrongID int64
+	if err := db.QueryRow(`SELECT id FROM source_link_suggestions WHERE candidate_url = ?`, wrongURL).Scan(&wrongID); err != nil {
+		t.Fatalf("look up candidate: %v", err)
+	}
+	if accepted, err := repo.AcceptSuggestion(context.Background(), 1, wrongID); err != nil || accepted == nil {
+		t.Fatalf("accept: %+v err=%v", accepted, err)
+	}
+
+	// What saving the edit form without that link does to tracker_sources.
+	if _, err := db.Exec(`DELETE FROM tracker_sources WHERE tracker_id = ? AND source_id = ?`, trackerID, comick); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+
+	targets, err := repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{})
+	if err != nil {
+		t.Fatalf("list scan targets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].TrackerID != trackerID {
+		t.Fatalf("scan targets after unlinking = %+v, want the tracker back", targets)
+	}
+	queue, err := repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(queue) != 1 || queue[0].TrackerID != trackerID || len(queue[0].Suggestions) != 0 {
+		t.Fatalf("queue after unlinking = %+v, want the tracker with no candidates", queue)
+	}
+
+	// The next scan reports the wrong URL again next to a new one: only the
+	// new one becomes a candidate.
+	if err := repo.ReplacePendingSuggestions(context.Background(), trackerID, comick, []repository.LinkSuggestion{
+		pendingSuggestion(trackerID, comick, wrongURL, "Series", 1.0),
+		pendingSuggestion(trackerID, comick, freshURL, "Series", 0.9),
+	}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	queue, err = repo.ListReviewQueue(context.Background(), 1, comick, repository.LinkScanFilter{})
+	if err != nil {
+		t.Fatalf("list queue after rescan: %v", err)
+	}
+	if len(queue) != 1 || len(queue[0].Suggestions) != 1 || queue[0].Suggestions[0].CandidateURL != freshURL {
+		t.Fatalf("queue after rescan = %+v, want only the fresh candidate", queue)
+	}
+
+	decided, err := repo.DecidedCandidateURLs(context.Background(), trackerID, comick)
+	if err != nil {
+		t.Fatalf("decided urls: %v", err)
+	}
+	got := map[string]bool{}
+	for _, url := range decided {
+		got[url] = true
+	}
+	if len(decided) != 2 || !got[wrongURL] || !got[siblingURL] {
+		t.Fatalf("decided urls = %v, want the accepted and the rejected candidate only", decided)
 	}
 }
 
