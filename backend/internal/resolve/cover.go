@@ -171,8 +171,12 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 		return "", "", false
 	}
 
+	// Captured now rather than when the fetch gets its slot: an
+	// InvalidateNegatives that lands while it waits in the queue voids its "no
+	// cover" just the same.
+	generation := r.cache.currentGeneration()
 	r.queue.run(cacheKey, r.semFor(trimmedSourceKey), pageKey, func(ctx context.Context) {
-		_, _ = r.fetch(ctx, trimmedSourceKey, sourceURL, sourceItemID, alternates)
+		_, _ = r.fetch(ctx, generation, trimmedSourceKey, sourceURL, sourceItemID, alternates)
 	})
 	return "", "", true
 }
@@ -180,10 +184,12 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 // InvalidateNegatives drops every remembered "no cover found". Called whenever
 // a tracker's linked sources change: an entry computed before a source was
 // attached would otherwise outlive the attachment by its whole TTL, which reads
-// as the new link not working. Found covers stay — a new link cannot make a
-// good cover worse.
+// as the new link not working. A fetch already queued or in flight tried the
+// links as they were, so its "no cover" is not written after this either (see
+// cacheNegative). Found covers stay — a new link cannot make a good cover
+// worse.
 func (r *CoverResolver) InvalidateNegatives() {
-	r.cache.dropWhere(func(entry coverEntry) bool { return !entry.Found })
+	r.cache.invalidateWhere(func(entry coverEntry) bool { return !entry.Found })
 
 	if r.store != nil {
 		if err := r.store.DeleteNegatives(r.queue.lifetime); err != nil {
@@ -204,8 +210,9 @@ func (r *CoverResolver) semFor(sourceKey string) chan struct{} {
 // fetch resolves a cover for a tracker, trying its primary source first and
 // then each alternate linked source. The result is cached under the primary
 // key either way, so a cover found on a mirror still serves the tracker whose
-// primary site is unreachable.
-func (r *CoverResolver) fetch(parent context.Context, sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef) (string, error) {
+// primary site is unreachable. generation is the cache's invalidation count
+// when the fetch was queued; see cacheNegative.
+func (r *CoverResolver) fetch(parent context.Context, generation uint64, sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceKey := strings.TrimSpace(sourceKey)
 	if trimmedSourceKey == "" {
 		return "", fmt.Errorf("missing source key")
@@ -221,7 +228,7 @@ func (r *CoverResolver) fetch(parent context.Context, sourceKey, sourceURL strin
 
 	resolvedURL := strings.TrimSpace(sourceURL)
 	if resolvedURL == "" {
-		r.cacheResult(cacheKey, "", false, jitteredTTL(lookupUnreachableTTL))
+		r.cacheNegative(generation, cacheKey, jitteredTTL(lookupUnreachableTTL))
 		return "", fmt.Errorf("missing source url")
 	}
 
@@ -272,7 +279,7 @@ func (r *CoverResolver) fetch(parent context.Context, sourceKey, sourceURL strin
 	if attempted {
 		negativeTTL = lookupRetryTTL
 	}
-	r.cacheResult(cacheKey, "", false, jitteredTTL(negativeTTL))
+	r.cacheNegative(generation, cacheKey, jitteredTTL(negativeTTL))
 	return "", fmt.Errorf("cover not found")
 }
 
@@ -422,6 +429,20 @@ func (r *CoverResolver) cacheResult(cacheKey, coverURL string, found bool, ttl t
 	r.cacheResultFromSource(cacheKey, coverURL, "", found, ttl)
 }
 
+// cacheNegative remembers that a fetch found no cover, unless
+// InvalidateNegatives ran since the fetch was queued at generation. The fetch
+// tried the links as they were before it, and its "no cover" landing afterwards
+// hid the source attached in between for the negative's whole TTL — exactly
+// what the invalidation exists to prevent. Found covers are written regardless
+// (acceptCover): a new link cannot make a good cover worse.
+func (r *CoverResolver) cacheNegative(generation uint64, cacheKey string, ttl time.Duration) {
+	entry := coverEntry{ExpiresAt: time.Now().UTC().Add(ttl)}
+	if !r.cache.putIfGeneration(generation, cacheKey, entry) {
+		return
+	}
+	r.persist(cacheKey, entry)
+}
+
 func (r *CoverResolver) cacheResultFromSource(cacheKey, coverURL, sourceKey string, found bool, ttl time.Duration) {
 	r.putEntry(cacheKey, coverEntry{
 		CoverURL:  coverURL,
@@ -446,20 +467,24 @@ func (r *CoverResolver) cacheLocal(cacheKey, coverURL, localPath, sourceKey stri
 
 func (r *CoverResolver) putEntry(cacheKey string, entry coverEntry) {
 	r.cache.put(cacheKey, entry)
+	r.persist(cacheKey, entry)
+}
 
-	// Write-through so the entry survives restarts; best-effort because a
-	// failed persist only costs a re-resolve after the next restart.
-	if r.store != nil {
-		if err := r.store.Upsert(r.queue.lifetime, repository.CoverCacheRow{
-			CacheKey:  cacheKey,
-			CoverURL:  entry.CoverURL,
-			SourceKey: entry.SourceKey,
-			Found:     entry.Found,
-			ExpiresAt: entry.ExpiresAt,
-			LocalPath: entry.LocalPath,
-		}); err != nil {
-			slog.Debug("cover cache persist failed", "error", err)
-		}
+// persist writes an entry through so it survives restarts; best-effort because
+// a failed persist only costs a re-resolve after the next restart.
+func (r *CoverResolver) persist(cacheKey string, entry coverEntry) {
+	if r.store == nil {
+		return
+	}
+	if err := r.store.Upsert(r.queue.lifetime, repository.CoverCacheRow{
+		CacheKey:  cacheKey,
+		CoverURL:  entry.CoverURL,
+		SourceKey: entry.SourceKey,
+		Found:     entry.Found,
+		ExpiresAt: entry.ExpiresAt,
+		LocalPath: entry.LocalPath,
+	}); err != nil {
+		slog.Debug("cover cache persist failed", "error", err)
 	}
 }
 

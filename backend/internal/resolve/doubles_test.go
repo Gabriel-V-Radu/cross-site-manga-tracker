@@ -102,6 +102,87 @@ func (l linkableCappedConnector) BuildChapterURL(rawURL string, chapter float64)
 	return rawURL + "/read/chapter-" + strconv.FormatFloat(chapter, 'f', -1, 64), true
 }
 
+// gatedConnector holds every resolve until the test closes release, so a test
+// can act while a background fetch is provably in flight. Released, it answers
+// the way mirrorConnector does, or fails the way blockedConnector does when
+// fail is set.
+type gatedConnector struct {
+	siteTier
+	key     string
+	fail    bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func newGatedConnector(key string, fail bool) *gatedConnector {
+	return &gatedConnector{key: key, fail: fail, started: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (g *gatedConnector) Key() string                       { return g.key }
+func (g *gatedConnector) Name() string                      { return g.key }
+func (g *gatedConnector) Kind() string                      { return connectors.KindNative }
+func (g *gatedConnector) HealthCheck(context.Context) error { return nil }
+func (g *gatedConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+
+func (g *gatedConnector) wait(ctx context.Context) error {
+	select {
+	case g.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if g.fail {
+		return errors.New("behind a browser challenge")
+	}
+	return nil
+}
+
+func (g *gatedConnector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
+	if err := g.wait(ctx); err != nil {
+		return nil, err
+	}
+	return &connectors.MangaResult{SourceKey: g.key, URL: rawURL, CoverImageURL: "https://cdn.example/" + g.key + ".webp"}, nil
+}
+
+func (g *gatedConnector) ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error) {
+	if err := g.wait(ctx); err != nil {
+		return "", err
+	}
+	return rawURL + "/chapter-" + strconv.FormatFloat(chapter, 'f', -1, 64), nil
+}
+
+func waitGateStarted(t *testing.T, connector *gatedConnector) {
+	t.Helper()
+	select {
+	case <-connector.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background fetch never reached the connector")
+	}
+}
+
+// waitQueueIdle waits until no background fetch is queued or running. The
+// in-flight mark is cleared only after the work returns, so once the queue is
+// idle every released fetch has written its answer, or declined to.
+func waitQueueIdle(t *testing.T, queue *fetchQueue) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		queue.mu.Lock()
+		idle := len(queue.inFlight) == 0
+		queue.mu.Unlock()
+		if idle {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the background fetches never finished")
+}
+
 // newCoverTestResolver builds a cover resolver that never touches an image
 // host: the injected checker stands in for the download, which is what these
 // tests would otherwise aim at whatever CDN a fixture names.

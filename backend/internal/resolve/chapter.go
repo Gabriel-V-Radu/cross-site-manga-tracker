@@ -90,7 +90,7 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 		return trimmedSourceURL, false, false
 	}
 
-	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
+	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	if cachedChapterURL, found, ok := r.cached(cacheKey); ok {
 		if found {
 			return cachedChapterURL, true, false
@@ -98,8 +98,11 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 		return trimmedSourceURL, false, false
 	}
 
+	// Captured now rather than when the resolve gets its slot: an Invalidate
+	// that lands while it waits in the queue voids its answer just the same.
+	generation := r.cache.currentGeneration()
 	r.queue.run(cacheKey, r.sem, pageKey, func(ctx context.Context) {
-		_, _ = r.fetch(ctx, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
+		_, _ = r.fetch(ctx, generation, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	})
 	return trimmedSourceURL, false, true
 }
@@ -107,7 +110,9 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 // Invalidate drops every remembered chapter link. Called whenever a tracker's
 // linked sources or reading pin change: a "no link found" computed before a
 // source was attached would otherwise outlive the attachment by its whole TTL,
-// which reads as the new link not working.
+// which reads as the new link not working. A resolve already queued or in
+// flight was working from the links as they were, so it no longer writes its
+// answer either (see fetch's generation).
 func (r *ChapterLinkResolver) Invalidate() {
 	r.cache.reset()
 }
@@ -125,7 +130,10 @@ func (r *ChapterLinkResolver) Invalidate() {
 // unverified link there beats a verified one on the floor. Third, the info-floor
 // sites (ComicK): they always carry the chapter page, but nobody wants to read
 // there, so they only serve when nothing else could.
-func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
+//
+// generation is the cache's invalidation count when the resolve was queued. The
+// answer is only written while it still holds; see Invalidate.
+func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", fmt.Errorf("missing source url")
@@ -136,12 +144,20 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL st
 		return trimmedSourceURL, nil
 	}
 
-	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter)
+	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	if cachedChapterURL, found, ok := r.cached(cacheKey); ok {
 		if found {
 			return cachedChapterURL, nil
 		}
 		return trimmedSourceURL, fmt.Errorf("chapter url not found")
+	}
+
+	// An Invalidate ran while this resolve waited for its slot, so nothing it
+	// finds could be written. Asking the sites anyway would spend requests on
+	// an answer that is thrown away; the card's next render queues one that
+	// counts.
+	if r.cache.currentGeneration() != generation {
+		return trimmedSourceURL, fmt.Errorf("chapter links invalidated while queued")
 	}
 
 	// Primary source first, then the tracker's other linked sources, reordered
@@ -213,7 +229,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL st
 		}
 
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(cacheKey, chapterURL, true, verifiedChapterTTL)
+			r.cacheResult(generation, cacheKey, chapterURL, true, verifiedChapterTTL)
 			return chapterURL, nil
 		}
 	}
@@ -224,7 +240,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL st
 	// rather than a day later.
 	for _, candidate := range blocked {
 		if built, buildOK := candidate.linker.BuildChapterURL(candidate.url, chapter); buildOK && strings.TrimSpace(built) != "" {
-			r.cacheResult(cacheKey, built, true, jitteredTTL(lookupRetryTTL))
+			r.cacheResult(generation, cacheKey, built, true, jitteredTTL(lookupRetryTTL))
 			return built, nil
 		}
 	}
@@ -251,7 +267,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL st
 			continue
 		}
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(cacheKey, chapterURL, true, floorTTL)
+			r.cacheResult(generation, cacheKey, chapterURL, true, floorTTL)
 			return chapterURL, nil
 		}
 	}
@@ -260,7 +276,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, sourceKey, sourceURL st
 	if attempted {
 		negativeTTL = lookupRetryTTL
 	}
-	r.cacheResult(cacheKey, "", false, jitteredTTL(negativeTTL))
+	r.cacheResult(generation, cacheKey, "", false, jitteredTTL(negativeTTL))
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no usable source")
 	}
@@ -326,8 +342,35 @@ func (r *ChapterLinkResolver) connectorForKey(sourceKey string) (connectors.Conn
 	return r.registry.Get(strings.TrimSpace(sourceKey))
 }
 
-func chapterCacheKey(sourceKey, sourceURL string, chapter float64) string {
-	return strings.ToLower(strings.TrimSpace(sourceKey)) + "|" + strings.ToLower(strings.TrimSpace(sourceURL)) + "|" + strconv.FormatFloat(chapter, 'f', -1, 64)
+// chapterCacheKey names one chapter-link question by everything its answer
+// depends on: the primary, the chapter, and the alternates the chain picks
+// from. Keyed on the primary alone, one question's answer served another: a
+// pin to the primary (which passes no alternates) read the auto chain's
+// MangaHub link, and a profile tracking the same primary URL without Asura
+// linked handed its ComicK floor answer to the profile that has Asura, for the
+// floor's whole 12 hours. The alternates keep their incoming order rather than
+// being sorted, because orderReaderCandidates keeps that order between sources
+// of equal rank, so it is part of the question too.
+func chapterCacheKey(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) string {
+	var key strings.Builder
+	key.WriteString(strings.ToLower(strings.TrimSpace(sourceKey)))
+	key.WriteString("|")
+	key.WriteString(strings.ToLower(strings.TrimSpace(sourceURL)))
+	key.WriteString("|")
+	key.WriteString(strconv.FormatFloat(chapter, 'f', -1, 64))
+	for _, alternate := range alternates {
+		alternateKey := strings.TrimSpace(alternate.SourceKey)
+		alternateURL := strings.TrimSpace(alternate.SourceURL)
+		// fetch skips these as well, so they cannot change the answer.
+		if alternateKey == "" || alternateURL == "" {
+			continue
+		}
+		key.WriteString("|")
+		key.WriteString(strings.ToLower(alternateKey))
+		key.WriteString("=")
+		key.WriteString(strings.ToLower(alternateURL))
+	}
+	return key.String()
 }
 
 func (r *ChapterLinkResolver) cached(cacheKey string) (chapterURL string, found bool, ok bool) {
@@ -345,8 +388,10 @@ func (r *ChapterLinkResolver) cached(cacheKey string) (chapterURL string, found 
 	return entry.ChapterURL, entry.Found, true
 }
 
-func (r *ChapterLinkResolver) cacheResult(cacheKey, chapterURL string, found bool, ttl time.Duration) {
-	r.cache.put(cacheKey, chapterEntry{
+// cacheResult writes a resolve's answer unless an Invalidate ran since the
+// resolve was queued at generation.
+func (r *ChapterLinkResolver) cacheResult(generation uint64, cacheKey, chapterURL string, found bool, ttl time.Duration) {
+	r.cache.putIfGeneration(generation, cacheKey, chapterEntry{
 		ChapterURL: chapterURL,
 		Found:      found,
 		ExpiresAt:  time.Now().UTC().Add(ttl),

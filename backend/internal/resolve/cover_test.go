@@ -62,7 +62,7 @@ func TestFetchCoverURLFallsBackToAlternate(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	coverURL, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, alternates)
+	coverURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", nil, alternates)
 	if err != nil {
 		t.Fatalf("expected the alternate to supply a cover: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestFetchCoverURLRecordsServingSource(t *testing.T) {
 		{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	if _, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, alternates); err != nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", nil, alternates); err != nil {
 		t.Fatalf("expected the alternate to supply a cover: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestFetchCoverURLRecordsPrimaryWhenItServes(t *testing.T) {
 
 	resolver := newCoverTestResolver(t, registry)
 
-	if _, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil); err != nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", nil, nil); err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestFetchCoverURLSkipsUnloadableCovers(t *testing.T) {
 		{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	coverURL, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", nil, alternates)
+	coverURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", nil, alternates)
 	if err != nil {
 		t.Fatalf("expected the alternate's loadable cover: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestFetchCoverURLAllCoversUnloadableCachesNegative(t *testing.T) {
 	})
 	t.Cleanup(resolver.Close)
 
-	if _, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", nil, nil); err == nil {
 		t.Fatalf("expected an error when no cover loads")
 	}
 	entry := negativeCoverEntry(t, resolver, coverCacheKey("primarysource", "https://primary.example/title/a", nil))
@@ -207,7 +207,7 @@ func TestFetchCoverURLWithoutAlternatesStillFails(t *testing.T) {
 
 	resolver := newCoverTestResolver(t, registry)
 
-	if _, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", nil, nil); err == nil {
 		t.Fatalf("expected an error when the only source is blocked")
 	}
 }
@@ -237,7 +237,7 @@ func TestFetchCoverURLNegativeCacheSplitsAttemptFromUnusable(t *testing.T) {
 
 	resolver := newCoverTestResolver(t, registry)
 
-	if _, err := resolver.fetch(context.Background(), "blockedsource", "https://blocked.example/title/a", nil, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", nil, nil); err == nil {
 		t.Fatalf("expected an error when the only source is blocked")
 	}
 	attempted := negativeCoverEntry(t, resolver, coverCacheKey("blockedsource", "https://blocked.example/title/a", nil))
@@ -245,7 +245,7 @@ func TestFetchCoverURLNegativeCacheSplitsAttemptFromUnusable(t *testing.T) {
 		t.Fatalf("expected the retry negative TTL after a real attempt, got %s", remaining)
 	}
 
-	if _, err := resolver.fetch(context.Background(), "nosuchsource", "https://nowhere.example/title/a", nil, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "nosuchsource", "https://nowhere.example/title/a", nil, nil); err == nil {
 		t.Fatalf("expected an error for an unregistered connector")
 	}
 	unusable := negativeCoverEntry(t, resolver, coverCacheKey("nosuchsource", "https://nowhere.example/title/a", nil))
@@ -340,7 +340,7 @@ func TestFetchCoverURLStoresLocalCopy(t *testing.T) {
 
 	resolver := newLocalCoverResolver(t, registry)
 
-	served, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil)
+	served, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", nil, nil)
 	if err != nil {
 		t.Fatalf("fetch cover: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestFetchCoverURLKeepsCoverArtOfAnyShape(t *testing.T) {
 
 	resolver := newLocalCoverResolver(t, registry)
 
-	served, err := resolver.fetch(context.Background(), "onlysource", "https://only.example/title/a", nil, nil)
+	served, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "onlysource", "https://only.example/title/a", nil, nil)
 	if err != nil {
 		t.Fatalf("a landscape cover on the only source must still be served: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestFetchCoverURLRejectsNonImageBodies(t *testing.T) {
 
 	resolver := newLocalCoverResolver(t, registry)
 
-	if _, err := resolver.fetch(context.Background(), "primarysource", "https://primary.example/title/a", nil, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", nil, nil); err == nil {
 		t.Fatalf("expected a non-image body to be rejected")
 	}
 	files, err := os.ReadDir(resolver.dir)
@@ -479,5 +479,46 @@ func TestCachedLocalCoverIgnoresExpiry(t *testing.T) {
 	resolver.cache.sweepExpired(time.Now().UTC())
 	if _, stillThere := resolver.cache.get(cacheKey); !stillThere {
 		t.Fatalf("expected the sweep to spare an entry whose file is the cache")
+	}
+}
+
+// TestInvalidateNegativesVoidsANegativeAlreadyInFlight pins the cover side of
+// the invalidation race: a fetch in flight when the links changed tried them as
+// they were, and its "no cover" landing after InvalidateNegatives hid the new
+// link for the negative's whole TTL. A cover it did find still lands — a new
+// link cannot make a good cover worse.
+func TestInvalidateNegativesVoidsANegativeAlreadyInFlight(t *testing.T) {
+	tests := []struct {
+		name      string
+		fail      bool
+		wantEntry bool
+	}{
+		{name: "a no-cover answer is not written", fail: true, wantEntry: false},
+		{name: "a found cover is still written", fail: false, wantEntry: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := connectors.NewRegistry()
+			connector := newGatedConnector("gatedsource", test.fail)
+			if err := registry.Register(connector); err != nil {
+				t.Fatalf("register gated connector: %v", err)
+			}
+			resolver := newCoverTestResolver(t, registry)
+
+			const sourceURL = "https://gated.example/title/a"
+			if _, _, waiting := resolver.Lookup("gatedsource", sourceURL, nil, nil, ""); !waiting {
+				t.Fatal("expected a background fetch to be queued")
+			}
+			waitGateStarted(t, connector)
+
+			resolver.InvalidateNegatives()
+			close(connector.release)
+			waitQueueIdle(t, resolver.queue)
+
+			entry, exists := resolver.cache.get(coverCacheKey("gatedsource", sourceURL, nil))
+			if exists != test.wantEntry || (exists && !entry.Found) {
+				t.Fatalf("expected an entry=%v holding a found cover, got exists=%v %+v", test.wantEntry, exists, entry)
+			}
+		})
 	}
 }

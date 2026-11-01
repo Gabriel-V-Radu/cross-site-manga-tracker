@@ -50,6 +50,12 @@ type cacheEntry interface {
 type resultCache[V cacheEntry] struct {
 	mu      sync.RWMutex
 	entries map[string]V
+	// generation counts invalidations. A background fetch reads it when it is
+	// queued and writes through putIfGeneration, which refuses once an
+	// invalidation has run since: the fetch was working from the links as they
+	// were before it, and landing its answer afterwards restored exactly what
+	// the invalidation had just dropped, for that answer's whole TTL.
+	generation uint64
 }
 
 func newResultCache[V cacheEntry]() *resultCache[V] {
@@ -69,6 +75,27 @@ func (c *resultCache[V]) put(key string, entry V) {
 	c.mu.Unlock()
 }
 
+// currentGeneration is what a fetch captures when it is queued, to hand back to
+// putIfGeneration with its answer.
+func (c *resultCache[V]) currentGeneration() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.generation
+}
+
+// putIfGeneration stores entry only while no invalidation has run since
+// generation was read, and reports whether it did. The check holds the same
+// write lock the invalidations take, so none can land between it and the write.
+func (c *resultCache[V]) putIfGeneration(generation uint64, key string, entry V) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != generation {
+		return false
+	}
+	c.entries[key] = entry
+	return true
+}
+
 // dropIf removes key only while match still holds for the entry under the
 // write lock, and reports whether it did. Expiry is decided on a read under the
 // read lock; between that read and the delete a background fetch can have put
@@ -86,20 +113,37 @@ func (c *resultCache[V]) dropIf(key string, match func(V) bool) bool {
 	return true
 }
 
+// reset drops every entry, and counts as an invalidation.
 func (c *resultCache[V]) reset() {
 	c.mu.Lock()
 	c.entries = make(map[string]V)
+	c.generation++
 	c.mu.Unlock()
 }
 
 func (c *resultCache[V]) dropWhere(match func(V) bool) {
 	c.mu.Lock()
+	c.dropMatchingLocked(match)
+	c.mu.Unlock()
+}
+
+// invalidateWhere is dropWhere counted as an invalidation, for a caller whose
+// drop means "what was worked out before now is suspect". The expiry sweep
+// keeps the plain dropWhere: an entry running out its TTL says nothing about a
+// fetch in flight, and counting it would void every one of them each sweep.
+func (c *resultCache[V]) invalidateWhere(match func(V) bool) {
+	c.mu.Lock()
+	c.dropMatchingLocked(match)
+	c.generation++
+	c.mu.Unlock()
+}
+
+func (c *resultCache[V]) dropMatchingLocked(match func(V) bool) {
 	for key, entry := range c.entries {
 		if match(entry) {
 			delete(c.entries, key)
 		}
 	}
-	c.mu.Unlock()
 }
 
 // sweepExpired only removes entries that already read as misses, so it cannot
