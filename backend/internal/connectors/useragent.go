@@ -16,6 +16,10 @@ const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 // its bot challenge since 2026-11 — "if this isn't a browser, don't send a
 // browser UA" — while any non-browser agent gets the JSON. An empty agent is
 // refused with a 400, so one has to be sent.
+//
+// A real browser does not get through either: its requests land on the same
+// challenge (a JavaScript "Browser verification" page), which an <img> tag
+// cannot pass, so a cover hotlinked from uploads.mangadex.org renders broken.
 const AppUserAgent = "cross-site-tracker/1.0"
 
 // appUserAgentHosts are the hosts (subdomains included) that get AppUserAgent
@@ -25,10 +29,18 @@ var appUserAgentHosts = []string{"mangadex.org"}
 // UserAgentFor picks the User-Agent a request to host should carry: the
 // browser one by default, the honest one for the hosts that challenge it.
 func UserAgentFor(host string) string {
-	if HostAllowed(host, appUserAgentHosts) {
+	if ChallengesBrowsers(host) {
 		return AppUserAgent
 	}
 	return BrowserUserAgent
+}
+
+// ChallengesBrowsers reports whether host answers a browser with its bot
+// challenge. The reader's own browser cannot load an image from such a host, so
+// the dashboard relays those covers through the server instead of hotlinking
+// them.
+func ChallengesBrowsers(host string) bool {
+	return HostAllowed(host, appUserAgentHosts)
 }
 
 // BrowserSecChUA is the Sec-Ch-Ua client-hints header that matches

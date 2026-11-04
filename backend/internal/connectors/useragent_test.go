@@ -21,5 +21,8 @@ func TestUserAgentForMangaDexIsHonest(t *testing.T) {
 		if got := UserAgentFor(host); got != want {
 			t.Errorf("UserAgentFor(%q) = %q, want %q", host, got, want)
 		}
+		if got := ChallengesBrowsers(host); got != (want == AppUserAgent) {
+			t.Errorf("ChallengesBrowsers(%q) = %v, disagrees with UserAgentFor", host, got)
+		}
 	}
 }

@@ -46,7 +46,7 @@
     <div class="link-card__candidates">
         {{range .Suggestions}}
         <div class="link-candidate">
-            {{if .CoverURL}}<img class="link-candidate__cover" src="{{.CoverURL}}" alt="" loading="lazy">{{end}}
+            {{if .CoverURL}}<img class="link-candidate__cover" src="{{coverSrc .CoverURL}}" alt="" loading="lazy">{{end}}
             <div class="link-candidate__body">
                 <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></p>
                 <p class="link-candidate__meta">

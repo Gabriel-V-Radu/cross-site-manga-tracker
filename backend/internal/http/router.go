@@ -121,6 +121,7 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	app.Post("/dashboard/links/accept-exact", dashboard.AcceptExactLinkMatches)
 	app.Get("/dashboard/trackers", dashboard.TrackersPartial)
 	app.Get("/dashboard/trackers/search", dashboard.SearchSourceTitles)
+	app.Get("/dashboard/remote-cover", dashboard.RemoteCover)
 	app.Get("/dashboard/trackers/source-chapter", dashboard.ResolveSourceChapter)
 	app.Get("/dashboard/trackers/empty-modal", dashboard.EmptyModal)
 	app.Get("/dashboard/trackers/new", dashboard.NewTrackerModal)

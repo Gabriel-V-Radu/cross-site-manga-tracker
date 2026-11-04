@@ -120,7 +120,7 @@ before, so a one-line change to a card meant editing it in five places.
 
     <div class="tracker-card__cover">
         {{if .CoverURL}}
-        <img src="{{.CoverURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
+        <img src="{{coverSrc .CoverURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
         {{else}}
         <div class="tracker-card__cover-title">{{.Title}}</div>
         {{end}}

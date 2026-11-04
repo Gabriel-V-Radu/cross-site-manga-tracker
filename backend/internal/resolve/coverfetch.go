@@ -169,36 +169,8 @@ const coverDownloadLimit = 8 << 20
 // the real title art for their series. The guard only ever produced cards with
 // no art at all, which is worse than art of an unusual shape.
 func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (string, bool) {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
-	if err != nil {
-		return "", false
-	}
-	req.Header.Set("User-Agent", connectors.UserAgentFor(req.URL.Hostname()))
-	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
-
-	res, err := r.client.Do(req)
-	if err != nil {
-		slog.Debug("cover download failed", "url", coverURL, "error", err)
-		return "", false
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
-		return "", false
-	}
-
-	body, err := io.ReadAll(io.LimitReader(res.Body, coverDownloadLimit+1))
-	if err != nil || len(body) == 0 || len(body) > coverDownloadLimit {
-		return "", false
-	}
-
-	ext := coverFileExt(res.Header.Get("Content-Type"), body)
-	if ext == "" {
-		// Not recognizably an image — an HTML challenge page, a CDN error
-		// body. Caching it would serve garbage forever.
+	body, ext, ok := r.download(parent, coverURL)
+	if !ok {
 		return "", false
 	}
 
@@ -229,6 +201,53 @@ func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (s
 		}
 	}
 	return name, true
+}
+
+// FetchImage downloads a cover for a caller that serves it on itself rather
+// than storing it: the dashboard relays search-result art through it from the
+// hosts that turn the reader's browser away. It takes the same guarded client
+// and the same "is this an image" check as a stored cover — the URL is just as
+// much a third party's say-so. ext is the extension the image's type maps to.
+func (r *CoverResolver) FetchImage(ctx context.Context, coverURL string) (body []byte, ext string, ok bool) {
+	return r.download(ctx, coverURL)
+}
+
+// download fetches one cover image and accepts it only if it is recognizably
+// an image no larger than coverDownloadLimit.
+func (r *CoverResolver) download(parent context.Context, coverURL string) ([]byte, string, bool) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
+	if err != nil {
+		return nil, "", false
+	}
+	req.Header.Set("User-Agent", connectors.UserAgentFor(req.URL.Hostname()))
+	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+
+	res, err := r.client.Do(req)
+	if err != nil {
+		slog.Debug("cover download failed", "url", coverURL, "error", err)
+		return nil, "", false
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+		return nil, "", false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, coverDownloadLimit+1))
+	if err != nil || len(body) == 0 || len(body) > coverDownloadLimit {
+		return nil, "", false
+	}
+
+	ext := coverFileExt(res.Header.Get("Content-Type"), body)
+	if ext == "" {
+		// Not recognizably an image — an HTML challenge page, a CDN error
+		// body. Caching it would serve garbage forever.
+		return nil, "", false
+	}
+	return body, ext, true
 }
 
 // coverFileExt maps a downloaded cover to the extension the static route

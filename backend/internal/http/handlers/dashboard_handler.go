@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"html/template"
 	"sync"
@@ -71,6 +72,7 @@ type DashboardPaths struct {
 // coverResolver is the cover half of the resolution service (internal/resolve).
 type coverResolver interface {
 	Lookup(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (coverURL string, servingSourceKey string, waiting bool)
+	FetchImage(ctx context.Context, coverURL string) (body []byte, ext string, ok bool)
 	InvalidateNegatives()
 	Close()
 }

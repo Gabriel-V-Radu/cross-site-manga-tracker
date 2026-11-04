@@ -434,6 +434,40 @@ func TestFetchCoverURLRejectsNonImageBodies(t *testing.T) {
 	}
 }
 
+// TestFetchImageAppliesTheStoredCoverChecks pins that the relay path judges a
+// download the way the store does — an image comes back with its extension, a
+// challenge page does not come back at all — and that it leaves nothing on disk.
+func TestFetchImageAppliesTheStoredCoverChecks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/challenge.jpg" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Browser verification</body></html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	}))
+	defer server.Close()
+
+	resolver := newLocalCoverResolver(t, connectors.NewRegistry())
+
+	body, ext, ok := resolver.FetchImage(context.Background(), server.URL+"/cover.png")
+	if !ok || ext != ".png" || string(body) != string(pngBytes) {
+		t.Fatalf("expected the png relayed, got ok=%v ext=%q body=%q", ok, ext, body)
+	}
+	if _, _, ok := resolver.FetchImage(context.Background(), server.URL+"/challenge.jpg"); ok {
+		t.Fatalf("expected a challenge page to be refused")
+	}
+
+	files, err := os.ReadDir(resolver.dir)
+	if err != nil {
+		t.Fatalf("read cover dir: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("a relayed image must not be stored, got %v", files)
+	}
+}
+
 // TestCachedLocalCoverHealsWhenTheFileVanishes pins the self-repair: an entry
 // whose file is gone (a wiped volume, a manual cleanup) reads as a miss so
 // the cover is re-fetched, rather than rendering a broken image forever.

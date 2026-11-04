@@ -375,6 +375,7 @@ func parseDashboardTemplates(glob string, assetURL func(string) string) (*templa
 		"tagIconLabel":      tagIconLabel,
 		"tagIconAssetPath":  tagIconAssetPath,
 		"toJSON":            toJSON,
+		"coverSrc":          coverSrc,
 		"statusLabel":       statusLabel,
 		"sortLabel":         sortLabel,
 		"assetURL":          assetURL,

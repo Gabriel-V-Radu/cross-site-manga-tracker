@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -23,6 +24,10 @@ type fakeCoverResolver struct {
 
 func (f fakeCoverResolver) Lookup(string, string, *string, []repository.TrackerSourceRef, string) (string, string, bool) {
 	return f.coverURL, f.sourceKey, f.waiting
+}
+
+func (fakeCoverResolver) FetchImage(context.Context, string) ([]byte, string, bool) {
+	return nil, "", false
 }
 
 func (fakeCoverResolver) InvalidateNegatives() {}
