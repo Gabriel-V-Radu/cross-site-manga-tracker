@@ -142,6 +142,25 @@ window.dispatchTrackersChanged = function (reason) {
     }));
 };
 
+// Whether a trackersChanged event asks for a silent refresh. The delete
+// response raises a plain one after setting window.__silentCoverRefresh, which
+// dashboard-trackers.js reads as the filters form confirms the request.
+window.isQuietTrigger = function (triggeringEvent) {
+    return !!(triggeringEvent && triggeringEvent.detail && triggeringEvent.detail.reason === 'silent');
+};
+
+// A silent refresh is sent by its own element, #trackers-quiet-refresh (see
+// dashboard_page.html), not by the filters form. The element that sent a
+// request is read from the xhr as well, because htmx rewrites detail.elt to the
+// target for the swap events.
+window.isQuietListRequest = function (detail) {
+    if (!detail) {
+        return false;
+    }
+    var source = (detail.xhr && detail.xhr.__requestElt) || detail.elt;
+    return !!(source && source.id === 'trackers-quiet-refresh');
+};
+
 window.setDashboardViewMode = function (mode, shouldRefresh) {
     var nextMode = (mode === 'list') ? 'list' : 'grid';
     var viewInput = document.getElementById('view-input');
@@ -179,70 +198,118 @@ window.setDashboardViewMode = function (mode, shouldRefresh) {
 // pasted URL looked exactly like a hung request. The server answers every
 // refused request with a one-line message written for the reader (see
 // handlers.fail), so that text is what gets shown: beside the modal form that
-// sent the request, else in a strip at the top of the trackers zone.
+// sent the request, beside the card button that was pressed, else in a strip
+// at the top of the trackers zone.
 //
-// The form is the one the request came from, not the first one in the modal.
-// Picking the first put a failed tag change from the Custom Tags pane above the
+// The message goes next to what was pressed, because that is where the reader
+// is looking. A card's Delete or Set last read used to report at the top of the
+// trackers zone, thousands of pixels above a reader working down the list, and
+// a Refresh in the Sources modal behind the modal's own overlay. In a modal it
+// is the form the request came from, not the first one in the modal: picking
+// the first put a failed tag change from the Custom Tags pane above the
 // Switch-profile form in the other pane, and a refused Save above Title, out of
-// sight at the top of a modal that scrolls on its own — so the message goes
-// right above the buttons that were pressed, and is scrolled into view.
-var requestErrorHost = function (elt) {
-    // Without the requesting element only the old guess is possible; with one
-    // outside the modal (a card button, the list's own refresh) the message
-    // belongs to the trackers zone even while a modal happens to be open.
-    var fromModal = !elt || !elt.closest || !!elt.closest('#modal-zone');
-    var form = null;
-    if (fromModal) {
-        form = (elt && elt.closest && elt.closest('#modal-zone form')) ||
-            document.querySelector('#modal-zone .tracker-form, #modal-zone form');
+// sight at the top of a modal that scrolls on its own.
+//
+// The answer is where to put it: host, the node to insert before (null for the
+// end), and whether the host's contents are stale and go with it.
+var requestErrorPlacement = function (elt, target) {
+    // A title search reports by its own results box, and the results of the
+    // previous query go: listed under a failure, they read as its answer.
+    if (target && target.classList && target.classList.contains('source-search-results')) {
+        return { host: target, before: null, replaceContents: true };
     }
-    // A tag's Edit/Remove and a logo's Upload/Remove are one-button forms in a
-    // row with no room for a sentence; their section is the nearest place it
-    // can be read.
-    if (form && !form.classList.contains('tracker-form')) {
-        form = form.closest('section') || form;
+
+    var modalCard = elt && elt.closest ? elt.closest('#modal-zone .modal-card') : null;
+    var card = elt && elt.closest ? elt.closest('.tracker-card') : null;
+
+    // Without the requesting element only the old guess is possible.
+    if (!elt || !elt.closest) {
+        modalCard = document.querySelector('#modal-zone .modal-card');
     }
-    return form || document.getElementById('trackers-zone') || document.body;
+
+    if (modalCard) {
+        var form = (elt && elt.closest && elt.closest('form')) ||
+            (!elt ? modalCard.querySelector('.tracker-form, form') : null);
+        if (form && form.classList.contains('tracker-form')) {
+            return { host: form, before: form.querySelector(':scope > .modal-actions') || form.firstChild };
+        }
+        // A tag's Edit/Remove and a logo's Upload/Remove are one-button forms
+        // in a row with no room for a sentence; their section is the nearest
+        // place it can be read.
+        var section = form ? (form.closest('section') || form) : null;
+        if (section) {
+            var heading = section.querySelector(':scope > h3');
+            return { host: section, before: heading ? heading.nextSibling : section.firstChild };
+        }
+        // A button that belongs to no form (the Sources modal's Refresh): just
+        // under the modal's header, inside the card the overlay leaves in sight.
+        var header = modalCard.querySelector(':scope > header');
+        return { host: modalCard, before: header ? header.nextSibling : modalCard.firstChild };
+    }
+
+    if (card) {
+        var popover = elt.closest('.tracker-rating__popover');
+        if (popover) {
+            return { host: popover, before: popover.querySelector(':scope > .tracker-rating__actions') };
+        }
+        var actions = elt.closest('.card-actions, .tracker-row__actions');
+        if (actions && actions.parentNode === card) {
+            return { host: card, before: actions.nextSibling };
+        }
+        return { host: card, before: null };
+    }
+
+    var zone = document.getElementById('trackers-zone') || document.body;
+    return { host: zone, before: zone.firstChild };
 };
 
-var requestErrorAnchor = function (host) {
-    var actions = host.querySelector(':scope > .modal-actions');
-    if (actions) {
-        return actions;
-    }
-    var heading = host.querySelector(':scope > h3');
-    if (heading) {
-        return heading.nextSibling;
-    }
-    return host.firstChild;
-};
-
-window.showRequestError = function (message, elt) {
+window.showRequestError = function (message, elt, target) {
     var text = String(message || '').trim() || 'The request failed. Please try again.';
-    var host = requestErrorHost(elt);
+    var placement = requestErrorPlacement(elt, target);
+    var host = placement.host;
     var region = (host.closest && host.closest('#modal-zone')) || host;
 
-    // One message per region: an earlier failure from another form in the
-    // same modal would otherwise still be on screen, reading as current.
-    Array.prototype.forEach.call(region.querySelectorAll('.request-error'), function (node) {
+    // One message at a time: an earlier failure from another form in the
+    // same modal, or on another card, would otherwise still be on screen,
+    // reading as current.
+    Array.prototype.forEach.call(document.querySelectorAll('.request-error'), function (node) {
         node.remove();
     });
+    // So does a success notice: "Tag saved" above the refusal of the next
+    // tag read as if both had happened to the same request.
+    if (region.id === 'modal-zone') {
+        Array.prototype.forEach.call(region.querySelectorAll('.profile-feedback'), function (node) {
+            node.remove();
+        });
+    }
+
+    if (placement.replaceContents) {
+        host.innerHTML = '';
+    }
 
     var notice = document.createElement('p');
     notice.className = 'request-error';
     notice.setAttribute('role', 'alert');
     notice.textContent = text;
-    host.insertBefore(notice, requestErrorAnchor(host));
+    var before = placement.before && placement.before.parentNode === host ? placement.before : null;
+    host.insertBefore(notice, before);
 
-    // Only inside the modal, where the user just pressed something: a failed
-    // background refresh of the list must not yank the page to its top.
-    if (region.id === 'modal-zone' && typeof notice.scrollIntoView === 'function') {
+    // Only beside something the user just pressed (the modal, a card): a
+    // failed refresh of the list must not yank the page to its top.
+    if (host.id !== 'trackers-zone' && host !== document.body && typeof notice.scrollIntoView === 'function') {
         notice.scrollIntoView({ block: 'nearest' });
     }
 };
 
+// A silent refresh is the page's own doing, not the reader's: its failure is
+// left to dashboard-trackers.js, which tries again later, rather than reported
+// as "Could not reach the server" over a list the reader did nothing to.
 document.body.addEventListener('htmx:responseError', function (event) {
-    var xhr = event && event.detail ? event.detail.xhr : null;
+    var detail = event && event.detail;
+    if (window.isQuietListRequest(detail)) {
+        return;
+    }
+    var xhr = detail ? detail.xhr : null;
     var body = xhr && typeof xhr.responseText === 'string' ? xhr.responseText.trim() : '';
     // Only a short plain-text answer is a message; anything else (an HTML
     // error page from a proxy) is replaced by the status line.
@@ -250,11 +317,44 @@ document.body.addEventListener('htmx:responseError', function (event) {
     var message = (!looksLikeMarkup && body.length > 0 && body.length <= 300)
         ? body
         : ('Request failed' + (xhr && xhr.status ? ' (' + xhr.status + ')' : ''));
-    window.showRequestError(message, event && event.detail ? event.detail.elt : null);
+    window.showRequestError(message, detail ? detail.elt : null, detail ? detail.target : null);
 });
 
 document.body.addEventListener('htmx:sendError', function (event) {
-    window.showRequestError('Could not reach the server. Check the connection and try again.', event && event.detail ? event.detail.elt : null);
+    var detail = event && event.detail;
+    if (window.isQuietListRequest(detail)) {
+        return;
+    }
+    window.showRequestError('Could not reach the server. Check the connection and try again.', detail ? detail.elt : null, detail ? detail.target : null);
+});
+
+// A request sent again takes the message about the last attempt off the
+// screen at once: a refusal left up while the retried Save was in flight read
+// as the answer to the retry. A pick from the search results means the reader
+// has moved on from a failed search too.
+document.body.addEventListener('htmx:beforeRequest', function (event) {
+    var detail = event && event.detail;
+    if (!detail || !detail.elt || window.isQuietListRequest(detail)) {
+        return;
+    }
+    var host = requestErrorPlacement(detail.elt, detail.target).host;
+    if (!host || host.id === 'trackers-zone' || host === document.body) {
+        return;
+    }
+    Array.prototype.forEach.call(host.querySelectorAll('.request-error'), function (node) {
+        node.remove();
+    });
+});
+
+document.addEventListener('click', function (event) {
+    var pick = event.target && event.target.closest ? event.target.closest('.search-result-item') : null;
+    var form = pick ? pick.closest('form') : null;
+    if (!form) {
+        return;
+    }
+    Array.prototype.forEach.call(form.querySelectorAll('.source-search-results .request-error'), function (node) {
+        node.remove();
+    });
 });
 
 // htmx swaps a region by inserting the new nodes before the old ones and only

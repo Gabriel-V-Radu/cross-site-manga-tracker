@@ -443,6 +443,20 @@ var setSelectedRatingValue = function (popover, value) {
     applyRatingUI(popover, normalized);
 };
 
+// The rating the server has stored, as the card was rendered with it. The
+// hidden input cannot tell: it holds whatever was last picked.
+var getSavedRatingValue = function (popover) {
+    if (!popover) {
+        return 0;
+    }
+    var saved = popover.getAttribute('data-saved-rating');
+    if (saved === null || saved === '') {
+        var input = getRatingInput(popover);
+        return normalizeRatingValue(input ? input.value : 0);
+    }
+    return normalizeRatingValue(saved);
+};
+
 var revertRatingPreview = function (popover) {
     if (!popover) {
         return;
@@ -552,9 +566,25 @@ document.addEventListener('keydown', function (event) {
     setSelectedRatingValue(popover, next);
 });
 
+// toggle does not bubble, so this listens in the capture phase (it never ran
+// as a bubbling listener). A popover closed without saving — a click outside,
+// Escape — goes back to the stored rating: a value picked with a star or End
+// used to stay in the hidden input, came back on the next open, and was stored
+// by whatever Save came after. A successful save replaces the whole card, so
+// it never reaches here. A popover reopened by a silent refresh of the list
+// brings back the value the reader had picked (data-restore-rating).
 document.addEventListener('toggle', function (event) {
     var target = event && event.target;
-    if (!target || !target.matches || !target.matches('.tracker-rating[open]')) {
+    if (!target || !target.matches || !target.matches('.tracker-rating')) {
+        return;
+    }
+
+    var popoverForm = target.querySelector('.tracker-rating__popover');
+
+    if (!target.open) {
+        if (popoverForm) {
+            setSelectedRatingValue(popoverForm, getSavedRatingValue(popoverForm));
+        }
         return;
     }
 
@@ -565,18 +595,18 @@ document.addEventListener('toggle', function (event) {
         }
     });
 
-    var popoverForm = target.querySelector('.tracker-rating__popover');
     if (!popoverForm) {
         return;
     }
 
-    var ratingInput = getRatingInput(popoverForm);
-    if (!ratingInput) {
+    var restore = popoverForm.getAttribute('data-restore-rating');
+    if (restore !== null) {
+        popoverForm.removeAttribute('data-restore-rating');
+        setSelectedRatingValue(popoverForm, restore);
         return;
     }
-
-    setSelectedRatingValue(popoverForm, ratingInput.value);
-});
+    setSelectedRatingValue(popoverForm, getSavedRatingValue(popoverForm));
+}, true);
 
 document.addEventListener('click', function (event) {
     var openPopovers = document.querySelectorAll('.tracker-rating[open]');
@@ -602,6 +632,9 @@ var initializeVisibleRatingPopovers = function () {
         var input = getRatingInput(popover);
         if (!input) {
             return;
+        }
+        if (!popover.hasAttribute('data-saved-rating')) {
+            popover.setAttribute('data-saved-rating', input.value);
         }
         setSelectedRatingValue(popover, input.value);
     });

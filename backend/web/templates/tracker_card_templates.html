@@ -81,7 +81,11 @@ and the row to one, and the hover text is the only way to read it whole.
     <summary class="tracker-rating__toggle" title="Set rating">
         {{if .Rating}}{{.RatingLabel}}{{else}}+{{end}}
     </summary>
+    {{/* data-saved-rating is the stored rating, which the popover goes back
+         to when it is closed without saving; the hidden input holds whatever
+         was picked last. */}}
     <form class="tracker-rating__popover"
+          data-saved-rating="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}"
           hx-post="/dashboard/trackers/{{.ID}}/rating"
           hx-target="this"
           hx-swap="none"
