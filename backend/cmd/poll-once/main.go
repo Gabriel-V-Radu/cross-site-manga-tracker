@@ -22,10 +22,13 @@ import (
 
 func main() {
 	dbPath := flag.String("db", "", "Path to a snapshot copy of app.sqlite (it will be written to)")
+	// The poller rotates each tracker across up to three linked sites, so it
+	// takes three cycles for every site to have had its turn once.
+	cycles := flag.Int("cycles", 1, "How many poll cycles to run back to back")
 	flag.Parse()
 
-	if *dbPath == "" {
-		fmt.Fprintln(os.Stderr, "-db is required")
+	if *dbPath == "" || *cycles < 1 {
+		fmt.Fprintln(os.Stderr, "-db is required and -cycles must be at least 1")
 		os.Exit(1)
 	}
 
@@ -68,35 +71,39 @@ func main() {
 	for _, tracker := range trackers {
 		primaries[tracker.SourceKey]++
 	}
-	logger.Info("starting one poll cycle", "trackers", len(trackers))
+	logger.Info("starting poll cycles", "trackers", len(trackers), "cycles", *cycles)
 	for key, count := range primaries {
 		logger.Info("trackers by primary source", "sourceKey", key, "trackers", count)
 	}
 
-	started := time.Now()
-	if err := poller.RunOnce(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "poll cycle failed:", err)
-		os.Exit(1)
-	}
-	logger.Info("poll cycle finished", "took", time.Since(started).Round(time.Second).String())
+	for cycle := 1; cycle <= *cycles; cycle++ {
+		started := time.Now()
+		if err := poller.RunOnce(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "poll cycle failed:", err)
+			os.Exit(1)
+		}
+		logger.Info("poll cycle finished", "cycle", cycle, "took", time.Since(started).Round(time.Second).String())
 
-	// The same verdicts the dashboard's source health panel would show after
-	// this cycle, so a rehearsal also says which sites the change left failing.
-	report := registry.SourceHealthReport(time.Now())
-	for _, source := range report.Sources {
-		logger.Info("source health",
-			"sourceKey", source.Key,
-			"state", source.State,
-			"reason", source.Reason,
-			"answered", source.Answered,
-			"failed", source.Failed,
-			"noChapter", source.NoChapter,
-			"refused", source.Refused,
-			"covered", source.Covered,
-			"unchecked", source.UncheckedCount,
-			"lastError", source.LastError)
-	}
-	for _, orphan := range report.Orphans {
-		logger.Warn("trackers on a source with no connector", "sourceKey", orphan.Key, "count", orphan.Count)
+		// The same verdicts the dashboard's source health panel would show
+		// after this cycle, so a rehearsal also says which sites the change
+		// left failing.
+		report := registry.SourceHealthReport(time.Now())
+		for _, source := range report.Sources {
+			logger.Info("source health",
+				"cycle", cycle,
+				"sourceKey", source.Key,
+				"state", source.State,
+				"reason", source.Reason,
+				"answered", source.Answered,
+				"failed", source.Failed,
+				"noChapter", source.NoChapter,
+				"refused", source.Refused,
+				"covered", source.Covered,
+				"unchecked", source.UncheckedCount,
+				"lastError", source.LastError)
+		}
+		for _, orphan := range report.Orphans {
+			logger.Warn("trackers on a source with no connector", "sourceKey", orphan.Key, "count", orphan.Count)
+		}
 	}
 }

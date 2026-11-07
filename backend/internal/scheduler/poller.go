@@ -271,16 +271,21 @@ type pollAnswer struct {
 // without a number (MangaUpdates past its staleness cutoff, a feed with no
 // English chapters, a scraper whose markup stopped matching, a number dropped
 // as junk), and past an alternate that claims a new chapter while not in step
-// (see pollCandidate.trusted): that claim is held, and stands only if no
-// site after it answers at all.
+// (see pollCandidate.trusted). That claim stands at once when it is dated well
+// after the stored chapter (releasedWellAfter) or when the next site reports
+// the same number; otherwise it is held, and stands only if no site after it
+// answers at all.
 func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) {
 	board := p.registry.HealthBoard()
 
 	var (
-		// answer is the report this poll goes by; held, an unconfirmed
-		// advance from an alternate not in step; firstAnswer, the first
-		// site that answered at all, number or not.
+		// answer is the report this poll goes by; held, the best
+		// unconfirmed advance from an alternate not in step; firstAnswer,
+		// the first site that answered at all, number or not.
 		answer, held, firstAnswer *pollAnswer
+		// unconfirmed are every held advance so far, which a later site
+		// reporting the same number confirms.
+		unconfirmed []pollAnswer
 		// primaryResult is the primary's answer when it was asked and
 		// answered: only then are its canonical identifiers refreshed.
 		primaryResult *connectors.MangaResult
@@ -346,6 +351,23 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			continue
 		}
 		if !candidate.trusted && chapterAdvances(tracker.LatestKnownChapter, *chapter) {
+			if corroborating := sameAdvance(unconfirmed, *chapter); corroborating != nil {
+				// A second site reports the same new chapter: that is
+				// agreement, not one site's numbering. The first one asked
+				// keeps the report unless only this one dates it.
+				answer = corroborating
+				if betterFallbackResult(corroborating.result, result) {
+					answer = &current
+				}
+				break
+			}
+			if releasedWellAfter(tracker.LatestReleaseAt, result.LastUpdatedAt) {
+				// Dated well after the stored chapter: a release that came
+				// later, not the stored one under another number.
+				answer = &current
+				break
+			}
+			unconfirmed = append(unconfirmed, current)
 			if held == nil || betterFallbackResult(held.result, result) {
 				held = &current
 			}
@@ -570,6 +592,31 @@ func (p *Poller) dropImplausibleChapter(tracker repository.PollingTracker, candi
 	copied := *result
 	copied.LatestChapter = nil
 	return &copied
+}
+
+// untrustedReleaseLead is how much later than the stored chapter a site not in
+// step must date its higher number for that number to stand on its own. The
+// same release reaches the aggregators within hours of each other, so a site
+// that numbers it differently dates it about the same day; the next chapter
+// of anything but a daily series comes days later. A daily series' next
+// chapter still gets through as soon as a second site confirms it.
+const untrustedReleaseLead = 48 * time.Hour
+
+// releasedWellAfter reports whether reported dates a release at least
+// untrustedReleaseLead after the stored chapter's. Without both dates there is
+// nothing to compare and the answer is no.
+func releasedWellAfter(stored, reported *time.Time) bool {
+	return stored != nil && reported != nil && reported.Sub(*stored) >= untrustedReleaseLead
+}
+
+// sameAdvance returns the held advance that reports chapter, if any.
+func sameAdvance(unconfirmed []pollAnswer, chapter float64) *pollAnswer {
+	for index := range unconfirmed {
+		if held := unconfirmed[index].result.LatestChapter; held != nil && sameChapterNumber(*held, chapter) {
+			return &unconfirmed[index]
+		}
+	}
+	return nil
 }
 
 // chapterAdvances reports whether reported would move the tracker forward.

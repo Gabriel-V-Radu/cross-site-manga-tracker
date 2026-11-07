@@ -24,8 +24,8 @@ import (
 //
 // Each poll still makes one request in the common case. Only when the site
 // whose turn it is fails, answers without a usable number, or claims a new
-// chapter it has not earned the trust to report alone (see pollCandidate.
-// trusted) does the poll walk on to the next site, then to the sites that
+// chapter without the standing or the evidence to report it alone (see
+// pollCandidate.trusted) does the poll walk on to the next site, then to the sites that
 // never take a turn, as the old primary-then-alternates fallback did.
 
 // maxRotationSources caps how many of a tracker's linked sites take turns.
@@ -43,7 +43,12 @@ type pollCandidate struct {
 	// carried the chapter then stored (tracker_sources.in_step). A site that
 	// numbers chapters its own way would otherwise push the tracker ahead on
 	// its first turn and, agreeing with itself on every later one, keep it
-	// there.
+	// there. An untrusted site's new chapter is not ignored, only asked for
+	// evidence: a second site reporting the same number, or a release date
+	// well after the stored chapter's. Without that, a site that was already
+	// ahead the first time it was asked could never come into step while the
+	// primary stayed stalled (MangaFire sat on chapters ComicK and MangaHub
+	// were weeks past).
 	trusted bool
 }
 

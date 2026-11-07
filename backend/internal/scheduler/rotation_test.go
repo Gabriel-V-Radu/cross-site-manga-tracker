@@ -18,9 +18,10 @@ type siteDouble struct {
 	key      string
 	trailing bool
 
-	mu      sync.Mutex
-	chapter *float64
-	err     error
+	mu         sync.Mutex
+	chapter    *float64
+	releasedAt *time.Time
+	err        error
 
 	calls atomic.Int32
 }
@@ -49,7 +50,7 @@ func (s *siteDouble) ResolveByURL(context.Context, string) (*connectors.MangaRes
 		value := *s.chapter
 		chapter = &value
 	}
-	return &connectors.MangaResult{SourceKey: s.key, LatestChapter: chapter}, nil
+	return &connectors.MangaResult{SourceKey: s.key, LatestChapter: chapter, LastUpdatedAt: s.releasedAt}, nil
 }
 
 func (s *siteDouble) fail(err error) {
@@ -319,6 +320,59 @@ func TestRotationHoldsAnAdvanceFromASiteNotInStep(t *testing.T) {
 		assertChapter(t, "latest", repo.updatedLatest, chapterPtr(11))
 		if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 2 {
 			t.Fatalf("beta is the reporter, got %#v", repo.updatedLatestSource)
+		}
+	})
+
+	t.Run("a release dated well after the stored chapter stands alone", func(t *testing.T) {
+		tracker := untrustedTurn()
+		storedAt := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+		tracker.LatestReleaseAt = &storedAt
+		alpha, beta := newSite("alpha", 10), newSite("beta", 11)
+		nextWeek := storedAt.Add(7 * 24 * time.Hour)
+		beta.releasedAt = &nextWeek
+		repo := pollFor(t, tracker, alpha, beta)
+		if alpha.calls.Load() != 0 {
+			t.Fatalf("a clearly later release needs no second opinion, alpha was asked %d times", alpha.calls.Load())
+		}
+		assertChapter(t, "latest", repo.updatedLatest, chapterPtr(11))
+		if poll := betaPoll(t, repo); !poll.InStep {
+			t.Fatalf("beta's number was stored, so it is in step now: %+v", poll)
+		}
+	})
+
+	t.Run("the same release under another number is held", func(t *testing.T) {
+		tracker := untrustedTurn()
+		storedAt := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+		tracker.LatestReleaseAt = &storedAt
+		alpha, beta := newSite("alpha", 10), newSite("beta", 11)
+		sameDay := storedAt.Add(6 * time.Hour)
+		beta.releasedAt = &sameDay
+		repo := pollFor(t, tracker, alpha, beta)
+		if alpha.calls.Load() != 1 {
+			t.Fatalf("a same-day number needs a second opinion, alpha was asked %d times", alpha.calls.Load())
+		}
+		assertChapter(t, "latest", repo.updatedLatest, chapterPtr(10))
+	})
+
+	t.Run("a second site reporting the same number confirms it", func(t *testing.T) {
+		tracker := untrustedTurn()
+		earlier := recently.Add(-time.Hour)
+		tracker.AlternateSources[0].LastPolledAt = &earlier
+		tracker.AlternateSources = append(tracker.AlternateSources,
+			repository.TrackerSourceRef{SourceID: 3, SourceKey: "gamma", SourceURL: "https://gamma/series", LastPolledAt: &earlier})
+		alpha, beta, gamma := newSite("alpha", 10), newSite("beta", 11), newSite("gamma", 11)
+		repo := &fakeRepo{items: []repository.PollingTracker{tracker}}
+		poller := NewPoller(repo, registryOf(t, alpha, beta, gamma), PollerConfig{Interval: time.Minute}, nil)
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run once: %v", err)
+		}
+		if alpha.calls.Load() != 0 || beta.calls.Load() != 1 || gamma.calls.Load() != 1 {
+			t.Fatalf("expected beta then gamma and no primary, got alpha=%d beta=%d gamma=%d",
+				alpha.calls.Load(), beta.calls.Load(), gamma.calls.Load())
+		}
+		assertChapter(t, "latest", repo.updatedLatest, chapterPtr(11))
+		if repo.updatedLatestSource == nil || *repo.updatedLatestSource != 2 {
+			t.Fatalf("the first site to report it keeps the attribution, got %#v", repo.updatedLatestSource)
 		}
 	})
 
