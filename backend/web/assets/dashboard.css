@@ -652,12 +652,17 @@ input:focus, select:focus {
     flex-wrap: wrap;
 }
 
+/* The colour and the missing underline are set on the link itself: a text-only
+   connector showed its name in the light span colour but underlined in the
+   browser's default link blue. */
 .pagination-site-link {
     width: 44px;
     height: 44px;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: rgba(17, 26, 41, 0.9);
+    color: #d9e3f8;
+    text-decoration: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1546,14 +1551,20 @@ input.is-loading::placeholder {
     opacity: 0.85;
 }
 
-/* Why a field stayed empty — a failed lookup reads differently from a title that
-   genuinely has no number. */
+/* Help under a field reads as help; only the chapter lookup's note, which says
+   why a field stayed empty — a failed lookup reads differently from a title
+   that genuinely has no number — keeps the warning colour. Every note used to be
+   red, so the Reading Site help looked like an error. */
 .field-note {
     display: block;
     margin-top: 4px;
-    color: var(--accent);
+    color: var(--ink-soft);
     font-size: 12px;
     line-height: 1.35;
+}
+
+.field-note[data-chapter-lookup-note] {
+    color: var(--accent);
 }
 
 .field-note[hidden] {

@@ -4,6 +4,9 @@ wraps it, because the htmx out-of-band responses need the same body under an
 article carrying an hx-swap-oob attribute. Keeping only the wrapper duplicated
 is what stops the two from drifting: every copy of the body was hand-maintained
 before, so a one-line change to a card meant editing it in five places.
+
+The title is repeated in a title attribute: the card clamps it to two lines
+and the row to one, and the hover text is the only way to read it whole.
 */}}
 {{define "tracker_card_list"}}
 <article id="tracker-card-{{.ID}}" class="tracker-row tracker-card">
@@ -13,7 +16,7 @@ before, so a one-line change to a card meant editing it in five places.
 
 {{define "tracker_card_list_body"}}
     <div class="tracker-row__title-wrap">
-        <h3>{{.Title}}</h3>
+        <h3 title="{{.Title}}">{{.Title}}</h3>
     </div>
 
     <div class="tracker-row__status">
@@ -114,7 +117,7 @@ before, so a one-line change to a card meant editing it in five places.
 
 {{define "tracker_card_grid_body"}}
     <header class="tracker-card__header">
-        <h3>{{.Title}}</h3>
+        <h3 title="{{.Title}}">{{.Title}}</h3>
         <span class="badge badge--status badge--status-{{.Status}}" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
     </header>
 
@@ -196,7 +199,7 @@ before, so a one-line change to a card meant editing it in five places.
         <a class="mini-btn mini-btn--highlight"
            href="{{if .HighlightURL}}{{.HighlightURL}}{{else}}{{.SourceURL}}{{end}}"
            target="_blank"
-           rel="noopener noreferrer">Highlight</a>
+           rel="noopener noreferrer">Open</a>
     </div>
 
     <div class="card-actions card-actions--secondary">
