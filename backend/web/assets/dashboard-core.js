@@ -298,3 +298,238 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
         node.remove();
     });
 });
+
+// Every modal comes through #modal-zone, so they are all made to behave as
+// dialogs here rather than in each template. Before this a modal was only a
+// box drawn over the page: focus stayed on the button behind it (the Edit form
+// was 195 Tab presses away), Tab walked out of it into the list, Escape did
+// nothing, closing it dropped focus to <body>, and a wheel or swipe past the
+// end of its content scrolled the page underneath.
+var modalState = {
+    open: false,
+    cardClass: '',
+    scroll: null,
+    opener: null,
+    openerScope: '',
+    openerSelector: ''
+};
+
+var currentModalCard = function () {
+    return document.querySelector('#modal-zone .modal-backdrop .modal-card');
+};
+
+var cssAttributeValue = function (value) {
+    return String(value).replace(/["\\]/g, '\\$&');
+};
+
+// The button that opened the modal is often gone by the time it closes — a
+// saved Edit replaces its card, the Sources pill re-renders itself every
+// minute — so how to find its successor is kept beside it: the nearest
+// ancestor with an id and the request the button makes.
+var rememberModalOpener = function (elt) {
+    modalState.opener = elt;
+    modalState.openerScope = '';
+    modalState.openerSelector = '';
+    var attrs = ['hx-get', 'hx-post'];
+    for (var i = 0; i < attrs.length; i += 1) {
+        var value = elt.getAttribute(attrs[i]);
+        if (value) {
+            modalState.openerSelector = '[' + attrs[i] + '="' + cssAttributeValue(value) + '"]';
+            break;
+        }
+    }
+    var scope = elt.parentElement && elt.parentElement.closest ? elt.parentElement.closest('[id]') : null;
+    modalState.openerScope = scope ? scope.id : '';
+};
+
+var focusModalOpener = function () {
+    var target = modalState.opener;
+    if (!target || !document.body.contains(target)) {
+        target = null;
+        if (modalState.openerSelector) {
+            var scope = modalState.openerScope ? document.getElementById(modalState.openerScope) : document;
+            target = scope ? scope.querySelector(modalState.openerSelector) : null;
+        }
+    }
+    modalState.opener = null;
+    if (target && typeof target.focus === 'function') {
+        target.focus({ preventScroll: true });
+    }
+};
+
+// The page behind is made inert (out of the Tab order and of reach) and stops
+// scrolling: overflow hidden on the root keeps the reader's offset, and the
+// scrollbar's width is given back as padding so the page does not shift
+// sideways when it goes.
+var lockPageBehindModal = function (locked) {
+    var root = document.documentElement;
+    var shell = document.querySelector('.shell');
+    if (locked) {
+        if (!root.classList.contains('modal-open')) {
+            var gap = window.innerWidth - root.clientWidth;
+            root.classList.add('modal-open');
+            if (gap > 0) {
+                document.body.style.paddingRight = gap + 'px';
+            }
+        }
+        if (shell) {
+            shell.setAttribute('inert', '');
+        }
+        return;
+    }
+    root.classList.remove('modal-open');
+    document.body.style.paddingRight = '';
+    if (shell) {
+        shell.removeAttribute('inert');
+    }
+};
+
+var describeModalCard = function (card) {
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('tabindex', '-1');
+    var heading = card.querySelector('h2');
+    if (heading) {
+        if (!heading.id) {
+            heading.id = 'modal-title';
+        }
+        card.setAttribute('aria-labelledby', heading.id);
+    }
+};
+
+// Called after anything changes #modal-zone: an htmx swap, or the backdrop
+// click and Escape that empty it directly.
+window.syncModalZone = function () {
+    var card = currentModalCard();
+    if (card) {
+        describeModalCard(card);
+        lockPageBehindModal(true);
+        // The Profile menu and the Sources modal answer their own actions by
+        // re-rendering themselves whole, which put a phone reader 544px down
+        // the menu back at its top after every tag or logo change. The same
+        // modal coming back keeps its scroll, and focus stays inside it.
+        var reRendered = modalState.open && modalState.cardClass === card.className;
+        if (reRendered && modalState.scroll) {
+            card.scrollTop = modalState.scroll.card;
+            var backdrop = card.closest('.modal-backdrop');
+            if (backdrop) {
+                backdrop.scrollTop = modalState.scroll.backdrop;
+            }
+        }
+        if (!card.contains(document.activeElement)) {
+            card.focus({ preventScroll: true });
+        }
+        modalState.open = true;
+        modalState.cardClass = card.className;
+        modalState.scroll = null;
+        return;
+    }
+    if (modalState.open) {
+        modalState.open = false;
+        modalState.cardClass = '';
+        modalState.scroll = null;
+        lockPageBehindModal(false);
+        focusModalOpener();
+    }
+};
+
+document.body.addEventListener('htmx:beforeRequest', function (event) {
+    var detail = event && event.detail;
+    if (!detail || !detail.target || detail.target.id !== 'modal-zone' || !detail.elt || !detail.elt.getAttribute) {
+        return;
+    }
+    if (modalState.open || (detail.elt.closest && detail.elt.closest('#modal-zone'))) {
+        return;
+    }
+    rememberModalOpener(detail.elt);
+});
+
+document.body.addEventListener('htmx:beforeSwap', function (event) {
+    var detail = event && event.detail;
+    if (!detail || !detail.target || detail.target.id !== 'modal-zone' || detail.shouldSwap === false) {
+        return;
+    }
+    var card = currentModalCard();
+    var backdrop = card ? card.closest('.modal-backdrop') : null;
+    modalState.scroll = card ? { card: card.scrollTop, backdrop: backdrop ? backdrop.scrollTop : 0 } : null;
+});
+
+document.body.addEventListener('htmx:afterSwap', function (event) {
+    var target = event && event.target;
+    if (target && target.id === 'modal-zone') {
+        window.syncModalZone();
+    }
+});
+
+var modalFocusables = function (card) {
+    var selector = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+    return Array.prototype.filter.call(card.querySelectorAll(selector), function (node) {
+        if (node.getClientRects().length === 0) {
+            return false;
+        }
+        // Only the checked radio of a group is in the Tab order.
+        return !(node.type === 'radio' && !node.checked);
+    });
+};
+
+document.addEventListener('keydown', function (event) {
+    if (!event || event.defaultPrevented || event.isComposing) {
+        return;
+    }
+
+    if (event.key === 'Tab') {
+        var card = currentModalCard();
+        if (!card) {
+            return;
+        }
+        var items = modalFocusables(card);
+        var active = document.activeElement;
+        if (items.length === 0) {
+            event.preventDefault();
+            card.focus({ preventScroll: true });
+            return;
+        }
+        var first = items[0];
+        var last = items[items.length - 1];
+        if (!card.contains(active)) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey && (active === first || active === card)) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+        }
+        return;
+    }
+
+    if (event.key !== 'Escape') {
+        return;
+    }
+
+    if (currentModalCard()) {
+        event.preventDefault();
+        if (typeof window.dismissModalZone === 'function') {
+            window.dismissModalZone();
+        }
+        return;
+    }
+
+    // Outside a modal Escape closes whatever menu is open — the rating
+    // popover, the connector "+N" menu, the Sites and Tags dropdowns — and puts
+    // focus back on its toggle if it was inside.
+    var openMenus = document.querySelectorAll('details.tracker-rating[open], details.site-links-more[open], details.filter-multi-select[open]');
+    if (openMenus.length === 0) {
+        return;
+    }
+    event.preventDefault();
+    Array.prototype.forEach.call(openMenus, function (menu) {
+        var hadFocus = menu.contains(document.activeElement);
+        menu.removeAttribute('open');
+        var summary = menu.querySelector(':scope > summary');
+        if (hadFocus && summary) {
+            summary.focus({ preventScroll: true });
+        }
+    });
+});

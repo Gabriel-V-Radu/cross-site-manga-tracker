@@ -618,6 +618,9 @@ window.dismissModalZone = function () {
         return;
     }
     modalZone.innerHTML = '';
+    if (typeof window.syncModalZone === 'function') {
+        window.syncModalZone();
+    }
 };
 
 var shouldDismissModalOnBackdropClick = false;

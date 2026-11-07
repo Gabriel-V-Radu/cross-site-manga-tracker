@@ -1326,6 +1326,14 @@ input:focus, select:focus {
     font-family: "Bodoni Moda", Georgia, serif;
 }
 
+/* While a modal is open the page behind it does not scroll (dashboard-core.js
+   sets .modal-open on the root and makes the page inert), and a wheel or a
+   swipe that reaches the end of the modal stops there instead of carrying on
+   into the page underneath. */
+html.modal-open {
+    overflow: hidden;
+}
+
 .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -1335,6 +1343,7 @@ input:focus, select:focus {
     z-index: 20;
     padding: 24px;
     overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .modal-card {
@@ -1345,6 +1354,13 @@ input:focus, select:focus {
     padding: 20px;
     max-height: calc(100vh - 48px);
     overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* The card itself takes focus when the modal opens, so the next Tab lands on
+   its first control; it is not a control, so it draws no focus ring. */
+.modal-card:focus {
+    outline: none;
 }
 
 .modal-card header {
