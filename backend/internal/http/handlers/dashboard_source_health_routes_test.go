@@ -78,8 +78,8 @@ func TestSourceHealthPanelShowsAFailingSource(t *testing.T) {
 	blocked := &connectors.HTTPStatusError{StatusCode: 403, URL: "https://flamecomics.xyz/series/1"}
 	for cycle := 0; cycle < 2; cycle++ {
 		board.BeginCycle()
-		board.RecordResolve("flame", connectors.RolePrimary, nil, blocked)
-		board.RecordPrimaryFailure("flame", connectors.TrackedSeries{ID: 1, Title: "Solo Series", ProfileID: 1}, false)
+		board.RecordResolve("flame", connectors.RoleTurn, nil, blocked)
+		board.RecordTurnFailure("flame", connectors.TrackedSeries{ID: 1, Title: "Solo Series", ProfileID: 1}, false)
 		board.EndCycle()
 	}
 

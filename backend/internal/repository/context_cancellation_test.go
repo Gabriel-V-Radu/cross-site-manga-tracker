@@ -63,7 +63,7 @@ func TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction(t *testing.T) 
 			return err
 		}},
 		{"write", func(ctx context.Context) error {
-			return repo.MarkPollCheckedAt(ctx, trackerID, time.Now().UTC())
+			return repo.MarkPollCheckedAt(ctx, trackerID, time.Now().UTC(), nil)
 		}},
 	}
 

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -274,14 +275,27 @@ func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracke
 
 // listPollingTrackers drains its cursor before returning so the alternates
 // query that follows is not issued against a connection this one still holds.
+//
+// The primary's poll state lives on its mirror row in tracker_sources. The
+// join goes through the row's id rather than aggregating the timestamp
+// because an aggregate loses the column's DATETIME type, and the driver then
+// hands back a string that will not scan into a time.
 func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingTracker, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			t.id, t.profile_id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
 			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
-			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id
+			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id,
+			mirror.last_polled_at
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
+		LEFT JOIN tracker_sources mirror ON mirror.id = (
+			SELECT m.id FROM tracker_sources m
+			WHERE m.tracker_id = t.id AND m.source_id = t.source_id
+			  AND LOWER(TRIM(m.source_url)) = LOWER(TRIM(t.source_url))
+			ORDER BY m.id
+			LIMIT 1
+		)
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers for polling: %w", err)
@@ -299,10 +313,12 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 		var pendingLower sql.NullFloat64
 		var pendingLowerSeenAt sql.NullTime
 		var latestChapterSourceID sql.NullInt64
+		var primaryPolledAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID, &item.ProfileID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
 			&latest, &lastRead, &latestReleaseAt, &item.SourceKey, &lastCheckedAt,
 			&pendingLower, &pendingLowerSeenAt, &latestChapterSourceID,
+			&primaryPolledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
 		}
@@ -333,6 +349,10 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 		if latestChapterSourceID.Valid {
 			item.LatestChapterSourceID = &latestChapterSourceID.Int64
 		}
+		if primaryPolledAt.Valid {
+			polledAt := primaryPolledAt.Time.UTC()
+			item.PrimaryLastPolledAt = &polledAt
+		}
 		items = append(items, item)
 	}
 
@@ -347,7 +367,8 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 // UpdatePollingState mirrors the primary source into tracker_sources, so that
 // mirror row is filtered out to leave only genuine alternatives.
 const alternateSourcesQuery = `
-	SELECT ts.tracker_id, ts.source_id, s.key, ts.source_item_id, ts.source_url
+	SELECT ts.tracker_id, ts.source_id, s.key, ts.source_item_id, ts.source_url,
+		ts.last_polled_at, ts.in_step
 	FROM tracker_sources ts
 	INNER JOIN trackers t ON t.id = ts.tracker_id
 	INNER JOIN sources s ON s.id = ts.source_id
@@ -388,11 +409,17 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 		var trackerID int64
 		var source TrackerSourceRef
 		var sourceItemID sql.NullString
-		if err := rows.Scan(&trackerID, &source.SourceID, &source.SourceKey, &sourceItemID, &source.SourceURL); err != nil {
+		var lastPolledAt sql.NullTime
+		if err := rows.Scan(&trackerID, &source.SourceID, &source.SourceKey, &sourceItemID, &source.SourceURL,
+			&lastPolledAt, &source.InStep); err != nil {
 			return nil, fmt.Errorf("scan alternate source: %w", err)
 		}
 		if sourceItemID.Valid {
 			source.SourceItemID = &sourceItemID.String
+		}
+		if lastPolledAt.Valid {
+			polledAt := lastPolledAt.Time.UTC()
+			source.LastPolledAt = &polledAt
 		}
 		alternates[trackerID] = append(alternates[trackerID], source)
 	}
@@ -409,10 +436,54 @@ func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) 
 // chapter data, and not updated_at, since nothing about the tracker's content
 // changed. Without this stamp a tracker whose sources are all dark can never
 // become idle-skippable, and the poller retries it in full every cycle for as
-// long as the outage lasts.
-func (r *TrackerRepository) MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time) error {
-	if _, err := r.db.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
+// long as the outage lasts. The sites it asked are stamped too, so the next
+// cycle's rotation starts with a site that was not just tried.
+func (r *TrackerRepository) MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time, polls []SourcePoll) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark poll checked tx: %w", err)
+	}
+	// Every statement goes through tx: see UpdatePollingState.
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
 		return fmt.Errorf("mark poll checked: %w", err)
+	}
+	if err := recordSourcePolls(ctx, tx, trackerID, checkedAt, polls); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark poll checked tx: %w", err)
+	}
+	return nil
+}
+
+// recordSourcePolls writes what one poll learned about each site it asked.
+// It only ever updates existing links: a link the user removed mid-cycle must
+// stay removed, and the primary's mirror row is written before this runs.
+func recordSourcePolls(ctx context.Context, tx *sql.Tx, trackerID int64, polledAt time.Time, polls []SourcePoll) error {
+	for _, poll := range polls {
+		sourceID, sourceURL := poll.SourceID, poll.SourceURL
+		if poll.Primary {
+			err := tx.QueryRowContext(ctx, `SELECT source_id, source_url FROM trackers WHERE id = ?`, trackerID).Scan(&sourceID, &sourceURL)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("read primary for source poll: %w", err)
+			}
+		}
+		if sourceID <= 0 || strings.TrimSpace(sourceURL) == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tracker_sources
+			SET last_polled_at = ?,
+				in_step = CASE WHEN ? THEN ? ELSE in_step END
+			WHERE tracker_id = ? AND source_id = ? AND LOWER(TRIM(source_url)) = LOWER(TRIM(?))
+		`, polledAt.UTC(), poll.Answered, poll.InStep, trackerID, sourceID, sourceURL); err != nil {
+			return fmt.Errorf("record source poll: %w", err)
+		}
 	}
 	return nil
 }
@@ -545,6 +616,10 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		`, update.TrackerID, update.SourceID, update.SourceItemID, trimmedSourceURL); err != nil {
 			return false, fmt.Errorf("upsert polling tracker source: %w", err)
 		}
+	}
+
+	if err := recordSourcePolls(ctx, tx, update.TrackerID, checkedAt, update.SourcePolls); err != nil {
+		return false, err
 	}
 
 	if err := tx.Commit(); err != nil {

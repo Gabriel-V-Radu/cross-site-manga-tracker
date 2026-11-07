@@ -55,3 +55,16 @@ type SiteInfo interface {
 	// constants.
 	ReaderRank() int
 }
+
+// PollRotationInfo is optional metadata for the poller, which rotates each
+// tracker's check across its linked sites. A connector that does not
+// implement it takes turns like any other.
+type PollRotationInfo interface {
+	// TrailingChapterFeed reports that the site learns of a chapter only
+	// after the sites that host it publish it (MangaUpdates indexes releases
+	// once they are posted, and freezes on licensed series). Such a site
+	// never gets a turn of its own, since asking it first would only ever
+	// report a chapter later than the hosts do; the poller still falls back
+	// to it when nothing else answers.
+	TrailingChapterFeed() bool
+}

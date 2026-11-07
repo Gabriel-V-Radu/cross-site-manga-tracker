@@ -145,7 +145,7 @@ func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
 	if applied["0001_init.sql"] || applied["0030_drop_dead_schema.sql"] {
 		t.Fatalf("expected the legacy ledger rows pruned, got %v", applied)
 	}
-	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] || len(applied) != 3 {
+	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] || !applied["0004_poll_rotation.sql"] || len(applied) != 4 {
 		t.Fatalf("expected exactly the embedded files in the ledger, got %v", applied)
 	}
 	var links, tags int

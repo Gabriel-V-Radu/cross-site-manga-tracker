@@ -44,9 +44,15 @@ type PollingTracker struct {
 	// number, nil until some poll confirms it. The poller reads it to know
 	// whether a confirming poll should backfill it.
 	LatestChapterSourceID *int64
+	// PrimaryLastPolledAt is the primary's last_polled_at, read from the
+	// mirror row UpdatePollingState keeps for it in tracker_sources; nil when
+	// the poller has not asked the primary since the column exists.
+	PrimaryLastPolledAt *time.Time
 	// AlternateSources are the tracker's other linked sources, excluding the
-	// primary one above. The poller falls back to them when the primary source
-	// cannot be read, so a single site going dark does not freeze the tracker.
+	// primary one above. The poller rotates each tracker's check across them
+	// and the primary, and falls back to them when the source whose turn it
+	// is cannot be read, so a single site going dark does not freeze the
+	// tracker.
 	AlternateSources []TrackerSourceRef
 }
 
@@ -59,6 +65,30 @@ type TrackerSourceRef struct {
 	SourceKey    string
 	SourceItemID *string
 	SourceURL    string
+	// LastPolledAt and InStep are the poll rotation's memory of this link
+	// (see migration 0004): when the poller last heard from the site about
+	// this tracker, and whether that answer carried the chapter the tracker
+	// then stored. Only the poller reads them.
+	LastPolledAt *time.Time
+	InStep       bool
+}
+
+// SourcePoll is what one poll learned about one of the tracker's linked
+// sites, recorded on its tracker_sources row so the next cycle's rotation
+// can tell who is due and who agrees.
+type SourcePoll struct {
+	// SourceID and SourceURL name the link. Primary links the tracker's
+	// primary source instead, as the trackers row names it once this poll's
+	// write is in: a poll that refreshed the primary's canonical URL has just
+	// moved its mirror row to that URL.
+	SourceID  int64
+	SourceURL string
+	Primary   bool
+	// Answered is false for a request the site failed: it still stamps
+	// last_polled_at, so the rotation moves on, but says nothing about the
+	// site's numbering and leaves in_step as it was.
+	Answered bool
+	InStep   bool
 }
 
 // PollingUpdate is the outcome of one poll, as the repository needs to record
@@ -106,6 +136,12 @@ type PollingUpdate struct {
 	// Nil clears whatever was pending, which is what every poll that agrees with
 	// the stored number does.
 	PendingLowerChapter *float64
+
+	// SourcePolls are the sites this poll asked, written in the same
+	// transaction once the tracker's own row is: whether a site agreed is
+	// measured against the chapter that write stores, so a write the
+	// stale-snapshot guard skips records none of them.
+	SourcePolls []SourcePoll
 
 	CheckedAt time.Time
 }

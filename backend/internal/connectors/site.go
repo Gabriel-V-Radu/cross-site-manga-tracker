@@ -35,6 +35,9 @@ type Site struct {
 	// Rank orders the site in the reading chain; one of the ReaderRank*
 	// constants.
 	Rank int
+	// TrailingFeed marks a site whose chapter number trails the sites that
+	// host the chapters; see PollRotationInfo.
+	TrailingFeed bool
 }
 
 func (s Site) Key() string  { return s.SiteKey }
@@ -50,6 +53,9 @@ func (s Site) HomeURL() string { return s.Home }
 
 // ReaderRank implements SiteInfo.
 func (s Site) ReaderRank() int { return s.Rank }
+
+// TrailingChapterFeed implements PollRotationInfo.
+func (s Site) TrailingChapterFeed() bool { return s.TrailingFeed }
 
 // AllowsHost reports whether host is one this site claims.
 func (s Site) AllowsHost(host string) bool { return HostAllowed(host, s.SiteHosts) }

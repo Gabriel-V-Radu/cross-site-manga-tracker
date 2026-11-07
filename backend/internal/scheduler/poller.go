@@ -35,7 +35,7 @@ type pollRepository interface {
 	// UpdatePollingState reports false when the tracker changed after the
 	// cycle snapshotted it and the write was therefore skipped.
 	UpdatePollingState(ctx context.Context, update repository.PollingUpdate) (bool, error)
-	MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time) error
+	MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time, polls []repository.SourcePoll) error
 }
 
 type Poller struct {
@@ -46,6 +46,10 @@ type Poller struct {
 	lowerConfirmationDelay time.Duration
 	logger                 *slog.Logger
 	stopCh                 chan struct{}
+	// now stamps each poll's writes, last_polled_at included, which is what
+	// orders the next cycle's rotation; tests replace it to step through
+	// cycles deterministically.
+	now func() time.Time
 	// started records whether Start ever ran. stopCh only closes from the
 	// goroutine Start launches, so a StopWait on a poller that was never
 	// started (polling disabled) would otherwise sit out its whole timeout
@@ -92,6 +96,7 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 		lowerConfirmationDelay: cfg.LowerConfirmationDelay,
 		logger:                 logger,
 		stopCh:                 make(chan struct{}),
+		now:                    time.Now,
 	}
 }
 
@@ -144,15 +149,29 @@ type cycleStats struct {
 	coolingResolves atomic.Int64
 }
 
-// RunOnce polls every due tracker. Trackers are sharded by their primary
-// source and each shard runs on its own goroutine: the shared transport
-// throttle paces requests per host and no two connectors share a host, so
-// serializing different sources against each other bought nothing — it made
-// the cycle as long as the sum of every host's waits instead of the slowest
-// one's. Within a shard trackers stay sequential, which keeps each host's
-// pacing queue at depth one and so clear of the throttle's queue-wait cap.
-// Fallback resolves do cross into other shards' hosts; the throttle paces
-// those too, which is why pollResolveTimeout budgets for a full queue.
+// plannedPoll is one tracker due this cycle, with the order its poll asks its
+// linked sites in.
+type plannedPoll struct {
+	tracker repository.PollingTracker
+	plan    pollPlan
+}
+
+// RunOnce polls every due tracker. Each tracker's poll is planned first (see
+// planPoll: whose turn it is among its linked sites), and polls are sharded
+// by the site their first request goes to, each shard on its own goroutine:
+// the shared transport throttle paces requests per host and no two connectors
+// share a host, so serializing different sources against each other bought
+// nothing — it made the cycle as long as the sum of every host's waits
+// instead of the slowest one's. Within a shard polls stay sequential, which
+// keeps each host's pacing queue at depth one and so clear of the throttle's
+// queue-wait cap. A poll that walks on past its turn crosses into another
+// shard's host; the throttle paces those too, which is why pollResolveTimeout
+// budgets for a full queue.
+//
+// Sharding by the turn rather than by the primary source is what lets the
+// rotation shorten the cycle: the library's MangaFire trackers used to queue
+// one after another behind MangaFire's pacing gap while the other hosts sat
+// idle.
 //
 // Every outcome is also filed on the registry's health board, which is what
 // the dashboard's source health panel reads; the cycle is folded into its
@@ -167,25 +186,40 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return err
 	}
 
-	shards := map[string][]repository.PollingTracker{}
+	var stats cycleStats
+	shards := map[string][]plannedPoll{}
 	for _, tracker := range trackers {
-		shards[tracker.SourceKey] = append(shards[tracker.SourceKey], tracker)
+		if p.shouldSkipIdle(tracker) {
+			stats.skippedIdle.Add(1)
+			continue
+		}
+		plan, ok := p.planPoll(tracker)
+		if !ok {
+			// Silent in the log on purpose (one line per tracker per cycle),
+			// but not on the board: a tracker on a retired site is never
+			// checked again, and only the panel can tell the reader to relink
+			// it.
+			p.logger.Debug("connector missing for tracker", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
+			board.RecordMissingConnector(tracker.SourceKey, seriesOf(tracker))
+			continue
+		}
+		key := plan.shardKey()
+		shards[key] = append(shards[key], plannedPoll{tracker: tracker, plan: plan})
 	}
 
-	var stats cycleStats
 	var wg sync.WaitGroup
 	for key, shard := range shards {
 		wg.Add(1)
-		go func(key string, shard []repository.PollingTracker) {
+		go func(key string, shard []plannedPoll) {
 			defer wg.Done()
 			started := time.Now()
-			for _, tracker := range shard {
+			for _, planned := range shard {
 				// A cancelled context fails every remaining resolve anyway;
 				// stopping here just skips the doomed churn on shutdown.
 				if ctx.Err() != nil {
 					return
 				}
-				p.pollTracker(ctx, tracker, &stats)
+				p.pollTracker(ctx, planned.tracker, planned.plan, &stats)
 			}
 			p.logger.Debug("poll shard finished",
 				"sourceKey", key,
@@ -213,134 +247,173 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// pollTracker runs one tracker's poll end to end: resolve (with fallback),
-// reconcile the reported chapter, persist. It is the body RunOnce used to
-// inline; each shard goroutine calls it for its own trackers only, so
-// everything here that touches shared state (repo, registry, throttle) must
-// stay goroutine-safe.
-func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, stats *cycleStats) {
-	if p.shouldSkipIdle(tracker) {
-		stats.skippedIdle.Add(1)
-		return
-	}
+func seriesOf(tracker repository.PollingTracker) connectors.TrackedSeries {
+	return connectors.TrackedSeries{ID: tracker.ID, Title: tracker.Title, ProfileID: tracker.ProfileID}
+}
 
+// pollAnswer is one linked site's successful answer during a poll.
+type pollAnswer struct {
+	candidate pollCandidate
+	result    *connectors.MangaResult
+}
+
+// pollTracker runs one tracker's poll end to end: ask its linked sites in the
+// plan's order until one gives a usable answer, reconcile the reported
+// chapter, persist. Each shard goroutine calls it for its own trackers only,
+// so everything here that touches shared state (repo, registry, throttle)
+// must stay goroutine-safe.
+//
+// The walk stops at the first site that answers with a chapter number it may
+// report, which in the common case is the first site asked: one request per
+// tracker per cycle. It walks on past a site that fails or is cooling down —
+// a source can go dark for reasons no retry fixes, a site put behind an
+// interactive bot challenge, a domain that moved — past one that answers
+// without a number (MangaUpdates past its staleness cutoff, a feed with no
+// English chapters, a scraper whose markup stopped matching, a number dropped
+// as junk), and past an alternate that claims a new chapter while not in step
+// (see pollCandidate.trusted): that claim is held, and stands only if no
+// site after it answers at all.
+func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) {
 	board := p.registry.HealthBoard()
-	series := connectors.TrackedSeries{ID: tracker.ID, Title: tracker.Title, ProfileID: tracker.ProfileID}
 
-	connector, ok := p.registry.Get(tracker.SourceKey)
-	if !ok {
-		// Silent in the log on purpose (one line per tracker per cycle), but
-		// not on the board: a tracker on a retired site is never checked
-		// again, and only the panel can tell the reader to relink it.
-		p.logger.Debug("connector missing for tracker", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
-		board.RecordMissingConnector(tracker.SourceKey, series)
-		return
-	}
+	var (
+		// answer is the report this poll goes by; held, an unconfirmed
+		// advance from an alternate not in step; firstAnswer, the first
+		// site that answered at all, number or not.
+		answer, held, firstAnswer *pollAnswer
+		// primaryResult is the primary's answer when it was asked and
+		// answered: only then are its canonical identifiers refreshed.
+		primaryResult *connectors.MangaResult
+		// turn is the site whose turn this poll was: the first one asked,
+		// or refused locally.
+		turn    *pollCandidate
+		turnErr error
+		// polls records every site that was actually reached, for the
+		// rotation's memory.
+		answered []pollAnswer
+		failed   []pollCandidate
+	)
 
-	result, resolveErr := p.resolveSource(ctx, connector, tracker.SourceURL)
-	if ctx.Err() == nil {
-		board.RecordResolve(tracker.SourceKey, connectors.RolePrimary, result, resolveErr)
-	}
+	for index := range plan.candidates {
+		candidate := plan.candidates[index]
+		role := connectors.RoleFallback
+		if turn == nil {
+			role = connectors.RoleTurn
+		}
 
-	// A source can go dark for reasons no retry fixes — a site put behind an
-	// interactive bot challenge, a domain that moved. When that happens, poll
-	// the tracker's other linked sources so the chapter count keeps advancing
-	// from whichever mirror is still readable.
-	usedFallback := false
-	reporterSourceID := tracker.SourceID
-	if resolveErr != nil {
-		// Shutdown cancelled the cycle mid-resolve. The error says nothing about
-		// the source, the alternates would fail the same way, and stamping
-		// last_checked_at with a dead context only adds a second warning per
+		result, err := p.resolveSource(ctx, candidate.connector, candidate.ref.SourceURL)
+		// Shutdown cancelled the cycle mid-resolve. The error says nothing
+		// about the site, the others would fail the same way, and stamping
+		// last_checked_at with a dead context only adds a warning per
 		// in-flight tracker to the shutdown log.
 		if ctx.Err() != nil {
 			return
 		}
-		if fallbackResult, fallbackSource := p.resolveFromAlternates(ctx, tracker); fallbackResult != nil {
-			p.logger.Info("poll fell back to alternate source",
-				"trackerId", tracker.ID,
-				"primarySourceKey", tracker.SourceKey,
-				"fallbackSourceKey", fallbackSource.SourceKey,
-				"primaryError", resolveErr)
-			result, resolveErr = fallbackResult, nil
-			usedFallback = true
-			reporterSourceID = fallbackSource.SourceID
+		if err == nil && result == nil {
+			err = errors.New("source returned no result")
 		}
-		board.RecordPrimaryFailure(tracker.SourceKey, series, usedFallback)
+		board.RecordResolve(candidate.ref.SourceKey, role, result, err)
+		if turn == nil {
+			turn, turnErr = &plan.candidates[index], err
+		}
+
+		if err != nil {
+			var cooling *connectors.SourceCoolingDownError
+			if errors.As(err, &cooling) {
+				// Refused locally: the site was never reached, so this does
+				// not use up its turn.
+				stats.coolingResolves.Add(1)
+			} else {
+				failed = append(failed, candidate)
+			}
+			p.logger.Debug("poll source failed",
+				"trackerId", tracker.ID, "sourceKey", candidate.ref.SourceKey, "error", err)
+			continue
+		}
+
+		result = p.dropImplausibleChapter(tracker, candidate, result)
+		current := pollAnswer{candidate: candidate, result: result}
+		answered = append(answered, current)
+		if candidate.primary {
+			primaryResult = result
+		}
+		if firstAnswer == nil {
+			firstAnswer = &current
+		}
+
+		chapter := result.LatestChapter
+		if chapter == nil {
+			continue
+		}
+		if !candidate.trusted && chapterAdvances(tracker.LatestKnownChapter, *chapter) {
+			if held == nil || betterFallbackResult(held.result, result) {
+				held = &current
+			}
+			continue
+		}
+		answer = &current
+		break
+	}
+	if answer == nil {
+		// Nothing trusted spoke up, so an unconfirmed advance is the best
+		// there is — the same call the fallback has always made when the
+		// primary was dark.
+		answer = held
 	}
 
-	if resolveErr != nil {
+	series := seriesOf(tracker)
+	var turnCooling *connectors.SourceCoolingDownError
+	turnWasCooling := errors.As(turnErr, &turnCooling)
+	if turnErr != nil {
+		board.RecordTurnFailure(turn.ref.SourceKey, series, firstAnswer != nil)
+		if firstAnswer != nil && !turnWasCooling {
+			p.logger.Info("poll fell back to another source",
+				"trackerId", tracker.ID,
+				"turnSourceKey", turn.ref.SourceKey,
+				"fallbackSourceKey", firstAnswer.candidate.ref.SourceKey,
+				"turnError", turnErr)
+		}
+	}
+
+	now := p.now().UTC()
+	if firstAnswer == nil {
 		// A cooling-down source is a known, already-logged outage; one Warn
 		// per tracker per cycle for it is noise, and the cycle summary
 		// reports the count. Anything else is worth a line of its own.
-		var cooling *connectors.SourceCoolingDownError
-		if errors.As(resolveErr, &cooling) {
-			stats.coolingResolves.Add(1)
-			p.logger.Debug("poll resolve skipped: source cooling down", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+		if turnWasCooling {
+			p.logger.Debug("poll resolve skipped: source cooling down", "trackerId", tracker.ID, "sourceKey", turn.ref.SourceKey, "error", turnErr)
 		} else {
-			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", tracker.SourceKey, "error", resolveErr)
+			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", turn.ref.SourceKey, "error", turnErr, "sitesTried", len(plan.candidates))
 		}
 		// A failed check is still a check. Without stamping it, a non-reading
 		// tracker whose sources are all dark keeps last_checked_at frozen, so
 		// shouldSkipIdle can never defer it and the poller retries it in full
 		// every cycle for as long as the outage lasts.
-		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, time.Now().UTC()); err != nil {
+		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, now, sourcePolls(nil, failed, nil)); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
 		return
 	}
 
-	// A corrupt number from any single source must not poison the stored
-	// chapter: once stored, the same source re-confirms it every cycle and
-	// the pending-lower path can never walk it back. Fallback candidates
-	// are filtered inside resolveFromAlternates; this catches the primary.
-	if result.LatestChapter != nil && implausibleChapterAdvance(tracker.LatestKnownChapter, *result.LatestChapter) {
-		p.logger.Warn("poll reported an implausible chapter jump; ignoring the number",
-			"trackerId", tracker.ID,
-			"title", tracker.Title,
-			"sourceKey", tracker.SourceKey,
-			"stored", derefChapter(tracker.LatestKnownChapter),
-			"reported", *result.LatestChapter,
-			"usedFallback", usedFallback)
-		result.LatestChapter = nil
-	}
-
-	// A primary can answer successfully and still carry no chapter number:
-	// MangaUpdates once its newest release is past the staleness cutoff (a
-	// licensed series the scanlators dropped), a feed with no English
-	// chapters, Asura or Flame the day their markup stops matching — or the
-	// number was junk and was dropped just above. Only an error used to reach
-	// the alternates, so such a tracker froze on its old chapter with nothing
-	// logged while a linked mirror kept listing new ones. The alternates'
-	// chapter and its date are taken only when one of them actually has a
-	// number; otherwise the primary's answer stands. Either way the primary
-	// did resolve, so its canonical id and URL are still written below:
-	// usedFallback, which blanks them, stays false.
-	chapterFromFallback := usedFallback
-	if !usedFallback && result.LatestChapter == nil && len(tracker.AlternateSources) > 0 {
-		alternate, alternateSource := p.resolveFromAlternates(ctx, tracker)
-		if alternate != nil && alternate.LatestChapter != nil {
-			// A copy, so the connector's own result is never rewritten with
-			// another site's data.
-			merged := *result
-			merged.LatestChapter = alternate.LatestChapter
-			merged.LastUpdatedAt = alternate.LastUpdatedAt
-			result = &merged
-			chapterFromFallback = true
-			reporterSourceID = alternateSource.SourceID
-			p.logger.Debug("poll took the chapter from an alternate: the primary reported none",
+	var reported *float64
+	var reportedReleaseAt *time.Time
+	chapterFromAlternate := false
+	var reporterSourceID int64
+	if answer != nil {
+		reported = answer.result.LatestChapter
+		reportedReleaseAt = answer.result.LastUpdatedAt
+		chapterFromAlternate = !answer.candidate.primary
+		reporterSourceID = answer.candidate.ref.SourceID
+		if turn != nil && answer.candidate.ref.SourceKey != turn.ref.SourceKey {
+			p.logger.Debug("poll took the chapter from a site past its turn",
 				"trackerId", tracker.ID,
-				"primarySourceKey", tracker.SourceKey,
-				"fallbackSourceKey", alternateSource.SourceKey,
-				"reported", *alternate.LatestChapter)
-		} else {
-			p.logger.Debug("poll found no chapter number on the primary or any alternate",
-				"trackerId", tracker.ID, "sourceKey", tracker.SourceKey)
+				"turnSourceKey", turn.ref.SourceKey,
+				"reporterSourceKey", answer.candidate.ref.SourceKey,
+				"reported", *reported)
 		}
 	}
 
-	now := time.Now().UTC()
-	outcome := decideChapter(tracker, result.LatestChapter, chapterFromFallback, now, p.lowerConfirmationDelay)
+	outcome := decideChapter(tracker, reported, chapterFromAlternate, now, p.lowerConfirmationDelay)
 	latest := outcome.latest
 	if outcome.corrected {
 		p.logger.Info("poll corrected the stored chapter downwards",
@@ -348,90 +421,88 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			"title", tracker.Title,
 			"from", derefChapter(tracker.LatestKnownChapter),
 			"to", derefChapter(latest),
-			"sourceKey", tracker.SourceKey,
-			"usedFallback", chapterFromFallback)
+			"sourceKey", answer.candidate.ref.SourceKey,
+			"fromAlternate", chapterFromAlternate)
 	}
 
 	// Whether this poll's report IS the stored number — an advance, a
 	// correction, a first fill, or a plain confirmation — as opposed to a
 	// report that lost the reconciliation: a lagging mirror, a pending lower,
-	// a correction clamped at the read position, a number dropped as junk.
-	reportIsStored := latest != nil && result.LatestChapter != nil &&
-		sameChapterNumber(*latest, *result.LatestChapter)
+	// a correction clamped at the read position, or no number at all.
+	reportIsStored := latest != nil && reported != nil && sameChapterNumber(*latest, *reported)
 
-	// The source whose report the stored number now reflects. A plain
-	// confirmation records it too, which backfills trackers from before the
-	// column existed and keeps the attribution current. A poll whose report
-	// lost the reconciliation must not claim a number it did not supply.
+	// The source whose report put the stored number there. With the poll
+	// rotating, every linked site confirms the number in turn; letting each
+	// confirmation take over the attribution would hand it to a different
+	// site every cycle, and with it the primary's right to correct the number
+	// at once (decideChapter). So the site that found the number keeps it,
+	// and a plain confirmation only fills an attribution that is missing. A
+	// poll whose report lost the reconciliation must not claim a number it
+	// did not supply.
 	var latestChapterSourceID *int64
-	if reporterSourceID > 0 && reportIsStored {
+	if reporterSourceID > 0 && reportIsStored &&
+		(chapterNumberChanged(tracker.LatestKnownChapter, latest) || tracker.LatestChapterSourceID == nil) {
 		latestChapterSourceID = &reporterSourceID
 	}
 
 	// A correction counts here as much as an advance: when the recorded
 	// chapter changes at all the stored date belongs to the chapter that was
 	// replaced, so it has to be rewritten. Comparing against `latest` rather
-	// than the raw result keeps the fallback rule above intact — a mirror
+	// than the raw report keeps the lagging-mirror rule intact — a mirror
 	// that merely lags leaves `latest` alone and so reads as no change.
 	chapterMoved := chapterNumberChanged(tracker.LatestKnownChapter, latest)
-	latestReleaseAt := result.LastUpdatedAt
+	latestReleaseAt := reportedReleaseAt
 	if !chapterMoved && (tracker.LatestReleaseAt != nil || !reportIsStored) {
-		// The chapter didn't move, so keep the stored release date
-		// rather than rewriting it with the source's current value —
-		// some sources bump their update timestamp without releasing
-		// anything, which made dates drift toward "just now". A missing
-		// date is filled only from a report of the stored chapter itself:
-		// a lagging mirror's lower chapter, or a number dropped as junk,
-		// carries a date that belongs to some other chapter, and once
+		// The chapter didn't move, so keep the stored release date rather
+		// than rewriting it with the source's current value — some sources
+		// bump their update timestamp without releasing anything, which made
+		// dates drift toward "just now". A missing date is filled only from a
+		// report of the stored chapter itself: a lagging mirror's lower
+		// chapter carries a date that belongs to some other chapter, and once
 		// written it would sit beside the stored one as if exact until the
 		// next release.
 		latestReleaseAt = nil
 	}
-	// chapterMoved, not newChapter: a correction downward changes the recorded
-	// chapter just as much as an advance does, and leaves the stored date
-	// describing a chapter that is no longer there. Gating on the advance-only
-	// test left that stale date on the card, next to a number it never belonged
-	// to, and the default ordering sorts by it.
+	// chapterMoved, not an advance-only test: a correction downward changes
+	// the recorded chapter just as much as an advance does, and leaves the
+	// stored date describing a chapter that is no longer there.
 	clearLatestReleaseAt := latestReleaseAt == nil && chapterMoved
-	if chapterFromFallback {
-		// A fallback source may know nothing about release dates (MangaBuddy
-		// reports none usable), and dropping to one must never destroy what the
-		// primary already recorded. Keeping a stale date beside a newer chapter
-		// is imperfect; erasing 355 series' dates is not a trade worth making.
+	if chapterFromAlternate {
+		// An alternate may know nothing about release dates, and its number
+		// standing in must never destroy what the primary already recorded.
+		// Keeping a stale date beside a newer chapter is imperfect; erasing
+		// a library's dates is not a trade worth making.
 		clearLatestReleaseAt = false
 	}
 
+	// The chapter number carries across sources; the identifiers do not. Only
+	// a poll the primary answered refreshes the primary's canonical id and
+	// URL and its tracker_sources mirror. Writing an alternate's id/URL here
+	// would silently repoint the tracker's primary source at the mirror while
+	// source_id still names the original.
 	var canonicalSourceItemID *string
-	resolvedSourceItemID := strings.TrimSpace(result.SourceItemID)
-	if resolvedSourceItemID != "" {
-		canonicalSourceItemID = &resolvedSourceItemID
-	} else {
-		canonicalSourceItemID = tracker.SourceItemID
-	}
-	canonicalSourceURL := strings.TrimSpace(result.URL)
-	if canonicalSourceURL == "" {
-		canonicalSourceURL = tracker.SourceURL
-	}
-	sourceID := tracker.SourceID
-	currentSourceURL := tracker.SourceURL
-
-	if usedFallback {
-		// The chapter number carries across sources; the identifiers do not.
-		// Writing the fallback's id/URL here would silently repoint the
-		// tracker's primary source at the mirror while source_id still names
-		// the original, so a fallback poll updates progress only and leaves
-		// the primary pointer for the user to change deliberately.
-		canonicalSourceItemID = nil
-		canonicalSourceURL = ""
-		sourceID = 0
-		currentSourceURL = ""
+	canonicalSourceURL := ""
+	var sourceID int64
+	currentSourceURL := ""
+	if primaryResult != nil {
+		if resolvedSourceItemID := strings.TrimSpace(primaryResult.SourceItemID); resolvedSourceItemID != "" {
+			canonicalSourceItemID = &resolvedSourceItemID
+		} else {
+			canonicalSourceItemID = tracker.SourceItemID
+		}
+		canonicalSourceURL = strings.TrimSpace(primaryResult.URL)
+		if canonicalSourceURL == "" {
+			canonicalSourceURL = tracker.SourceURL
+		}
+		sourceID = tracker.SourceID
+		currentSourceURL = tracker.SourceURL
 	}
 
 	// The Snapshot fields come straight from the tracker as the cycle read
 	// it, not from canonicalSourceURL or currentSourceURL: the first is what
-	// this poll wants to write and both are blanked on a fallback, while the
-	// stale-write guard has to name what the row held, whichever source
-	// answered.
+	// this poll wants to write and both are blank when the primary was not
+	// asked, while the stale-write guard has to name what the row held,
+	// whichever source answered.
 	applied, err := p.repo.UpdatePollingState(ctx, repository.PollingUpdate{
 		TrackerID:                  tracker.ID,
 		SnapshotSourceID:           tracker.SourceID,
@@ -446,6 +517,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		LatestReleaseAt:            latestReleaseAt,
 		ClearLatestReleaseAt:       clearLatestReleaseAt,
 		PendingLowerChapter:        outcome.pendingLower,
+		SourcePolls:                sourcePolls(answered, failed, latest),
 		CheckedAt:                  now,
 	})
 	if err != nil {
@@ -453,6 +525,56 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	} else if !applied {
 		p.logger.Debug("poll update skipped: tracker changed mid-cycle", "trackerId", tracker.ID, "snapshotSourceId", tracker.SourceID)
 	}
+}
+
+// sourcePolls turns the sites one poll reached into the rotation's memory: a
+// site is in step when the number it answered is the chapter the poll stores.
+func sourcePolls(answered []pollAnswer, failed []pollCandidate, latest *float64) []repository.SourcePoll {
+	polls := make([]repository.SourcePoll, 0, len(answered)+len(failed))
+	for _, answer := range answered {
+		chapter := answer.result.LatestChapter
+		polls = append(polls, repository.SourcePoll{
+			SourceID:  answer.candidate.ref.SourceID,
+			SourceURL: answer.candidate.ref.SourceURL,
+			Primary:   answer.candidate.primary,
+			Answered:  true,
+			InStep:    chapter != nil && latest != nil && sameChapterNumber(*chapter, *latest),
+		})
+	}
+	for _, candidate := range failed {
+		polls = append(polls, repository.SourcePoll{
+			SourceID:  candidate.ref.SourceID,
+			SourceURL: candidate.ref.SourceURL,
+			Primary:   candidate.primary,
+		})
+	}
+	return polls
+}
+
+// dropImplausibleChapter returns result without its chapter number when that
+// number is too far above the stored one to be real (implausibleChapterAdvance).
+// A corrupt number from any single source must not poison the stored
+// chapter: once stored, the same source re-confirms it every time it is asked
+// and the pending-lower path can never walk it back. It returns a copy, so a
+// connector's own result is never rewritten.
+func (p *Poller) dropImplausibleChapter(tracker repository.PollingTracker, candidate pollCandidate, result *connectors.MangaResult) *connectors.MangaResult {
+	if result.LatestChapter == nil || !implausibleChapterAdvance(tracker.LatestKnownChapter, *result.LatestChapter) {
+		return result
+	}
+	p.logger.Warn("poll source reported an implausible chapter jump; ignoring the number",
+		"trackerId", tracker.ID,
+		"title", tracker.Title,
+		"sourceKey", candidate.ref.SourceKey,
+		"stored", derefChapter(tracker.LatestKnownChapter),
+		"reported", *result.LatestChapter)
+	copied := *result
+	copied.LatestChapter = nil
+	return &copied
+}
+
+// chapterAdvances reports whether reported would move the tracker forward.
+func chapterAdvances(stored *float64, reported float64) bool {
+	return stored == nil || (reported > *stored && !sameChapterNumber(reported, *stored))
 }
 
 // resolveSource asks a connector for a series — unless the connector already
@@ -494,12 +616,15 @@ type chapterOutcome struct {
 //
 // A primary source is authoritative over its own numbers: whatever it reports is
 // stored, corrections downwards included, which is how a source that used to
-// over-report gets to fix its own history. A fallback is not — it may be a mirror
-// that simply lags — so a lower number from one is only applied once it has kept
-// reporting the same value for confirmationDelay. Until then it is remembered, not
-// acted on. The same wait applies to the primary when the stored number is not
-// its own: a fallback that advanced the tracker while the primary was dark put a
-// number there the primary may simply not have indexed yet.
+// over-report gets to fix its own history. An alternate is not — it may be a
+// mirror that simply lags — so a lower number from one is only applied once it
+// has kept reporting the same value for confirmationDelay. Until then it is
+// remembered, not acted on. The same wait applies to the primary when the stored
+// number is not its own: an alternate that advanced the tracker on its turn, or
+// while the primary was dark, put a number there the primary may simply not
+// have indexed yet. With the poll rotating across sites, any site in step that
+// agrees with the stored number clears such a pending lower, so it only ever
+// confirms when every site asked keeps reporting it for the whole window.
 //
 // Both paths refuse to record a chapter below the one the reader has already
 // finished, so no correction can make read chapters look unread.
@@ -587,66 +712,11 @@ func derefChapter(value *float64) float64 {
 	return *value
 }
 
-// resolveFromAlternates consults every one of the tracker's non-primary linked
-// sources and returns the best answer: the highest chapter number, breaking
-// ties in favour of a result that carries a release date. Taking the first
-// source that answered used to let a mirror that is merely alive-but-stale
-// (MangaBuddy lags real releases by chapters) shadow a fresher one linked
-// later (MangaUpdates). It returns (nil, zero) when the tracker has no
-// alternates or none of them answer, leaving the caller to report the primary
-// source's error.
-func (p *Poller) resolveFromAlternates(ctx context.Context, tracker repository.PollingTracker) (*connectors.MangaResult, repository.TrackerSourceRef) {
-	var best *connectors.MangaResult
-	var bestSource repository.TrackerSourceRef
-
-	for _, source := range tracker.AlternateSources {
-		if strings.TrimSpace(source.SourceURL) == "" {
-			continue
-		}
-
-		connector, ok := p.registry.Get(source.SourceKey)
-		if !ok {
-			continue
-		}
-
-		result, err := p.resolveSource(ctx, connector, source.SourceURL)
-		p.registry.HealthBoard().RecordResolve(source.SourceKey, connectors.RoleFallback, result, err)
-		if err != nil {
-			p.logger.Debug("poll fallback source failed",
-				"trackerId", tracker.ID, "sourceKey", source.SourceKey, "error", err)
-			continue
-		}
-		if result == nil {
-			continue
-		}
-
-		// Drop an implausible number here rather than after picking the best:
-		// one source's junk answer would otherwise shadow a sane advance from
-		// another mirror, since the highest number wins the comparison below.
-		if result.LatestChapter != nil && implausibleChapterAdvance(tracker.LatestKnownChapter, *result.LatestChapter) {
-			p.logger.Warn("fallback source reported an implausible chapter jump; ignoring the number",
-				"trackerId", tracker.ID,
-				"title", tracker.Title,
-				"sourceKey", source.SourceKey,
-				"stored", derefChapter(tracker.LatestKnownChapter),
-				"reported", *result.LatestChapter)
-			result.LatestChapter = nil
-		}
-
-		if betterFallbackResult(best, result) {
-			best = result
-			bestSource = source
-		}
-	}
-
-	return best, bestSource
-}
-
 // betterFallbackResult decides whether candidate should replace current as the
-// fallback answer. Ranking two answers is the shared best-source rule; "any
-// answer at all beats none" is this caller's own, because a fallback that
-// resolved is also what tells the poll the tracker was reached — even when the
-// site had no chapter number to give.
+// held answer: between unconfirmed advances from sites not in step, the poll
+// keeps the best one, so a mirror that is alive but stale does not shadow a
+// fresher one asked after it. Ranking two answers is the shared best-source
+// rule; "any answer at all beats none" is this caller's own.
 func betterFallbackResult(current *connectors.MangaResult, candidate *connectors.MangaResult) bool {
 	if current == nil {
 		return true

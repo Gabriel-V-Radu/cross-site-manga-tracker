@@ -152,12 +152,13 @@ func ClassifyOutcome(result *MangaResult, err error) Outcome {
 	return Outcome{Kind: OutcomeFailed, Label: "request failed"}
 }
 
-// ResolveRole says why a source was asked: as a tracker's primary, or as one
-// of its alternates after the primary had nothing.
+// ResolveRole says why a source was asked: because it was the tracker's turn
+// on this site (the poller rotates each tracker across its linked sites), or
+// as a fallback after the site whose turn it was had nothing usable.
 type ResolveRole uint8
 
 const (
-	RolePrimary ResolveRole = iota
+	RoleTurn ResolveRole = iota
 	RoleFallback
 )
 
@@ -192,9 +193,9 @@ type sourceTally struct {
 	// lastFailLabel/lastError describe the most recent failure in the cycle.
 	lastFailLabel string
 	lastError     string
-	// covered and unchecked count trackers whose primary is this source and
-	// failed: covered when an alternate answered instead, unchecked when
-	// nothing did.
+	// covered and unchecked count trackers whose turn this source had and
+	// failed: covered when another linked site answered instead, unchecked
+	// when nothing did.
 	covered        int
 	uncheckedCount int
 	unchecked      []TrackedSeries
@@ -352,9 +353,9 @@ func (b *SourceHealthBoard) RecordResolve(sourceKey string, role ResolveRole, re
 	}
 }
 
-// RecordPrimaryFailure files a tracker whose primary source (sourceKey)
-// failed this cycle; covered says whether an alternate answered instead.
-func (b *SourceHealthBoard) RecordPrimaryFailure(sourceKey string, series TrackedSeries, covered bool) {
+// RecordTurnFailure files a tracker whose turn this cycle went to sourceKey,
+// which failed it; covered says whether another linked site answered instead.
+func (b *SourceHealthBoard) RecordTurnFailure(sourceKey string, series TrackedSeries, covered bool) {
 	if b == nil || sourceKey == "" {
 		return
 	}
@@ -536,7 +537,7 @@ type SourceHealth struct {
 	BadLinks   int
 	AsFallback int
 
-	// Trackers whose primary is this source and failed last cycle.
+	// Trackers whose turn this source had and failed last cycle.
 	Covered        int
 	UncheckedCount int
 	Unchecked      []TrackedSeries

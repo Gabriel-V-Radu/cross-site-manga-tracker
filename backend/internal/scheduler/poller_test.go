@@ -29,6 +29,8 @@ type fakeRepo struct {
 	clearedReleaseAt    bool
 	updatedPendingLower *float64
 	markedChecked       []int64
+	// sourcePolls collects every poll's per-site record, from both writes.
+	sourcePolls []repository.SourcePoll
 
 	updatedSnapshotSourceID  int64
 	updatedSnapshotSourceURL string
@@ -55,13 +57,15 @@ func (f *fakeRepo) UpdatePollingState(_ context.Context, update repository.Polli
 	f.updatedSnapshotSourceID = update.SnapshotSourceID
 	f.updatedSnapshotSourceURL = update.SnapshotSourceURL
 	f.updatedSnapshotLatest = update.SnapshotLatestKnownChapter
+	f.sourcePolls = append(f.sourcePolls, update.SourcePolls...)
 	return true, nil
 }
 
-func (f *fakeRepo) MarkPollCheckedAt(_ context.Context, trackerID int64, _ time.Time) error {
+func (f *fakeRepo) MarkPollCheckedAt(_ context.Context, trackerID int64, _ time.Time, polls []repository.SourcePoll) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markedChecked = append(f.markedChecked, trackerID)
+	f.sourcePolls = append(f.sourcePolls, polls...)
 	return nil
 }
 

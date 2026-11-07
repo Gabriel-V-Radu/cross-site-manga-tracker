@@ -91,7 +91,7 @@ func TestSourceHealthBoardOneBadCycleIsABlipTwoAreAnOutage(t *testing.T) {
 	board, now := testBoard()
 	down := fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Err: errors.New("refused")})
 
-	runCycle(board, func() { board.RecordResolve("asura", RolePrimary, nil, down) })
+	runCycle(board, func() { board.RecordResolve("asura", RoleTurn, nil, down) })
 	row := boardRow(t, board, "asura")
 	if row.State != SourceStateDegraded || row.Reason != "unreachable" || row.BadCycles != 1 {
 		t.Fatalf("one failed request should only mark the source degraded, got %+v", row)
@@ -99,7 +99,7 @@ func TestSourceHealthBoardOneBadCycleIsABlipTwoAreAnOutage(t *testing.T) {
 	firstBad := *now
 
 	*now = now.Add(30 * time.Minute)
-	runCycle(board, func() { board.RecordResolve("asura", RolePrimary, nil, down) })
+	runCycle(board, func() { board.RecordResolve("asura", RoleTurn, nil, down) })
 	row = boardRow(t, board, "asura")
 	if row.State != SourceStateFailing || row.BadCycles != 2 {
 		t.Fatalf("a second cycle with nothing getting through is failing, got %+v", row)
@@ -112,7 +112,7 @@ func TestSourceHealthBoardOneBadCycleIsABlipTwoAreAnOutage(t *testing.T) {
 	}
 
 	*now = now.Add(30 * time.Minute)
-	runCycle(board, func() { board.RecordResolve("asura", RolePrimary, &MangaResult{}, nil) })
+	runCycle(board, func() { board.RecordResolve("asura", RoleTurn, &MangaResult{}, nil) })
 	row = boardRow(t, board, "asura")
 	if row.State != SourceStateOK || row.BadCycles != 0 || !row.Since.IsZero() || row.Reason != "" {
 		t.Fatalf("an answered request clears the outage, got %+v", row)
@@ -125,7 +125,7 @@ func TestSourceHealthBoardOneBadCycleIsABlipTwoAreAnOutage(t *testing.T) {
 func TestSourceHealthBoardShowsTheRunningCycleSoFar(t *testing.T) {
 	board, now := testBoard()
 	chapter := 1.0
-	runCycle(board, func() { board.RecordResolve("asura", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil) })
+	runCycle(board, func() { board.RecordResolve("asura", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil) })
 
 	*now = now.Add(30 * time.Minute)
 	board.BeginCycle()
@@ -133,7 +133,7 @@ func TestSourceHealthBoardShowsTheRunningCycleSoFar(t *testing.T) {
 	timeout := fmt.Errorf("request failed: %w", &net.OpError{Op: "dial", Err: timeoutError{}})
 	for i := 0; i < 4; i++ {
 		*now = now.Add(30 * time.Second)
-		board.RecordResolve("asura", RolePrimary, nil, timeout)
+		board.RecordResolve("asura", RoleTurn, nil, timeout)
 	}
 
 	row := boardRow(t, board, "asura")
@@ -161,9 +161,9 @@ func TestSourceHealthBoardManyFailuresFailAtOnce(t *testing.T) {
 
 	runCycle(board, func() {
 		for i := 0; i < 9; i++ {
-			board.RecordResolve("comick", RolePrimary, nil, blocked)
+			board.RecordResolve("comick", RoleTurn, nil, blocked)
 		}
-		board.RecordResolve("comick", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil)
+		board.RecordResolve("comick", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil)
 	})
 	row := boardRow(t, board, "comick")
 	if row.State != SourceStateFailing || row.Reason != "blocked (HTTP 403)" {
@@ -180,10 +180,10 @@ func TestSourceHealthBoardPartialFailureIsDegraded(t *testing.T) {
 
 	runCycle(board, func() {
 		for i := 0; i < 6; i++ {
-			board.RecordResolve("mangahub", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil)
+			board.RecordResolve("mangahub", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil)
 		}
-		board.RecordResolve("mangahub", RolePrimary, nil, &HTTPStatusError{StatusCode: 502})
-		board.RecordResolve("mangahub", RolePrimary, nil, &HTTPStatusError{StatusCode: 502})
+		board.RecordResolve("mangahub", RoleTurn, nil, &HTTPStatusError{StatusCode: 502})
+		board.RecordResolve("mangahub", RoleTurn, nil, &HTTPStatusError{StatusCode: 502})
 	})
 	row := boardRow(t, board, "mangahub")
 	if row.State != SourceStateDegraded || row.Reason != "2 of 8 series failed: server error (HTTP 502)" {
@@ -195,9 +195,9 @@ func TestSourceHealthBoardIgnoresWhatSaysNothingAboutTheSite(t *testing.T) {
 	board, _ := testBoard()
 
 	runCycle(board, func() {
-		board.RecordResolve("mangadex", RolePrimary, nil, context.Canceled)
-		board.RecordResolve("mangadex", RolePrimary, nil, &SourceCoolingDownError{Host: "api.mangadex.org", QueueFull: true})
-		board.RecordResolve("mangadex", RolePrimary, nil, errors.New("url does not belong to mangadex"))
+		board.RecordResolve("mangadex", RoleTurn, nil, context.Canceled)
+		board.RecordResolve("mangadex", RoleTurn, nil, &SourceCoolingDownError{Host: "api.mangadex.org", QueueFull: true})
+		board.RecordResolve("mangadex", RoleTurn, nil, errors.New("url does not belong to mangadex"))
 	})
 	row := boardRow(t, board, "mangadex")
 	if row.State != SourceStateUnknown {
@@ -212,9 +212,9 @@ func TestSourceHealthBoardMostlyNotFoundIsDegraded(t *testing.T) {
 	board, _ := testBoard()
 	runCycle(board, func() {
 		for i := 0; i < 4; i++ {
-			board.RecordResolve("webtoons", RolePrimary, nil, &HTTPStatusError{StatusCode: 404})
+			board.RecordResolve("webtoons", RoleTurn, nil, &HTTPStatusError{StatusCode: 404})
 		}
-		board.RecordResolve("webtoons", RolePrimary, &MangaResult{}, nil)
+		board.RecordResolve("webtoons", RoleTurn, &MangaResult{}, nil)
 	})
 	row := boardRow(t, board, "webtoons")
 	if row.State != SourceStateDegraded || row.Reason != "most series not found (links moved?)" {
@@ -225,7 +225,7 @@ func TestSourceHealthBoardMostlyNotFoundIsDegraded(t *testing.T) {
 func TestSourceHealthBoardUnaskedSourceKeepsItsVerdict(t *testing.T) {
 	board, _ := testBoard()
 	chapter := 1.0
-	runCycle(board, func() { board.RecordResolve("flame", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil) })
+	runCycle(board, func() { board.RecordResolve("flame", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil) })
 	runCycle(board, func() {})
 	if row := boardRow(t, board, "flame"); row.State != SourceStateOK {
 		t.Fatalf("a cycle that did not need the source is no evidence: %+v", row)
@@ -235,7 +235,7 @@ func TestSourceHealthBoardUnaskedSourceKeepsItsVerdict(t *testing.T) {
 func TestSourceHealthBoardAbortDropsTheCycle(t *testing.T) {
 	board, _ := testBoard()
 	board.BeginCycle()
-	board.RecordResolve("asura", RolePrimary, nil, &HTTPStatusError{StatusCode: 500})
+	board.RecordResolve("asura", RoleTurn, nil, &HTTPStatusError{StatusCode: 500})
 	board.AbortCycle()
 	board.EndCycle()
 	if _, ok := board.view().records["asura"]; ok {
@@ -248,10 +248,10 @@ func TestSourceHealthBoardAbortDropsTheCycle(t *testing.T) {
 func TestSourceHealthBoardCoverageAndOrphans(t *testing.T) {
 	board, _ := testBoard()
 	runCycle(board, func() {
-		board.RecordResolve("mangafire", RolePrimary, nil, &HTTPStatusError{StatusCode: 403})
-		board.RecordPrimaryFailure("mangafire", TrackedSeries{ID: 1, Title: "A", ProfileID: 1}, true)
-		board.RecordResolve("mangafire", RolePrimary, nil, &HTTPStatusError{StatusCode: 403})
-		board.RecordPrimaryFailure("mangafire", TrackedSeries{ID: 2, Title: "B", ProfileID: 2}, false)
+		board.RecordResolve("mangafire", RoleTurn, nil, &HTTPStatusError{StatusCode: 403})
+		board.RecordTurnFailure("mangafire", TrackedSeries{ID: 1, Title: "A", ProfileID: 1}, true)
+		board.RecordResolve("mangafire", RoleTurn, nil, &HTTPStatusError{StatusCode: 403})
+		board.RecordTurnFailure("mangafire", TrackedSeries{ID: 2, Title: "B", ProfileID: 2}, false)
 		board.RecordResolve("comick", RoleFallback, &MangaResult{}, nil)
 		board.RecordMissingConnector("mangabuddy", TrackedSeries{ID: 3, Title: "C", ProfileID: 1})
 	})
@@ -297,8 +297,8 @@ func TestNilSourceHealthBoardIsInert(t *testing.T) {
 	var board *SourceHealthBoard
 	board.PollerStarted(time.Minute)
 	board.BeginCycle()
-	board.RecordResolve("a", RolePrimary, nil, errors.New("x"))
-	board.RecordPrimaryFailure("a", TrackedSeries{}, false)
+	board.RecordResolve("a", RoleTurn, nil, errors.New("x"))
+	board.RecordTurnFailure("a", TrackedSeries{}, false)
 	board.RecordMissingConnector("a", TrackedSeries{})
 	board.EndCycle()
 	board.AbortCycle()
@@ -336,7 +336,7 @@ func TestRegistrySourceHealthReport(t *testing.T) {
 	}
 	board := registry.HealthBoard()
 	chapter := 1.0
-	runCycle(board, func() { board.RecordResolve("mid", RolePrimary, &MangaResult{LatestChapter: &chapter}, nil) })
+	runCycle(board, func() { board.RecordResolve("mid", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil) })
 
 	report := registry.SourceHealthReport(time.Now())
 	if len(report.Sources) != 3 {

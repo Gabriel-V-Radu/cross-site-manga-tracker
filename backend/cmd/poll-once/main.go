@@ -46,6 +46,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The binary being rehearsed may carry a migration the snapshot has not
+	// seen yet; the server applies them on start, and so does the rehearsal.
+	if err := database.ApplyMigrations(db); err != nil {
+		fmt.Fprintln(os.Stderr, "apply migrations:", err)
+		os.Exit(1)
+	}
+
 	repo := repository.NewTrackerRepository(db)
 	registry := connectordefaults.NewRegistry()
 	poller := scheduler.NewPoller(repo, registry, scheduler.PollerConfig{}, logger)
@@ -55,13 +62,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "list trackers:", err)
 		os.Exit(1)
 	}
-	shards := map[string]int{}
+	// By primary source, for comparison: the cycle itself shards by the site
+	// each poll's turn goes to, and logs those shards as it finishes them.
+	primaries := map[string]int{}
 	for _, tracker := range trackers {
-		shards[tracker.SourceKey]++
+		primaries[tracker.SourceKey]++
 	}
-	logger.Info("starting one poll cycle", "trackers", len(trackers), "shards", len(shards))
-	for key, count := range shards {
-		logger.Info("shard", "sourceKey", key, "trackers", count)
+	logger.Info("starting one poll cycle", "trackers", len(trackers))
+	for key, count := range primaries {
+		logger.Info("trackers by primary source", "sourceKey", key, "trackers", count)
 	}
 
 	started := time.Now()

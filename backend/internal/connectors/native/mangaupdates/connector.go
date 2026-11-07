@@ -52,13 +52,16 @@ const (
 // URLs handed back are stored in trackers and opened in a browser. MangaUpdates
 // hosts no chapters and resolves no reader links, so it never actually wins a
 // turn in the reading chain; the default tier is simply where a site that does
-// not claim to be better than the rest belongs.
+// not claim to be better than the rest belongs. Its feed is a record of
+// releases other sites already published, so the poller never gives it a turn
+// of its own and asks it only as a fallback.
 var site = connectors.Site{
-	SiteKey:   "mangaupdates",
-	SiteName:  "MangaUpdates",
-	SiteHosts: []string{"mangaupdates.com"},
-	Home:      canonicalSiteURL,
-	Rank:      connectors.ReaderRankDefault,
+	SiteKey:      "mangaupdates",
+	SiteName:     "MangaUpdates",
+	SiteHosts:    []string{"mangaupdates.com"},
+	Home:         canonicalSiteURL,
+	Rank:         connectors.ReaderRankDefault,
+	TrailingFeed: true,
 }
 
 var (
