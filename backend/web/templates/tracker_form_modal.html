@@ -2,7 +2,7 @@
     <div class="modal-card" onclick="event.stopPropagation()">
         <header>
             <h2>{{if eq .Mode "edit"}}Edit Tracker{{else}}New Tracker{{end}}</h2>
-            <button type="button" class="close-btn" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">×</button>
+            <button type="button" class="close-btn" aria-label="Close" hx-get="/dashboard/trackers/empty-modal" hx-target="#modal-zone">×</button>
         </header>
 
         <form class="tracker-form"
@@ -160,14 +160,21 @@
                 </div>
             </fieldset>
 
+            {{/* min/max: a negative number was accepted and the card then read
+                 "Ch. -3"; the range is the one the server accepts. step="any"
+                 comes with them: a min makes the steps count from 0, so with
+                 step="0.1" a stored chapter such as 10.25 would fail validation
+                 and the form could not be saved at all. Such a number already
+                 failed when a search pick or a linked site wrote it, or the
+                 reader typed it. */}}
             <div class="split-row">
                 <label>
                     Last Read
-                    <input type="number" step="0.1" name="last_read_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LastReadChapter}}{{end}}">
+                    <input type="number" step="any" min="0" max="100000" name="last_read_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LastReadChapter}}{{end}}">
                 </label>
                 <label>
                     Latest Known
-                    <input type="number" step="0.1" name="latest_known_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LatestKnownChapter}}{{end}}">
+                    <input type="number" step="any" min="0" max="100000" name="latest_known_chapter" value="{{if .Tracker}}{{chapterInputValue .Tracker.LatestKnownChapter}}{{end}}">
                     <span class="field-note" data-chapter-lookup-note hidden></span>
                 </label>
             </div>
