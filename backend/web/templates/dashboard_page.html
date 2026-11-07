@@ -61,10 +61,16 @@ two tabs on different profiles kept acting on each other's library.
         </header>
 
         <section class="control-panel">
+            {{/* autocomplete="off": on Back the browser restored the search,
+                 selects and ticks it remembered, but only after the "load"
+                 trigger had already asked for the list with the defaults, so
+                 the controls showed one filter and the cards another. The
+                 filters start from their defaults, matching the list. */}}
             <form id="tracker-filters"
                   hx-get="/dashboard/trackers"
                   hx-target="#trackers-zone"
                   hx-trigger="load, trackersChanged from:body"
+                  autocomplete="off"
                   class="filters-grid">
                 {{/* "for" pins the caption to the input: the clear button sits in
                      this label too, and a label with no "for" forwards a caption

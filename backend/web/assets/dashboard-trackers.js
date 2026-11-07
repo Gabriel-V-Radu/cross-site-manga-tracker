@@ -767,10 +767,114 @@ document.body.addEventListener('htmx:beforeRequest', function (event) {
         return;
     }
 
+    var trackersZone = detail.target;
+
+    // A page button below the list takes the reader to the top of the list
+    // as it is pressed, so the skeleton and then the new page come in where
+    // they are read. Scrolling after the swap left the reader at the bottom
+    // for the whole request and then flew the page up from there. A button
+    // already in sight (the top row) moves nothing.
+    if (window.__scrollTrackersToTop) {
+        window.__scrollTrackersToTop = false;
+        if (trackersZone.getBoundingClientRect().top < 0) {
+            trackersZone.scrollIntoView({ block: 'start' });
+        }
+    }
+
+    // The skeleton is six cards; the list it stands in for can be many
+    // screens long (a page of the grid is ~20000px on a phone). Swapping one
+    // for the other shrank the document under the reader and the browser
+    // clamped the scroll to the new, much shorter end: anyone scrolled down
+    // was thrown to the bottom of the page while the list loaded, and left
+    // somewhere unrelated when it arrived. The zone keeps its height until the
+    // response is in (htmx:afterSwap, or htmx:afterRequest when it fails).
+    trackersZone.style.minHeight = trackersZone.offsetHeight + 'px';
+
     var viewInput = document.getElementById('view-input');
     var mode = viewInput && viewInput.value ? viewInput.value : 'grid';
     window.renderTrackersSkeleton(mode);
 });
+
+document.body.addEventListener('htmx:afterRequest', function (event) {
+    var detail = event && event.detail;
+    if (!detail || detail.successful || !detail.target || detail.target.id !== 'trackers-zone') {
+        return;
+    }
+    // Nothing is swapped in for a failed request. The skeleton only ever
+    // meant "loading": left under the error strip, with "Loading trackers…"
+    // above it, it read as a load still under way when none would come. It
+    // goes, and so does the old list's height. A reload's scroll offset
+    // belonged to the list that failed to come back, so it is not applied to
+    // whichever list loads later.
+    var failedZone = detail.target;
+    Array.prototype.forEach.call(failedZone.querySelectorAll('.trackers-loading__label, .tracker-card--skeleton, .tracker-row--skeleton'), function (node) {
+        node.remove();
+    });
+    failedZone.style.minHeight = '';
+    pendingDashboardScroll = null;
+});
+
+// A reload — and a phone browser bringing back a tab it discarded in the
+// background is one — starts the page with an empty trackers zone, so the
+// browser's own scroll restoration found a page a few hundred pixels tall
+// (then the skeleton's) and clamped to its end: the reader came back to the
+// bottom of a half-loaded page, and stayed at that offset once the list was
+// in. The browser is told not to restore; the offset is put back here once the
+// list has arrived — and only when it is the same list (the filters reset on a
+// reload, so a reader who was on page 3 or searching starts at the top) and
+// the reader has not already scrolled.
+var dashboardScrollKey = 'dashboard-scroll:' + window.location.pathname + window.location.search;
+var pendingDashboardScroll = null;
+
+var trackerFiltersState = function () {
+    var form = document.getElementById('tracker-filters');
+    if (!form || typeof window.FormData !== 'function' || typeof window.URLSearchParams !== 'function') {
+        return '';
+    }
+    return new window.URLSearchParams(new window.FormData(form)).toString();
+};
+
+try {
+    if ('scrollRestoration' in window.history) {
+        window.history.scrollRestoration = 'manual';
+    }
+    var savedDashboardScroll = JSON.parse(window.sessionStorage.getItem(dashboardScrollKey) || 'null');
+    window.sessionStorage.removeItem(dashboardScrollKey);
+    if (savedDashboardScroll && typeof savedDashboardScroll.y === 'number' && savedDashboardScroll.y > 0) {
+        pendingDashboardScroll = savedDashboardScroll;
+    }
+} catch (_) {
+    pendingDashboardScroll = null;
+}
+
+var saveDashboardScroll = function () {
+    try {
+        window.sessionStorage.setItem(dashboardScrollKey, JSON.stringify({
+            y: Math.round(window.scrollY || 0),
+            filters: trackerFiltersState()
+        }));
+    } catch (_) {
+        // Storage refused (private mode, quota): the reload starts at the top.
+    }
+};
+
+window.addEventListener('pagehide', saveDashboardScroll);
+// A discarded background tab may never see pagehide; hidden is the last
+// moment that is sure to run.
+document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') {
+        saveDashboardScroll();
+    }
+});
+
+var restoreDashboardScroll = function () {
+    var saved = pendingDashboardScroll;
+    pendingDashboardScroll = null;
+    if (!saved || window.scrollY > 0 || saved.filters !== trackerFiltersState()) {
+        return;
+    }
+    window.scrollTo(0, saved.y);
+};
 
 document.body.addEventListener('htmx:afterSwap', function (event) {
     var target = event && event.target;
@@ -790,6 +894,11 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
         return;
     }
 
+    target.style.minHeight = '';
+    if (pendingDashboardScroll) {
+        restoreDashboardScroll();
+    }
+
     // A tracker created moments ago is pinned to the top of the container, and
     // that pin has to survive every re-render of the list (this used to be an
     // inline script inside the trackers partial, run on each swap).
@@ -802,14 +911,6 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
             }
             pinnedCard.style.order = '-9999';
         }
-    }
-
-    if (window.__scrollTrackersToTop) {
-        var trackersZone = document.getElementById('trackers-zone');
-        if (trackersZone) {
-            trackersZone.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-        window.__scrollTrackersToTop = false;
     }
 
     if (typeof window.syncTrackerCardHoverState === 'function') {

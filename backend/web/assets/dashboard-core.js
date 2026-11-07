@@ -257,6 +257,36 @@ document.body.addEventListener('htmx:sendError', function (event) {
     window.showRequestError('Could not reach the server. Check the connection and try again.', event && event.detail ? event.detail.elt : null);
 });
 
+// htmx swaps a region by inserting the new nodes before the old ones and only
+// then removing the old ones. When the focused element is in the old content —
+// a chapter link just tapped to open in another tab, a rating's Save button —
+// Chrome's scroll anchoring holds that element in place while the new copy is
+// inserted above it, scrolling down by the whole region's height; removing the
+// old copy then clamps the page to its end. A silent cover refresh of a phone's
+// 20000px list threw a reader at y=6000 to the very bottom. Focus leaves the
+// region before the swap, and the anchoring has nothing to hold on to. The
+// modal is left alone: it is fixed in place, and htmx restores focus to an
+// element with an id there.
+var releaseFocusBeforeSwap = function (event) {
+    var detail = event && event.detail;
+    var region = detail && detail.target;
+    if (!region || detail.shouldSwap === false || !region.contains) {
+        return;
+    }
+    var focused = document.activeElement;
+    if (!focused || focused === document.body || !region.contains(focused)) {
+        return;
+    }
+    if (region.closest && region.closest('#modal-zone')) {
+        return;
+    }
+    if (typeof focused.blur === 'function') {
+        focused.blur();
+    }
+};
+document.body.addEventListener('htmx:beforeSwap', releaseFocusBeforeSwap);
+document.body.addEventListener('htmx:oobBeforeSwap', releaseFocusBeforeSwap);
+
 // A successful swap into the modal or the trackers zone clears any error strip
 // left there by an earlier attempt.
 document.body.addEventListener('htmx:afterSwap', function (event) {

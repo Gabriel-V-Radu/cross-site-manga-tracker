@@ -79,4 +79,30 @@
     document.body.addEventListener('htmx:sendError', function (event) {
         showRequestError(event && event.detail, 'Could not reach the server. Check the connection and try again.');
     });
+
+    // htmx swaps a region by inserting the new nodes before the old ones and
+    // only then removing the old ones. With focus in the old content — a URL
+    // being pasted into a card, an "Open on" link just clicked — Chrome's
+    // scroll anchoring holds that element in place while the new queue is
+    // inserted above it, and removing the old queue then clamps the page to
+    // its end: the refresh at the end of a scan threw a reviewer at the 40th
+    // card to the bottom of a 70000px page. Focus leaves the region first.
+    // (dashboard-core.js does the same for the dashboard.)
+    function releaseFocusBeforeSwap(event) {
+        var detail = event && event.detail;
+        var region = detail && detail.target;
+        if (!region || detail.shouldSwap === false || !region.contains) {
+            return;
+        }
+        var focused = document.activeElement;
+        if (!focused || focused === document.body || !region.contains(focused)) {
+            return;
+        }
+        if (typeof focused.blur === 'function') {
+            focused.blur();
+        }
+    }
+
+    document.body.addEventListener('htmx:beforeSwap', releaseFocusBeforeSwap);
+    document.body.addEventListener('htmx:oobBeforeSwap', releaseFocusBeforeSwap);
 })();
