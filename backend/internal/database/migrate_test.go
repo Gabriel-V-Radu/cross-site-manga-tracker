@@ -2,9 +2,23 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// baselineFile is the one embedded migration since the 2026-11 squash.
+const baselineFile = "0001_baseline_2026-11.sql"
+
+// squashedFiles are the ledger names the baseline replaced, as a database
+// deployed before the squash lists them.
+var squashedFiles = []string{
+	"0001_baseline.sql",
+	"0002_source_logos_shared.sql",
+	"0003_prune_history.sql",
+	"0004_poll_rotation.sql",
+}
 
 func openMigrateTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -52,8 +66,46 @@ func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	return count == 1
 }
 
-// A fresh database gets every embedded file, in order, and a second run has
-// nothing left to do.
+// schemaSignature describes every table's columns and foreign keys and every
+// index, independent of the SQL text that created them: a table ALTERed into
+// shape and one created whole read the same.
+func schemaSignature(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var signature strings.Builder
+	queries := []string{
+		`SELECT m.name, p.cid, p.name, p.type, p."notnull", COALESCE(p.dflt_value, ''), p.pk
+		 FROM sqlite_master m JOIN pragma_table_info(m.name) p
+		 WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid`,
+		`SELECT m.name, f."table", f."from", f."to", f.on_delete
+		 FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f
+		 WHERE m.type = 'table' ORDER BY m.name, f.id, f.seq`,
+		`SELECT name, tbl_name, COALESCE(sql, '') FROM sqlite_master WHERE type = 'index' ORDER BY name`,
+	}
+	for _, query := range queries {
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatalf("read schema: %v", err)
+		}
+		columns, _ := rows.Columns()
+		for rows.Next() {
+			values := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for index := range values {
+				pointers[index] = &values[index]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				t.Fatalf("scan schema: %v", err)
+			}
+			signature.WriteString(fmt.Sprintln(values...))
+		}
+		rows.Close()
+	}
+	return signature.String()
+}
+
+// A fresh database gets the baseline — the whole current schema, none of what
+// earlier files created only to drop again — and a second run has nothing
+// left to do.
 func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 	db := openMigrateTestDB(t)
 
@@ -61,47 +113,52 @@ func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	applied := ledger(t, db)
-	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] {
-		t.Fatalf("expected the embedded files in the ledger, got %v", applied)
+	if !applied[baselineFile] || len(applied) != 1 {
+		t.Fatalf("expected exactly the baseline in the ledger, got %v", applied)
 	}
 	if tableExists(t, db, "profile_source_logos") || !tableExists(t, db, "source_logos") {
-		t.Fatal("expected the per-profile logo table to be replaced by the shared one")
+		t.Fatal("expected the shared logo table and not the per-profile one")
 	}
 	if columnExists(t, db, "sources", "base_url") || columnExists(t, db, "sources", "config_path") {
 		t.Fatal("expected the never-used yaml connector columns to be gone")
 	}
+	if !columnExists(t, db, "tracker_sources", "last_polled_at") || !columnExists(t, db, "tracker_sources", "in_step") {
+		t.Fatal("expected the poll rotation's columns on tracker_sources")
+	}
 
+	before := schemaSignature(t, db)
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("second apply must be a no-op, got: %v", err)
 	}
 	if got := len(ledger(t, db)); got != len(applied) {
 		t.Fatalf("second apply changed the ledger: %d -> %d rows", len(applied), got)
 	}
+	if schemaSignature(t, db) != before {
+		t.Fatal("second apply changed the schema")
+	}
 }
 
-// A database that predates the squash has the whole schema and a ledger that
-// names the thirty historical files, not the baseline. The baseline must then
-// run on top of the complete schema without changing it, the logo migration
-// must carry the existing per-profile rows over (lowest profile first where
-// both had one), and the housekeeping must prune the legacy ledger rows and
-// the link rows whose tracker is gone.
-func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
+// A database deployed before the squash has the complete schema and a ledger
+// naming the files the baseline replaced, not the baseline. The baseline must
+// then run on top of that schema without changing it or its rows, and leave
+// the ledger naming only itself.
+func TestApplyMigrationsAdoptsADatabaseFromBeforeTheSquash(t *testing.T) {
 	db := openMigrateTestDB(t)
 
-	// Stand in for the historical migrations: the baseline is exactly the
-	// schema they produced, so applying it and then forgetting it did is the
-	// state a deployed database is in.
+	// Stand in for the squashed files: the baseline is exactly the schema
+	// they produced, so applying it and then forgetting it did is the state
+	// a deployed database is in.
 	if err := ensureMigrationsTable(db); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyMigration(db, "0001_baseline.sql"); err != nil {
+	if err := applyMigration(db, baselineFile); err != nil {
 		t.Fatalf("build pre-squash schema: %v", err)
 	}
 	if _, err := db.Exec(`DELETE FROM schema_migrations`); err != nil {
 		t.Fatal(err)
 	}
-	for _, legacy := range []string{"0001_init.sql", "0013_profile_source_logos.sql", "0030_drop_dead_schema.sql"} {
-		if _, err := db.Exec(`INSERT INTO schema_migrations(version) VALUES (?)`, legacy); err != nil {
+	for _, name := range squashedFiles {
+		if _, err := db.Exec(`INSERT INTO schema_migrations(version) VALUES (?)`, name); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,87 +166,30 @@ func TestApplyMigrationsUpgradesAPreSquashDatabase(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT INTO profile_source_logos (profile_id, source_id, logo_url) VALUES
-			(1, 1, '/uploads/site-logos/profile-1-source-1.png'),
-			(2, 1, '/uploads/site-logos/profile-2-source-1.png'),
-			(2, 2, '/uploads/site-logos/profile-2-source-2.png')
-	`); err != nil {
-		t.Fatalf("seed per-profile logos: %v", err)
-	}
-	// An orphaned link and tag, the way a delete with foreign keys off leaves
-	// them; a live tracker's link must survive next to them.
-	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`
 		INSERT INTO trackers (id, profile_id, title, source_id, source_url, status) VALUES (7, 1, 'Alive', 1, 'https://mangadex.org/title/alive', 'reading');
-		INSERT INTO tracker_sources (tracker_id, source_id, source_url) VALUES (7, 2, 'https://mangafire.to/manga/alive'), (999, 2, 'https://mangafire.to/manga/gone');
-		INSERT INTO custom_tags (id, profile_id, name) VALUES (1, 1, 'Favorite');
-		INSERT INTO tracker_tags (tracker_id, tag_id) VALUES (7, 1), (999, 1);
+		INSERT INTO tracker_sources (tracker_id, source_id, source_url, last_polled_at, in_step) VALUES (7, 2, 'https://mangafire.to/title/alive', '2026-11-07 09:00:00', 1);
+		INSERT INTO source_logos (source_id, logo_url) VALUES (1, '/uploads/site-logos/source-1.png');
 	`); err != nil {
-		t.Fatalf("seed orphans: %v", err)
+		t.Fatalf("seed rows: %v", err)
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		t.Fatal(err)
-	}
-	var trackersColumns int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('trackers')`).Scan(&trackersColumns); err != nil {
-		t.Fatal(err)
-	}
+	before := schemaSignature(t, db)
 
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
 
 	applied := ledger(t, db)
-	if applied["0001_init.sql"] || applied["0030_drop_dead_schema.sql"] {
-		t.Fatalf("expected the legacy ledger rows pruned, got %v", applied)
+	if !applied[baselineFile] || len(applied) != 1 {
+		t.Fatalf("expected the squashed files' rows replaced by the baseline's, got %v", applied)
 	}
-	if !applied["0001_baseline.sql"] || !applied["0002_source_logos_shared.sql"] || !applied["0003_prune_history.sql"] || !applied["0004_poll_rotation.sql"] || len(applied) != 4 {
-		t.Fatalf("expected exactly the embedded files in the ledger, got %v", applied)
+	if after := schemaSignature(t, db); after != before {
+		t.Fatalf("the baseline altered a deployed schema:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	var links, tags int
-	if err := db.QueryRow(`SELECT (SELECT COUNT(1) FROM tracker_sources), (SELECT COUNT(1) FROM tracker_tags)`).Scan(&links, &tags); err != nil {
+	var links, logos, inStep int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(1) FROM tracker_sources), (SELECT COUNT(1) FROM source_logos), (SELECT in_step FROM tracker_sources)`).Scan(&links, &logos, &inStep); err != nil {
 		t.Fatal(err)
 	}
-	if links != 1 || tags != 1 {
-		t.Fatalf("expected only the live tracker's link and tag to survive, got %d links and %d tags", links, tags)
-	}
-	if columnExists(t, db, "sources", "base_url") {
-		t.Fatal("expected sources.base_url dropped")
-	}
-	var after int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('trackers')`).Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if after != trackersColumns {
-		t.Fatalf("baseline altered an existing table: trackers went from %d to %d columns", trackersColumns, after)
-	}
-
-	if tableExists(t, db, "profile_source_logos") {
-		t.Fatal("per-profile logo table survived the upgrade")
-	}
-	logos := map[int64]string{}
-	rows, err := db.Query(`SELECT source_id, logo_url FROM source_logos ORDER BY source_id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var id int64
-		var url string
-		if err := rows.Scan(&id, &url); err != nil {
-			t.Fatal(err)
-		}
-		logos[id] = url
-	}
-	rows.Close()
-	if len(logos) != 2 {
-		t.Fatalf("expected one shared logo per source, got %v", logos)
-	}
-	if logos[1] != "/uploads/site-logos/profile-1-source-1.png" {
-		t.Fatalf("profile 1's logo must win where both profiles had one, got %q", logos[1])
-	}
-	if logos[2] != "/uploads/site-logos/profile-2-source-2.png" {
-		t.Fatalf("a logo only profile 2 had must carry over, got %q", logos[2])
+	if links != 1 || logos != 1 || inStep != 1 {
+		t.Fatalf("expected the deployed rows untouched, got %d links, %d logos, in_step=%d", links, logos, inStep)
 	}
 }

@@ -1,29 +1,35 @@
--- The schema as of 2026-09-02, squashed from the thirty migrations that built
--- it incrementally (0001_init through 0030_drop_dead_schema). Those files are
--- gone; git history has them.
+-- The schema as of 2026-11-07, squashed from the files that built it on top
+-- of the previous baseline: 0001_baseline.sql (itself the squash of thirty
+-- migrations, 2026-09-02), 0002_source_logos_shared.sql,
+-- 0003_prune_history.sql and 0004_poll_rotation.sql. Those files are gone;
+-- git history has them.
 --
--- Two properties this file has to keep:
+-- Three properties this file has to keep:
 --
---   * It is idempotent (IF NOT EXISTS throughout, no data). A database that
---     predates the squash has a schema_migrations ledger naming the thirty old
---     files and not this one, so this file runs there on top of a complete
---     schema and must change nothing.
+--   * It is idempotent (IF NOT EXISTS throughout). A database that predates
+--     the squash has a ledger naming the files above and not this one, so
+--     this file runs there on top of a complete schema and must change none
+--     of it. That only holds for a database that applied every one of them
+--     before this squash reached it, which is why a squash only ships once
+--     every deployed database is current.
 --
 --   * It carries no rows. The sources the connectors need and the two
 --     profiles are inserted by SeedDefaults on every start; that Go list is
 --     the one place they are defined.
 --
--- Column order in trackers and cover_cache is the historical one, with the
--- columns that arrived through ALTER TABLE at the end, so a fresh database
--- matches the deployed one column for column.
+--   * A fresh database matches a deployed one column for column. Columns that
+--     reached a deployed table through ALTER TABLE sit at the end of its
+--     definition here too, in the order they were added.
 
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    -- Every connector is native. 'yaml' names a per-site config connector
+    -- that was never built; it stays in the CHECK because a deployed
+    -- database carries it, and rewriting a CHECK means rebuilding the table
+    -- every other table points at.
     connector_kind TEXT NOT NULL CHECK (connector_kind IN ('native', 'yaml')),
-    base_url TEXT,
-    config_path TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -66,9 +72,9 @@ CREATE TABLE IF NOT EXISTS trackers (
     -- chapter number but no release date; stable, unlike last_checked_at, so
     -- the "Latest chapter" sort has something honest to rank by.
     latest_chapter_seen_at DATETIME,
-    -- A lower chapter number a fallback source has reported but the poller
-    -- has not acted on yet, and when it was first seen: a lagging mirror must
-    -- persist before it is allowed to walk the stored number backwards.
+    -- A lower chapter number a source has reported but the poller has not
+    -- acted on yet, and when it was first seen: a lagging mirror must persist
+    -- before it is allowed to walk the stored number backwards.
     pending_lower_chapter REAL,
     pending_lower_first_seen_at DATETIME,
     -- Which linked source the reading links prefer. NULL = auto.
@@ -83,7 +89,8 @@ CREATE INDEX IF NOT EXISTS idx_trackers_status ON trackers(status);
 CREATE INDEX IF NOT EXISTS idx_trackers_source_id ON trackers(source_id);
 CREATE INDEX IF NOT EXISTS idx_trackers_profile_id ON trackers(profile_id);
 
--- Every site a tracker is linked to beyond its primary source.
+-- Every site a tracker is linked to, its primary source included: the poller
+-- keeps a mirror row for the primary (UpdatePollingState).
 CREATE TABLE IF NOT EXISTS tracker_sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tracker_id INTEGER NOT NULL,
@@ -92,6 +99,13 @@ CREATE TABLE IF NOT EXISTS tracker_sources (
     source_url TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- The poll rotation's memory (scheduler.planPoll): when the poller last
+    -- reached this site about this tracker — a request a cooldown refused
+    -- locally does not count — and whether that answer carried exactly the
+    -- chapter the tracker then stored. An alternate not in step may take its
+    -- turn, but a new chapter it claims is not stored on its word alone.
+    last_polled_at DATETIME,
+    in_step INTEGER NOT NULL DEFAULT 0,
     UNIQUE (tracker_id, source_id, source_url),
     FOREIGN KEY (tracker_id) REFERENCES trackers(id) ON DELETE CASCADE,
     FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE RESTRICT
@@ -124,21 +138,14 @@ CREATE TABLE IF NOT EXISTS tracker_tags (
 
 CREATE INDEX IF NOT EXISTS idx_tracker_tags_tag_id ON tracker_tags(tag_id);
 
--- Per-profile site logos. Replaced by the shared source_logos table in 0002;
--- it is created here so that migration has the same table to convert on a
--- fresh database as on a deployed one.
-CREATE TABLE IF NOT EXISTS profile_source_logos (
-    profile_id INTEGER NOT NULL,
-    source_id INTEGER NOT NULL,
+-- One logo per site, shown to every profile.
+CREATE TABLE IF NOT EXISTS source_logos (
+    source_id INTEGER PRIMARY KEY,
     logo_url TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (profile_id, source_id),
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
     FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
 );
-
-CREATE INDEX IF NOT EXISTS idx_profile_source_logos_source_id ON profile_source_logos(source_id);
 
 -- Candidates found by scanning a source for trackers that lack a link to it,
 -- awaiting review in the dashboard. Decided rows are kept: a rejected
@@ -180,4 +187,15 @@ CREATE TABLE IF NOT EXISTS cover_cache (
     expires_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     local_path TEXT NOT NULL DEFAULT ''
+);
+
+-- The ledger rows of the files this squash replaced. The runner only ever
+-- asks about the files it embeds, so on a database that applied them the old
+-- names are dead weight; on a fresh one there is nothing to delete.
+DELETE FROM schema_migrations
+WHERE version IN (
+    '0001_baseline.sql',
+    '0002_source_logos_shared.sql',
+    '0003_prune_history.sql',
+    '0004_poll_rotation.sql'
 );

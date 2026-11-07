@@ -24,11 +24,13 @@ const migrationsDir = "migrations"
 // in filename order, each in its own transaction. The ledger keys on the bare
 // filename, so a file is applied once per database and must never be renamed.
 //
-// A database that predates the baseline squash has a ledger naming the thirty
-// historical files and not 0001_baseline.sql, so the baseline runs there on
-// top of a complete schema. It is written to be a no-op in that case (IF NOT
-// EXISTS throughout, no rows), which is the property any future squash has to
-// keep as well.
+// Squashing: the files are periodically folded into one baseline under a new
+// name (most recently 0001_baseline_2026-11.sql). A database deployed before
+// the squash has a ledger naming the folded files and not the baseline, so
+// the baseline runs there on top of a complete schema: it has to be a no-op in
+// that case (IF NOT EXISTS throughout, no rows) and deletes the folded files'
+// ledger rows. That only holds for a database that had applied every folded
+// file, so a squash ships only after every deployed database is current.
 func ApplyMigrations(db *sql.DB) error {
 	if err := ensureMigrationsTable(db); err != nil {
 		return err
