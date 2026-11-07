@@ -52,13 +52,6 @@ func (s *siteDouble) ResolveByURL(context.Context, string) (*connectors.MangaRes
 	return &connectors.MangaResult{SourceKey: s.key, LatestChapter: chapter}, nil
 }
 
-func (s *siteDouble) set(chapter float64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.chapter = chapterPtr(chapter)
-	s.err = nil
-}
-
 func (s *siteDouble) fail(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
