@@ -68,8 +68,17 @@ in Docker and is used from any browser on the same network.
    - Query parameter: `/v1/trackers?profile=profile1`
    - Header: `X-Profile-Key: profile1` or `X-Profile-ID: 1`
    - Writes (POST, PUT, DELETE) that a browser marks as coming from another
-     site are refused with 403, on `/v1` as on the dashboard. curl and scripts
-     send no such marker and are unaffected.
+     site — including an `Origin: null` from a sandboxed frame or a `file:`
+     page — are refused with 403, on `/v1` as on the dashboard. curl and
+     scripts send no such marker and are unaffected.
+   - POST and PUT bodies are JSON and must say so with
+     `Content-Type: application/json` (curl: add
+     `-H "Content-Type: application/json"`, since `-d` alone sends a form
+     type); any other body is refused with 415. Every `/v1` error, unknown
+     routes included, answers `{"message": "..."}`.
+   - `lastReadChapter` and `latestKnownChapter` must be between 0 and 100000
+     (decimals allowed); a PUT may send back a stored value outside that range
+     unchanged. The site `sourceUrl` belongs to decides the stored `sourceId`.
 - A cookie stores the active profile in the browser for convenience.
 
 ## Notes

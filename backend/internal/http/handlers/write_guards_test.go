@@ -169,13 +169,17 @@ func TestDashboardWritesRefuseCrossSiteRequests(t *testing.T) {
 	}{
 		{name: "Sec-Fetch-Site cross-site", headers: map[string]string{"Sec-Fetch-Site": "cross-site"}},
 		{name: "foreign Origin", headers: map[string]string{"Origin": "http://evil.example"}},
+		// What a sandboxed frame or a file: page sends; it used to pass as if
+		// no Origin had been sent at all.
+		{name: "null Origin", headers: map[string]string{"Origin": "null"}},
+		{name: "null Origin, same-site", headers: map[string]string{"Origin": "null", "Sec-Fetch-Site": "same-site"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			res := postForm(t, app, path, url.Values{}, tc.headers)
-			if res.StatusCode != http.StatusForbidden {
-				body, _ := io.ReadAll(res.Body)
-				t.Fatalf("expected 403, got %d (body: %s)", res.StatusCode, body)
+			body, _ := io.ReadAll(res.Body)
+			if res.StatusCode != http.StatusForbidden || string(body) != "Cross-site request refused" {
+				t.Fatalf("expected 403 \"Cross-site request refused\", got %d (body: %s)", res.StatusCode, body)
 			}
 		})
 	}
@@ -195,6 +199,21 @@ func TestDashboardWritesRefuseCrossSiteRequests(t *testing.T) {
 	}
 	if got := countTrackers(t, db); got != 0 {
 		t.Fatalf("the same-origin delete must have run, found %d trackers", got)
+	}
+
+	// A browser sends Origin: null for its own page's POST under a
+	// no-referrer policy; Sec-Fetch-Site, which no page can forge, says so.
+	id = seedGuardTracker(t, db, 1, "No Referrer Tracker")
+	res = postForm(t, app, "/dashboard/trackers/"+strconv.FormatInt(id, 10)+"/delete", url.Values{}, map[string]string{
+		"Origin":         "null",
+		"Sec-Fetch-Site": "same-origin",
+	})
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("same-origin delete with a null Origin: expected 200, got %d (body: %s)", res.StatusCode, body)
+	}
+	if got := countTrackers(t, db); got != 0 {
+		t.Fatalf("the same-origin delete with a null Origin must have run, found %d trackers", got)
 	}
 }
 
@@ -218,13 +237,15 @@ func TestAPIWritesRefuseCrossSiteRequests(t *testing.T) {
 	}{
 		{name: "Sec-Fetch-Site cross-site", headers: map[string]string{"Sec-Fetch-Site": "cross-site"}},
 		{name: "foreign Origin", headers: map[string]string{"Origin": "http://evil.example"}},
+		{name: "null Origin", headers: map[string]string{"Origin": "null"}},
 	}
 	for _, tc := range crossSite {
 		t.Run("POST "+tc.name, func(t *testing.T) {
 			res := postForm(t, app, "/v1/trackers", form, tc.headers)
-			if res.StatusCode != http.StatusForbidden {
-				body, _ := io.ReadAll(res.Body)
-				t.Fatalf("expected 403, got %d (body: %s)", res.StatusCode, body)
+			body, _ := io.ReadAll(res.Body)
+			// In the API's own shape, like every other refusal under /v1.
+			if res.StatusCode != http.StatusForbidden || strings.TrimSpace(string(body)) != `{"message":"Cross-site request refused"}` {
+				t.Fatalf("expected 403 with a JSON message, got %d (body: %s)", res.StatusCode, body)
 			}
 		})
 	}

@@ -2,7 +2,9 @@ package http
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -31,6 +33,7 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 2 * time.Minute,
 		IdleTimeout:  2 * time.Minute,
+		ErrorHandler: errorHandler,
 	})
 
 	// Default recover.New swallows panics without logging; the stack trace is
@@ -43,17 +46,19 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	// could delete or rewrite trackers on the LAN instance. Browsers tell us
 	// where a request came from; refusing the ones from another site is the
 	// whole defence this app needs, since it has no login to protect. The JSON
-	// API needs it too: fiber's BodyParser also decodes a form-encoded body into
-	// the tracker request, so the same auto-submitted form could POST junk
-	// trackers to /v1/trackers.
+	// API has it too. It used to decode a form-encoded body, so an
+	// auto-submitted form could POST junk trackers to /v1/trackers; its writes
+	// now take only JSON, which a browser will not send to another site
+	// without a preflight this server never grants, and the guard stays so the
+	// two do not depend on that.
 	app.Use("/dashboard", rejectCrossSiteWrites)
 	app.Use("/v1", rejectCrossSiteWrites)
 
 	health := handlers.NewHealthHandler(db)
-	trackers := handlers.NewTrackersHandler(db)
 	if connectorRegistry == nil {
 		connectorRegistry = connectordefaults.NewRegistry()
 	}
+	trackers := handlers.NewTrackersHandler(db, connectorRegistry)
 	dashboard := handlers.NewDashboardHandler(db, connectorRegistry, handlers.DashboardPaths{
 		TemplatesGlob:  cfg.TemplatesGlob(),
 		AssetsDir:      cfg.AssetsDir(),
@@ -86,12 +91,18 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	// Locally stored cover art. File names hash the remote URL, so a cover
 	// that changes upstream arrives as a new file — the old name never serves
 	// different bytes, which is what makes immutable safe and cover renders
-	// free after the first load.
-	app.Use("/covers", func(c *fiber.Ctx) error {
-		c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
-		return c.Next()
+	// free after the first load. Only a file actually served gets it: set ahead
+	// of the static handler, the header rode along on the 404 for a missing
+	// file too, and a browser could keep that miss cached for a year after the
+	// cover had been fetched.
+	app.Static("/covers", cfg.CoversDir(), fiber.Static{
+		ModifyResponse: func(c *fiber.Ctx) error {
+			if c.Response().StatusCode() < fiber.StatusBadRequest {
+				c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
+			}
+			return nil
+		},
 	})
-	app.Static("/covers", cfg.CoversDir())
 	faviconPath := filepath.Join(cfg.AssetsDir(), "favicon.svg")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
 		return c.SendFile(faviconPath)
@@ -164,16 +175,57 @@ func rejectCrossSiteWrites(c *fiber.Ctx) error {
 		return c.Next()
 	}
 
-	if site := strings.ToLower(strings.TrimSpace(c.Get("Sec-Fetch-Site"))); site == "cross-site" {
-		return c.Status(fiber.StatusForbidden).SendString("Cross-site request refused")
+	// Returned rather than written, so errorHandler gives it each route's own
+	// shape: plain text for the dashboard, {"message": …} under /v1.
+	refused := fiber.NewError(fiber.StatusForbidden, "Cross-site request refused")
+
+	site := strings.ToLower(strings.TrimSpace(c.Get("Sec-Fetch-Site")))
+	if site == "cross-site" {
+		return refused
 	}
 
-	if origin := strings.TrimSpace(c.Get(fiber.HeaderOrigin)); origin != "" && !strings.EqualFold(origin, "null") {
+	origin := strings.TrimSpace(c.Get(fiber.HeaderOrigin))
+	if strings.EqualFold(origin, "null") {
+		// An opaque origin: a sandboxed frame, a file: page or a data: URL —
+		// the very places a hostile form can be served from, and it used to
+		// pass as if no Origin had been sent. A browser also sends it for its
+		// own page's POST under a no-referrer policy, and one that says
+		// same-origin in Sec-Fetch-Site, which a page cannot forge, is that.
+		if site != "same-origin" {
+			return refused
+		}
+		return c.Next()
+	}
+	if origin != "" {
 		parsed, err := url.Parse(origin)
 		if err != nil || !strings.EqualFold(parsed.Host, c.Hostname()) {
-			return c.Status(fiber.StatusForbidden).SendString("Cross-site request refused")
+			return refused
 		}
 	}
 
 	return c.Next()
+}
+
+// errorHandler answers the failures no handler wrote a response for — an
+// unknown route, a method the route does not take, a recovered panic. Under
+// /v1 they keep the API's JSON shape: an unknown endpoint used to answer
+// "Cannot GET /v1/…" as plain text, which a client decoding every answer as
+// {"message": …} could not read. Everywhere else fiber's own plain-text answer
+// stays, which is what the dashboard shows next to a form.
+func errorHandler(c *fiber.Ctx, err error) error {
+	if !isAPIPath(c.Path()) {
+		return fiber.DefaultErrorHandler(c, err)
+	}
+
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return c.Status(fiberErr.Code).JSON(fiber.Map{"message": fiberErr.Message})
+	}
+	// Anything else is a defect, and its text can name files and tables.
+	slog.Error("http handler failed", "method", c.Method(), "path", c.Path(), "error", err)
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "internal server error"})
+}
+
+func isAPIPath(path string) bool {
+	return path == "/v1" || strings.HasPrefix(path, "/v1/")
 }

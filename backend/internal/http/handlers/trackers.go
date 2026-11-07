@@ -3,10 +3,12 @@ package handlers
 import (
 	"database/sql"
 	"fmt"
+	"mime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
@@ -30,14 +32,71 @@ type updateTrackerRequest = createTrackerRequest
 
 type TrackersHandler struct {
 	repo            *repository.TrackerRepository
+	sourceRepo      *repository.SourceRepository
+	registry        *connectors.Registry
 	profileResolver *profileContextResolver
 }
 
-func NewTrackersHandler(db *sql.DB) *TrackersHandler {
+// NewTrackersHandler takes the connector registry to tell which site a
+// tracker's URL belongs to; a nil registry trusts the sourceId as sent.
+func NewTrackersHandler(db *sql.DB, registry *connectors.Registry) *TrackersHandler {
 	return &TrackersHandler{
 		repo:            repository.NewTrackerRepository(db),
+		sourceRepo:      repository.NewSourceRepository(db),
+		registry:        registry,
 		profileResolver: newProfileContextResolver(db),
 	}
+}
+
+// parseTrackerBody decodes a create or update body, answering for the request
+// itself when it cannot (the bool is false and the response is written). The
+// body must be declared as JSON: fiber's BodyParser picks its decoder from the
+// Content-Type, so a JSON body sent with none — or with the form type that
+// curl -d and Python's urllib add by default — was decoded as an empty form
+// and refused with "title is required", about a body that plainly had one.
+// Requiring the header also means a page on another site cannot send such a
+// body without a CORS preflight, which this server never grants.
+func parseTrackerBody(c *fiber.Ctx, req *createTrackerRequest) (bool, error) {
+	if !isJSONContentType(string(c.Request().Header.ContentType())) {
+		return false, c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"message": "request body must be JSON sent with Content-Type: application/json"})
+	}
+	if err := c.BodyParser(req); err != nil {
+		return false, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid json body"})
+	}
+	return true, nil
+}
+
+// isJSONContentType accepts application/json, with or without parameters, and
+// the structured "+json" types BodyParser also decodes as JSON.
+func isJSONContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	return mediaType == fiber.MIMEApplicationJSON || strings.HasSuffix(mediaType, "+json")
+}
+
+// alignSourceWithURL stores the source the tracker's URL belongs to, the rule
+// the dashboard form follows: sourceId 4 (Asura) sent with a MangaDex link was
+// stored as an Asura tracker, which no poll can read. It then checks the
+// source exists. A false return means the response is written.
+func (h *TrackersHandler) alignSourceWithURL(c *fiber.Ctx, tracker *models.Tracker) (bool, error) {
+	sourceID, err := sourceIDOwningURL(c.Context(), h.registry, h.sourceRepo, tracker.SourceID, tracker.SourceURL)
+	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
+		return false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
+	}
+	tracker.SourceID = sourceID
+
+	exists, err := h.repo.SourceExists(c.Context(), tracker.SourceID)
+	if err != nil {
+		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
+		return false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
+	}
+	if !exists {
+		return false, c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
+	}
+	return true, nil
 }
 
 // failProfileJSON is the API's failProfile: an unknown profile is the
@@ -59,22 +118,17 @@ func (h *TrackersHandler) Create(c *fiber.Ctx) error {
 	}
 
 	var req createTrackerRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid json body"})
+	if ok, err := parseTrackerBody(c, &req); !ok {
+		return err
 	}
 
-	tracker, err := validateAndBuildTracker(req)
+	tracker, err := validateAndBuildTracker(req, nil)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 
-	exists, err := h.repo.SourceExists(c.Context(), tracker.SourceID)
-	if err != nil {
-		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
-	}
-	if !exists {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
+	if ok, err := h.alignSourceWithURL(c, tracker); !ok {
+		return err
 	}
 
 	tracker.ProfileID = profile.ID
@@ -152,29 +206,13 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 	}
 
 	var req updateTrackerRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid json body"})
+	if ok, err := parseTrackerBody(c, &req); !ok {
+		return err
 	}
 
-	tracker, err := validateAndBuildTracker(req)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
-	}
-
-	exists, err := h.repo.SourceExists(c.Context(), tracker.SourceID)
-	if err != nil {
-		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to validate source", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to validate source"})
-	}
-	if !exists {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "sourceId does not exist"})
-	}
-
-	// The request has no release-date field and the update writes every
-	// column, so the stored date has to ride along, as it does on the edit
-	// form. A PUT used to write NULL over it, even one echoing back the body GET
-	// returned, which moved the tracker in the default latest-chapter sort and
-	// took the release date off its card until the next poll.
+	// Loaded before validating: a chapter number sent back unchanged is
+	// checked against the stored one, not against the bounds (see
+	// validateChapterEdit).
 	existing, err := h.repo.GetByID(c.Context(), profile.ID, id)
 	if err != nil {
 		logHandlerFailure(c, fiber.StatusInternalServerError, "failed to load tracker", err)
@@ -183,6 +221,21 @@ func (h *TrackersHandler) Update(c *fiber.Ctx) error {
 	if existing == nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "tracker not found"})
 	}
+
+	tracker, err := validateAndBuildTracker(req, existing)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
+	}
+
+	if ok, err := h.alignSourceWithURL(c, tracker); !ok {
+		return err
+	}
+
+	// The request has no release-date field and the update writes every
+	// column, so the stored date has to ride along, as it does on the edit
+	// form. A PUT used to write NULL over it, even one echoing back the body GET
+	// returned, which moved the tracker in the default latest-chapter sort and
+	// took the release date off its card until the next poll.
 	tracker.LatestReleaseAt = existing.LatestReleaseAt
 
 	tracker.ProfileID = profile.ID
@@ -222,7 +275,9 @@ func (h *TrackersHandler) Delete(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) {
+// validateAndBuildTracker checks a create or update body. stored is the
+// tracker an update replaces, nil on create.
+func validateAndBuildTracker(req createTrackerRequest, stored *models.Tracker) (*models.Tracker, error) {
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
 		return nil, fmt.Errorf("title is required")
@@ -239,6 +294,16 @@ func validateAndBuildTracker(req createTrackerRequest) (*models.Tracker, error) 
 		return nil, err
 	}
 	if err := validateTrackerRating(req.Rating); err != nil {
+		return nil, err
+	}
+	var storedLastRead, storedLatest *float64
+	if stored != nil {
+		storedLastRead, storedLatest = stored.LastReadChapter, stored.LatestKnownChapter
+	}
+	if err := validateChapterEdit("lastReadChapter", req.LastReadChapter, storedLastRead); err != nil {
+		return nil, err
+	}
+	if err := validateChapterEdit("latestKnownChapter", req.LatestKnownChapter, storedLatest); err != nil {
 		return nil, err
 	}
 

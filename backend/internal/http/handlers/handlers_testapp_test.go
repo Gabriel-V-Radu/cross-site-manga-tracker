@@ -47,6 +47,13 @@ func setupTestAppWithRegistry(t *testing.T, configure func(*connectors.Registry)
 // and everything written goes to the test's temp directory.
 func newTestEnv(t *testing.T, configure func(*connectors.Registry)) testEnv {
 	t.Helper()
+	return newTestEnvWithConfig(t, configure, newTestConfig(t))
+}
+
+// newTestEnvWithConfig is newTestEnv around a config the test prepared, for a
+// test that needs its data directory somewhere other than the default.
+func newTestEnvWithConfig(t *testing.T, configure func(*connectors.Registry), cfg config.Config) testEnv {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")
@@ -63,8 +70,6 @@ func newTestEnv(t *testing.T, configure func(*connectors.Registry)) testEnv {
 		_ = db.Close()
 		t.Fatalf("seed defaults: %v", err)
 	}
-
-	cfg := newTestConfig(t)
 
 	// Always an explicit registry, empty unless the test fills it: the default
 	// registry holds the real connectors, and a list render queues a cover and a

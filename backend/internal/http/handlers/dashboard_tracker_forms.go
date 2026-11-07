@@ -135,6 +135,9 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 	if err != nil {
 		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
 	}
+	if err := validateFormChapters(tracker, nil); err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
 	tracker.ProfileID = activeProfile.ID
 	if tracker.SourceID, err = h.sourceIDForURL(c.Context(), tracker.SourceID, tracker.SourceURL); err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
@@ -348,6 +351,9 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	tracker.ProfileID = activeProfile.ID
 	tracker.LatestKnownChapter = chapterUnlessEdited(c, "latest_known_chapter_original", tracker.LatestKnownChapter, existingTracker.LatestKnownChapter)
 	tracker.LastReadChapter = chapterUnlessEdited(c, "last_read_chapter_original", tracker.LastReadChapter, existingTracker.LastReadChapter)
+	if err := validateFormChapters(tracker, existingTracker); err != nil {
+		return h.fail(c, fiber.StatusBadRequest, err.Error(), err)
+	}
 
 	linkedSources, err := parseLinkedSourcesFromForm(c)
 	if err != nil {
@@ -678,26 +684,12 @@ func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, tr
 	})
 }
 
-// sourceIDForURL returns the source a URL belongs to: the source of the
-// connector that claims its host, or sourceID unchanged when none does. The
-// form's Source select doubles as the site "Search by Title" searches, so
-// picking another site to search and then saving without choosing a result
-// stored that site's id beside the old URL — a pair no connector can read, so
-// the primary failed on every poll ("url does not belong to mangahub" for a
-// MangaFire link). The URL is what gets polled, so the URL wins.
+// sourceIDForURL returns the source a URL belongs to (see sourceIDOwningURL).
+// On the form it matters because the Source select doubles as the site "Search
+// by Title" searches: picking another site to search and then saving without
+// choosing a result stored that site's id beside the old URL.
 func (h *DashboardHandler) sourceIDForURL(ctx context.Context, sourceID int64, sourceURL string) (int64, error) {
-	connector, ok := h.connectorForURL(sourceURL)
-	if !ok {
-		return sourceID, nil
-	}
-	owner, err := h.sourceRepo.GetByKey(ctx, connector.Key())
-	if err != nil {
-		return 0, err
-	}
-	if owner == nil {
-		return sourceID, nil
-	}
-	return owner.ID, nil
+	return sourceIDOwningURL(ctx, h.registry, h.sourceRepo, sourceID, sourceURL)
 }
 
 func (h *DashboardHandler) listSourcesByID(ctx context.Context) (map[int64]models.Source, error) {
@@ -796,6 +788,25 @@ func parseReadingSourceFromForm(c *fiber.Ctx) (*int64, error) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "Invalid reading site")
 	}
 	return &id, nil
+}
+
+// validateFormChapters applies the API's chapter bounds to the form's two
+// chapter fields. strconv.ParseFloat takes "NaN", "Inf" and "-5" as readily as
+// "12", and each used to be stored. stored is the tracker being edited, nil on
+// create: on an edit a number left as it was is not checked again (see
+// validateChapterEdit).
+func validateFormChapters(tracker *models.Tracker, stored *models.Tracker) error {
+	var storedLastRead, storedLatest *float64
+	if stored != nil {
+		storedLastRead, storedLatest = stored.LastReadChapter, stored.LatestKnownChapter
+	}
+	if err := validateChapterEdit("Last read chapter", tracker.LastReadChapter, storedLastRead); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateChapterEdit("Latest known chapter", tracker.LatestKnownChapter, storedLatest); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	return nil
 }
 
 func parseOptionalFloat(raw string) (*float64, error) {
