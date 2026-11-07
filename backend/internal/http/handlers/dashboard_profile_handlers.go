@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -261,7 +262,7 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sites", err)
 	}
 	if len(linkedSites) == 0 {
-		return h.renderProfileMenu(c, activeProfile, "No sites available to configure", "")
+		return h.fail(c, fiber.StatusBadRequest, "No sites available to configure", nil)
 	}
 
 	existingLogosBySourceID, err := h.sourceRepo.ListSourceLogoURLs(c.Context())
@@ -269,18 +270,45 @@ func (h *DashboardHandler) SaveSourceLogosFromMenu(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
-	logoBySourceID, err := h.readSourceLogoUpdates(c, linkedSites, existingLogosBySourceID)
+	// A refused upload is an error status with the reason as its body, which
+	// the page shows beside the form. It used to re-render the menu with the
+	// reason in the success banner — "ComicK: invalid PNG file" in green, with
+	// a 200 that told the page the save had worked.
+	updates, err := h.readSourceLogoUpdates(c, linkedSites, existingLogosBySourceID)
 	if err != nil {
-		return h.renderProfileMenu(c, activeProfile, err.Error(), "")
+		return h.fail(c, statusOf(err), publicRequestMessage(err, "Failed to save linked site logos"), err)
 	}
 
 	// Logos are shared: the active profile only decides which menu re-renders,
 	// not whose logo was saved. Uploading from either profile changes both.
-	if err := h.sourceRepo.UpsertSourceLogoURLs(c.Context(), logoBySourceID); err != nil {
+	if err := h.sourceRepo.UpsertSourceLogoURLs(c.Context(), updates.logoBySourceID); err != nil {
+		h.removeStoredSourceLogoFiles(updates.written)
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to save linked site logos", err)
 	}
+	// Only now that the rows point elsewhere: removed earlier, a save that
+	// then failed left a row naming a file that was gone.
+	h.removeStoredSourceLogoFiles(updates.superseded)
 
 	return h.renderProfileMenu(c, activeProfile, "Linked site logos saved", `{"trackersChanged":true}`)
+}
+
+// statusOf is the status a fiber.Error carries — a refusal written for the
+// reader — and 500 for anything else.
+func statusOf(err error) int {
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return fiberErr.Code
+	}
+	return fiber.StatusInternalServerError
+}
+
+// sourceLogoUpdates is what one save asks for: the row value per site ("" to
+// clear), the files this request wrote, and the files the new rows stop
+// pointing at. Files are only removed once the outcome is known.
+type sourceLogoUpdates struct {
+	logoBySourceID map[int64]string
+	written        []string
+	superseded     []string
 }
 
 // listLinkedSites is every enabled source. It takes no profile: neither the
@@ -330,8 +358,15 @@ func (h *DashboardHandler) renderProfileMenu(c *fiber.Ctx, activeProfile *models
 	})
 }
 
-func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (map[int64]string, error) {
-	logoBySourceID := make(map[int64]string, len(linkedSites))
+// readSourceLogoUpdates validates and stores the uploaded files and works out
+// the rows to write. On error it has removed whatever it wrote, and the error
+// is a fiber.Error naming the site when the upload itself was refused.
+func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, linkedSites []models.Source, existingLogosBySourceID map[int64]string) (sourceLogoUpdates, error) {
+	updates := sourceLogoUpdates{logoBySourceID: make(map[int64]string, len(linkedSites))}
+	fail := func(err error) (sourceLogoUpdates, error) {
+		h.removeStoredSourceLogoFiles(updates.written)
+		return sourceLogoUpdates{}, err
+	}
 	for _, linkedSite := range linkedSites {
 		fileField := fmt.Sprintf("source_logo_file_%d", linkedSite.ID)
 		clearField := fmt.Sprintf("source_logo_clear_%d", linkedSite.ID)
@@ -341,15 +376,15 @@ func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, linkedSites []mod
 		uploadRequested := fileHeader != nil && strings.TrimSpace(fileHeader.Filename) != ""
 
 		if removeRequested && uploadRequested {
-			return nil, fmt.Errorf("%s: choose either upload or remove", linkedSite.Name)
+			return fail(fiber.NewError(fiber.StatusBadRequest, linkedSite.Name+": choose either upload or remove"))
 		}
 
 		existingLogoPath := strings.TrimSpace(existingLogosBySourceID[linkedSite.ID])
 		if removeRequested {
 			if existingLogoPath != "" {
-				_ = h.removeStoredSourceLogoFile(existingLogoPath)
+				updates.superseded = append(updates.superseded, existingLogoPath)
 			}
-			logoBySourceID[linkedSite.ID] = ""
+			updates.logoBySourceID[linkedSite.ID] = ""
 			continue
 		}
 
@@ -359,16 +394,21 @@ func (h *DashboardHandler) readSourceLogoUpdates(c *fiber.Ctx, linkedSites []mod
 
 		logoPath, err := h.saveUploadedSourceLogo(linkedSite.ID, fileHeader)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", linkedSite.Name, err)
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				return fail(fiber.NewError(fiberErr.Code, linkedSite.Name+": "+fiberErr.Message))
+			}
+			return fail(fmt.Errorf("%s: %w", linkedSite.Name, err))
 		}
+		updates.written = append(updates.written, logoPath)
 
 		if existingLogoPath != "" && existingLogoPath != logoPath {
-			_ = h.removeStoredSourceLogoFile(existingLogoPath)
+			updates.superseded = append(updates.superseded, existingLogoPath)
 		}
-		logoBySourceID[linkedSite.ID] = logoPath
+		updates.logoBySourceID[linkedSite.ID] = logoPath
 	}
 
-	return logoBySourceID, nil
+	return updates, nil
 }
 
 func (h *DashboardHandler) saveUploadedSourceLogo(sourceID int64, fileHeader *multipart.FileHeader) (string, error) {
@@ -399,19 +439,25 @@ func (h *DashboardHandler) saveUploadedSourceLogo(sourceID int64, fileHeader *mu
 	return sourceLogoPublicPrefix + fileName, nil
 }
 
+// readValidatedSourceLogo refuses a file that is not a logo with a fiber.Error
+// carrying 400 and the reason for the reader. Any other error is the server
+// failing to read an upload it accepted.
 func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, error) {
+	refuse := func(reason string) (string, []byte, error) {
+		return "", nil, fiber.NewError(fiber.StatusBadRequest, reason)
+	}
 	if fileHeader == nil {
-		return "", nil, fmt.Errorf("missing upload")
+		return refuse("missing upload")
 	}
 	if fileHeader.Size > maxSourceLogoUploadBytes {
-		return "", nil, fmt.Errorf("file too large (max %s)", maxSourceLogoUploadLabel)
+		return refuse("file too large (max " + maxSourceLogoUploadLabel + ")")
 	}
 
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
 	switch ext {
 	case ".png", ".svg", ".jpg", ".jpeg", ".webp":
 	default:
-		return "", nil, fmt.Errorf("only .png, .svg, .jpg, .jpeg, or .webp files are allowed")
+		return refuse("only .png, .svg, .jpg, .jpeg, or .webp files are allowed")
 	}
 
 	file, err := fileHeader.Open()
@@ -425,10 +471,10 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 		return "", nil, fmt.Errorf("read upload: %w", err)
 	}
 	if int64(len(data)) > maxSourceLogoUploadBytes {
-		return "", nil, fmt.Errorf("file too large (max %s)", maxSourceLogoUploadLabel)
+		return refuse("file too large (max " + maxSourceLogoUploadLabel + ")")
 	}
 	if len(data) == 0 {
-		return "", nil, fmt.Errorf("empty upload")
+		return refuse("empty upload")
 	}
 
 	sniffLen := min(512, len(data))
@@ -436,31 +482,31 @@ func readValidatedSourceLogo(fileHeader *multipart.FileHeader) (string, []byte, 
 
 	if ext == ".png" {
 		if contentType != "image/png" && !hasPNGSignature(data) {
-			return "", nil, fmt.Errorf("invalid PNG file")
+			return refuse("invalid PNG file")
 		}
 		return ext, data, nil
 	}
 
 	if ext == ".jpg" || ext == ".jpeg" {
 		if contentType != "image/jpeg" && !hasJPEGSignature(data) {
-			return "", nil, fmt.Errorf("invalid JPEG file")
+			return refuse("invalid JPEG file")
 		}
 		return ext, data, nil
 	}
 
 	if ext == ".webp" {
 		if contentType != "image/webp" && !hasWEBPSignature(data) {
-			return "", nil, fmt.Errorf("invalid WEBP file")
+			return refuse("invalid WEBP file")
 		}
 		return ext, data, nil
 	}
 
 	lower := strings.ToLower(string(data))
 	if !strings.Contains(lower, "<svg") {
-		return "", nil, fmt.Errorf("invalid SVG file")
+		return refuse("invalid SVG file")
 	}
 	if strings.Contains(lower, "<script") || strings.Contains(lower, "javascript:") || strings.Contains(lower, "onload=") || strings.Contains(lower, "onerror=") {
-		return "", nil, fmt.Errorf("unsafe SVG content")
+		return refuse("unsafe SVG content")
 	}
 
 	return ext, data, nil
@@ -491,6 +537,14 @@ func hasWEBPSignature(data []byte) bool {
 		return false
 	}
 	return string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+}
+
+// removeStoredSourceLogoFiles is best effort: a file left behind costs a few
+// kilobytes, and the save it belongs to has already been decided.
+func (h *DashboardHandler) removeStoredSourceLogoFiles(publicPaths []string) {
+	for _, publicPath := range publicPaths {
+		_ = h.removeStoredSourceLogoFile(publicPath)
+	}
 }
 
 func (h *DashboardHandler) removeStoredSourceLogoFile(publicPath string) error {
