@@ -1,7 +1,7 @@
 {{if gt (len .ProfileTags) 0}}
 {{range .ProfileTags}}
 <label class="filter-multi-select__option">
-    <input type="checkbox" name="tags" value="{{.Name}}">
+    <input type="checkbox" name="tags" value="{{.Name}}" data-tag-id="{{.ID}}">
     <span>{{.Name}}</span>
 </label>
 {{end}}

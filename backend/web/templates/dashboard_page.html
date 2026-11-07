@@ -146,7 +146,8 @@ two tabs on different profiles kept acting on each other's library.
                             {{if gt (len .ProfileTags) 0}}
                             {{range .ProfileTags}}
                             <label class="filter-multi-select__option">
-                                <input type="checkbox" name="tags" value="{{.Name}}">
+                                {{/* data-tag-id carries a tick across a rename (dashboard-trackers.js). */}}
+                                <input type="checkbox" name="tags" value="{{.Name}}" data-tag-id="{{.ID}}">
                                 <span>{{.Name}}</span>
                             </label>
                             {{end}}
@@ -160,6 +161,17 @@ two tabs on different profiles kept acting on each other's library.
                 <input type="hidden" name="view" id="view-input" value="grid">
                 <input type="hidden" name="page" id="page-input" value="1">
             </form>
+            {{/* Sends the silent refreshes of the list (covers still arriving,
+                 the count after a delete) with the form's values. A request of
+                 its own, so the reader's request from the form never waits
+                 behind one: htmx lets an element have one request out and
+                 queues the rest (dashboard-trackers.js). */}}
+            <span id="trackers-quiet-refresh"
+                  hidden
+                  hx-get="/dashboard/trackers"
+                  hx-include="#tracker-filters"
+                  hx-target="#trackers-zone"
+                  hx-trigger="trackersQuietRefresh"></span>
 
             <div class="panel-actions">
                 <div class="view-toggle" role="group" aria-label="Tracker view mode">

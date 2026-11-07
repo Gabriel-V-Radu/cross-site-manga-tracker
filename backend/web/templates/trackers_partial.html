@@ -41,10 +41,23 @@
     </button>
 </div>
 {{end}}
+{{/* What this list was asked for and whether covers are still being looked
+     up. dashboard-trackers.js reads it after each swap: to schedule the quiet
+     cover refresh (an inline script here used to, and a list request starting
+     right after a swap wiped the script before htmx ran it), to tell whether a
+     new or edited card belongs on the list, and to word the empty state. */}}
+<div id="trackers-list-state" hidden
+     data-list-url="{{.RefreshKey}}"
+     data-page="{{.Page}}"
+     data-pending-covers="{{if .PendingCovers}}true{{else}}false{{end}}"></div>
 {{if eq (len .Trackers) 0}}
+{{/* Reading, the default status, leaves out the trackers whose latest chapter
+     has been read, so a library that is all caught up opens on an empty list;
+     the script shows the hint that matches the status asked for. */}}
 <div class="empty-state">
     <h2>No trackers found</h2>
-    <p>Try a different filter, or add your first source entry.</p>
+    <p data-empty-hint="other">Try a different filter, or add your first source entry.</p>
+    <p data-empty-hint="reading" hidden>Reading leaves out the trackers you are caught up on. Choose All in Status to see them, or try a different filter.</p>
 </div>
 {{else}}
 {{/* The result count and the connector shortcuts belong to the list, not to
@@ -93,94 +106,4 @@
     {{template "pagination_controls" .}}
 </div>
 {{end}}
-{{end}}
-
-{{/* Re-pinning a just-created card after each swap lives in
-     dashboard-trackers.js (htmx:afterSwap on #trackers-zone). */}}
-{{if .PendingCovers}}
-<script>
-    (function () {
-        var refreshKey = "{{.RefreshKey}}";
-        if (!refreshKey || !document || !document.body) {
-            return;
-        }
-        if (window.__freezeTrackersOrder) {
-            return;
-        }
-
-        if (window.__pendingTrackersRefreshTimer) {
-            window.clearTimeout(window.__pendingTrackersRefreshTimer);
-            window.__pendingTrackersRefreshTimer = null;
-        }
-
-        if (!window.__coverRefreshAttempts) {
-            window.__coverRefreshAttempts = {};
-        }
-
-        var attempts = Number(window.__coverRefreshAttempts[refreshKey] || 0);
-        var maxAttempts = 30;
-        if (attempts >= maxAttempts) {
-            return;
-        }
-
-        window.__coverRefreshAttempts[refreshKey] = attempts + 1;
-        var delayMs = Math.min(3000, 600 + (attempts * 200));
-        // Yielding to an interaction has to end somewhere. A rating popover or
-        // the connector menu left open would otherwise hold the refresh off for
-        // as long as the page is on screen, and the covers it is waiting for
-        // would never arrive.
-        var maxDeferMs = 15000;
-        var deferUntil = 0;
-        var doSilentRefresh = function () {
-            window.__pendingTrackersRefreshTimer = null;
-            if (window.__freezeTrackersOrder) {
-                return;
-            }
-
-            var sel = window.getSelection ? window.getSelection() : null;
-            if (sel && sel.toString()) {
-                var trackersZone = document.getElementById('trackers-zone');
-                if (trackersZone && sel.anchorNode && trackersZone.contains(sel.anchorNode)) {
-                    window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
-                    return;
-                }
-            }
-
-            // Same courtesy for an open menu, a hovered connector or a focused
-            // control: swapping the region out from under the pointer closes
-            // what the user opened and flickers what they are pointing at.
-            // Bounded, so an interaction that is simply left open eventually
-            // gives the covers their turn.
-            if (window.trackersInteractionInProgress && window.trackersInteractionInProgress()) {
-                var now = new Date().getTime();
-                if (!deferUntil) {
-                    deferUntil = now + maxDeferMs;
-                }
-                if (now < deferUntil) {
-                    window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, 500);
-                    return;
-                }
-            }
-
-            window.__silentCoverRefresh = true;
-            document.body.dispatchEvent(new Event('trackersChanged'));
-        };
-        window.__pendingTrackersRefreshTimer = window.setTimeout(doSilentRefresh, delayMs);
-    })();
-</script>
-{{else}}
-<script>
-    (function () {
-        if (window.__pendingTrackersRefreshTimer) {
-            window.clearTimeout(window.__pendingTrackersRefreshTimer);
-            window.__pendingTrackersRefreshTimer = null;
-        }
-
-        var refreshKey = "{{.RefreshKey}}";
-        if (!refreshKey || !window.__coverRefreshAttempts) {
-            return;
-        }
-        delete window.__coverRefreshAttempts[refreshKey];
-    })();
-</script>
 {{end}}

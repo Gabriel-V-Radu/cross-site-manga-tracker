@@ -1,6 +1,8 @@
 // Fetches one tracker's card fragment and resolves with the parsed card
-// element. Rejects on network failure, an empty body, or markup whose first
-// element carries no id — the id is what the insert logic keys on.
+// element and whether the server is still looking up its cover or chapter
+// links (X-Card-Lookups-Pending). Rejects on network failure, an empty body, or
+// markup whose first element carries no id — the id is what the insert logic
+// keys on.
 var fetchTrackerCardFragment = function (requestURL) {
     return fetch(requestURL, {
         credentials: 'same-origin',
@@ -10,10 +12,13 @@ var fetchTrackerCardFragment = function (requestURL) {
             if (!response.ok) {
                 throw new Error('card fragment request failed');
             }
-            return response.text();
+            var pending = response.headers.get('X-Card-Lookups-Pending') === '1';
+            return response.text().then(function (html) {
+                return { html: html, pending: pending };
+            });
         })
-        .then(function (html) {
-            var markup = String(html || '').trim();
+        .then(function (result) {
+            var markup = String(result.html || '').trim();
             if (!markup) {
                 throw new Error('empty card fragment');
             }
@@ -24,8 +29,168 @@ var fetchTrackerCardFragment = function (requestURL) {
             if (!card || !card.id) {
                 throw new Error('invalid card fragment');
             }
-            return card;
+            return { card: card, pending: result.pending };
         });
+};
+
+var currentViewMode = function () {
+    var viewInput = document.getElementById('view-input');
+    return viewInput && viewInput.value === 'list' ? 'list' : 'grid';
+};
+
+var currentCardsContainer = function () {
+    return document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
+};
+
+var trackerCardFragmentURL = function (trackerID, viewMode) {
+    var profileInput = document.getElementById('profile-filter');
+    var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
+    var requestURL = '/dashboard/trackers/' + encodeURIComponent(String(trackerID)) + '/card-fragment?view=' + encodeURIComponent(viewMode);
+    if (profileKey) {
+        requestURL += '&profile=' + encodeURIComponent(profileKey);
+    }
+    return requestURL;
+};
+
+// What the list on screen was asked for, as the trackers partial records it in
+// #trackers-list-state: the request URL, the page the server actually served,
+// and whether covers were still being looked up. Null while the skeleton
+// stands in for the list.
+var shownTrackersList = function () {
+    var marker = document.getElementById('trackers-list-state');
+    if (!marker) {
+        return null;
+    }
+    var listURL = marker.getAttribute('data-list-url') || '';
+    var params;
+    try {
+        params = new URL(listURL, window.location.origin).searchParams;
+    } catch (_) {
+        return null;
+    }
+    return {
+        refreshKey: listURL,
+        params: params,
+        page: Number(marker.getAttribute('data-page') || '1'),
+        pendingCovers: marker.getAttribute('data-pending-covers') === 'true'
+    };
+};
+
+var listStatusFilter = function (list) {
+    // The server reads a missing status as Reading and an empty one as All.
+    if (!list.params.has('status')) {
+        return 'reading';
+    }
+    return String(list.params.get('status') || '').trim();
+};
+
+var cardIsCaughtUp = function (card) {
+    var lastRead = parseFloat(card.getAttribute('data-last-read'));
+    var latest = parseFloat(card.getAttribute('data-latest'));
+    return !isNaN(lastRead) && !isNaN(latest) && lastRead >= latest;
+};
+
+// Whether a card, as just rendered, belongs in the list on screen. Status is
+// on the card (with Reading's rule that a caught-up tracker is not on it); a
+// search, a tag or a site filter depends on what the card does not carry, so
+// with one of those active only the server can tell and the answer is no.
+var cardMatchesShownList = function (card, list) {
+    if (!card || !list) {
+        return false;
+    }
+    var hasValue = function (value) {
+        return String(value || '').trim() !== '';
+    };
+    if (hasValue(list.params.get('q')) || list.params.getAll('tags').some(hasValue) || list.params.getAll('sites').some(hasValue)) {
+        return false;
+    }
+    var status = listStatusFilter(list);
+    if (status !== '' && status !== 'all' && card.getAttribute('data-status') !== status) {
+        return false;
+    }
+    return !(status === 'reading' && cardIsCaughtUp(card));
+};
+
+// A card replaced in place keeps its position in the grid and the reader's
+// focus: the button or link focused in the old card is focused again in the
+// new one, without scrolling. (The OOB response's own refresh calls this too.)
+var focusSignature = function (node) {
+    var attrs = ['hx-post', 'hx-get', 'href'];
+    for (var i = 0; i < attrs.length; i += 1) {
+        var value = node.getAttribute && node.getAttribute(attrs[i]);
+        if (value) {
+            return node.tagName.toLowerCase() + '[' + attrs[i] + '="' + String(value).replace(/["\\]/g, '\\$&') + '"]';
+        }
+    }
+    if (node.classList && node.classList.length) {
+        return node.tagName.toLowerCase() + '.' + node.classList[0];
+    }
+    return '';
+};
+
+window.replaceTrackerCard = function (node, fresh) {
+    if (!node || !fresh || !node.parentNode) {
+        return null;
+    }
+    if (node.style && node.style.order) {
+        fresh.style.order = node.style.order;
+    }
+    var focused = document.activeElement;
+    var signature = (focused && focused !== document.body && node.contains(focused)) ? focusSignature(focused) : '';
+    node.parentNode.replaceChild(fresh, node);
+    if (window.htmx && typeof window.htmx.process === 'function') {
+        window.htmx.process(fresh);
+    }
+    if (signature) {
+        var match = fresh.querySelector(signature);
+        if (match && typeof match.focus === 'function') {
+            match.focus({ preventScroll: true });
+        }
+    }
+    if (typeof window.syncTrackerCardHoverState === 'function') {
+        window.syncTrackerCardHoverState();
+    }
+    return fresh;
+};
+
+// A card rendered while its cover or chapter lookups were still running asks
+// for itself again until the server stops saying so (X-Card-Lookups-Pending),
+// a bounded number of times. An open rating popover in it is waited for: the
+// swap would close it.
+var keepTrackerCardFresh = function (cardID, viewMode, requestURL) {
+    var attempts = 0;
+    var maxAttempts = 8;
+    var refresh;
+    var schedule = function () {
+        if (attempts >= maxAttempts) {
+            return;
+        }
+        window.setTimeout(refresh, Math.min(3000, 1000 + (attempts * 400)));
+    };
+    refresh = function () {
+        attempts += 1;
+        var node = document.getElementById(cardID);
+        if (!node || currentViewMode() !== viewMode) {
+            return;
+        }
+        if (node.querySelector('details[open]')) {
+            schedule();
+            return;
+        }
+        fetchTrackerCardFragment(requestURL)
+            .then(function (result) {
+                var current = document.getElementById(cardID);
+                if (!current || result.card.id !== cardID) {
+                    return;
+                }
+                window.replaceTrackerCard(current, result.card);
+                if (result.pending) {
+                    schedule();
+                }
+            })
+            .catch(schedule);
+    };
+    schedule();
 };
 
 // Puts a freshly fetched card at the top of the container, replacing any older
@@ -43,6 +208,34 @@ var placeTrackerCardAtTop = function (container, card) {
     }
 };
 
+// A tracker created moments ago is pinned to the top of page 1, where the
+// reader can see what they just added whatever the sort says, and the pin
+// survives the list's own re-renders (afterSwap below) until the reader asks
+// for another list. The pin remembers the filters it was made under: a list
+// asked for with other filters does not get it.
+var pinnedTrackerFilters = '';
+var pinnedTrackerNode = null;
+
+var pinTrackerCard = function (card) {
+    window.__pinnedTrackerID = card.id;
+    pinnedTrackerFilters = trackerFiltersState();
+    pinnedTrackerNode = card;
+};
+
+var unpinTrackerCard = function () {
+    window.__pinnedTrackerID = '';
+    pinnedTrackerFilters = '';
+    pinnedTrackerNode = null;
+};
+
+// The new card is put on top only where it belongs: page 1 of a list whose
+// filters it matches. On a Completed filter a new Reading tracker was pinned on
+// top anyway, on page 2 it went on top of page 2, the count kept saying "258
+// results", and the next refresh made the card vanish. Either way the list is
+// then refreshed quietly, so the count, the pages and the card's place in the
+// order come from the server. Everything is read when the fragment arrives,
+// not when it was asked for: the list may have been re-rendered in between,
+// and a card put into the container that was current then went nowhere.
 document.body.addEventListener('trackerCreated', function (event) {
     var detail = event && event.detail ? event.detail : {};
     var payload = detail;
@@ -54,71 +247,92 @@ document.body.addEventListener('trackerCreated', function (event) {
         return;
     }
 
-    var listContainer = document.getElementById('cards-container-list');
-    var gridContainer = document.getElementById('cards-container-grid');
-    var activeContainer = listContainer || gridContainer;
-    var viewMode = listContainer ? 'list' : 'grid';
-    if (!activeContainer) {
-        window.dispatchTrackersChanged('system');
-        return;
-    }
-
-    var profileInput = document.getElementById('profile-filter');
-    var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
-    var requestURL = '/dashboard/trackers/' + encodeURIComponent(String(trackerID)) + '/card-fragment?view=' + encodeURIComponent(viewMode);
-    if (profileKey) {
-        requestURL += '&profile=' + encodeURIComponent(profileKey);
-    }
+    var viewMode = currentViewMode();
+    var requestURL = trackerCardFragmentURL(trackerID, viewMode);
 
     fetchTrackerCardFragment(requestURL)
-        .then(function (card) {
-            placeTrackerCardAtTop(activeContainer, card);
-            window.__freezeTrackersOrder = true;
-            window.__pinnedTrackerID = card.id;
-
-            var shouldRetryCover = (viewMode === 'grid');
-            if (!shouldRetryCover) {
-                return;
+        .then(function (result) {
+            var card = result.card;
+            var container = currentCardsContainer();
+            var list = shownTrackersList();
+            var sameView = !!container && (container.id === 'cards-container-list') === (viewMode === 'list') && currentViewMode() === viewMode;
+            if (sameView && list && list.page === 1 && cardMatchesShownList(card, list)) {
+                placeTrackerCardAtTop(container, card);
+                pinTrackerCard(card);
+                if (result.pending) {
+                    keepTrackerCardFresh(card.id, viewMode, requestURL);
+                }
             }
-
-            var retryCount = 0;
-            var maxRetries = 4;
-            var retryDelayMs = 1200;
-            var retryLoadCard = function () {
-                if (window.__pinnedTrackerID !== card.id) {
-                    return;
-                }
-                if (retryCount >= maxRetries) {
-                    return;
-                }
-                retryCount += 1;
-
-                fetchTrackerCardFragment(requestURL)
-                    .then(function (refreshedCard) {
-                        if (refreshedCard.id !== card.id) {
-                            throw new Error('invalid refreshed card fragment');
-                        }
-
-                        placeTrackerCardAtTop(activeContainer, refreshedCard);
-
-                        var hasCoverImage = !!refreshedCard.querySelector('.tracker-card__cover img');
-                        if (!hasCoverImage && retryCount < maxRetries) {
-                            window.setTimeout(retryLoadCard, retryDelayMs);
-                        }
-                    })
-                    .catch(function () {
-                        if (retryCount < maxRetries) {
-                            window.setTimeout(retryLoadCard, retryDelayMs);
-                        }
-                    });
-            };
-
-            window.setTimeout(retryLoadCard, retryDelayMs);
+            window.dispatchTrackersChanged('silent');
         })
         .catch(function () {
-            window.dispatchTrackersChanged('system');
+            window.dispatchTrackersChanged('silent');
         });
 });
+
+// Before the list is swapped: the pinned card about to be replaced is kept,
+// in case the new list does not carry it (sorted onto another page). A pinned
+// card already gone from the page was deleted, and stays gone.
+var holdPinnedCardBeforeSwap = function () {
+    if (!window.__pinnedTrackerID) {
+        return;
+    }
+    var node = document.getElementById(window.__pinnedTrackerID);
+    if (!node) {
+        unpinTrackerCard();
+        return;
+    }
+    pinnedTrackerNode = node;
+};
+
+var restorePinnedCardAfterSwap = function () {
+    if (!window.__pinnedTrackerID) {
+        return;
+    }
+    var container = currentCardsContainer();
+    var list = shownTrackersList();
+    if (!container || !list || list.page !== 1 || trackerFiltersState() !== pinnedTrackerFilters) {
+        unpinTrackerCard();
+        return;
+    }
+    var card = document.getElementById(window.__pinnedTrackerID);
+    if (!card && pinnedTrackerNode && cardMatchesShownList(pinnedTrackerNode, list) &&
+        pinnedTrackerNode.classList.contains('tracker-row') === (container.id === 'cards-container-list')) {
+        // htmx cleaned up the old node's handlers as it removed it, so a copy
+        // goes back in and is processed afresh.
+        card = pinnedTrackerNode.cloneNode(true);
+        container.insertBefore(card, container.firstElementChild);
+        if (window.htmx && typeof window.htmx.process === 'function') {
+            window.htmx.process(card);
+        }
+    }
+    if (!card) {
+        unpinTrackerCard();
+        return;
+    }
+    if (container.firstElementChild !== card) {
+        container.insertBefore(card, container.firstElementChild);
+    }
+    card.style.order = '-9999';
+    pinnedTrackerNode = card;
+};
+
+// The search box asks for the list 300ms after the last keystroke. While that
+// timer runs, the form already holds text the reader is still typing, so a
+// silent refresh in that window would apply it half-typed; it is held off
+// until the search has gone (see trackersSearchPending's callers).
+var searchDebounceTimer = null;
+
+var trackersSearchPending = function () {
+    return !!searchDebounceTimer;
+};
+
+var cancelSearchDebounce = function () {
+    if (searchDebounceTimer) {
+        window.clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = null;
+    }
+};
 
 document.addEventListener('DOMContentLoaded', function () {
     var initialViewInput = document.getElementById('view-input');
@@ -132,11 +346,8 @@ document.addEventListener('DOMContentLoaded', function () {
             window.dispatchTrackersChanged('user');
         };
 
-        var searchDebounceTimer = null;
         var scheduleSearchRefresh = function () {
-            if (searchDebounceTimer) {
-                window.clearTimeout(searchDebounceTimer);
-            }
+            cancelSearchDebounce();
             searchDebounceTimer = window.setTimeout(function () {
                 searchDebounceTimer = null;
                 dispatchTrackersChanged();
@@ -151,10 +362,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // anyway, so Enter just runs it now instead of after the debounce.
         filtersForm.addEventListener('submit', function (event) {
             event.preventDefault();
-            if (searchDebounceTimer) {
-                window.clearTimeout(searchDebounceTimer);
-                searchDebounceTimer = null;
-            }
+            cancelSearchDebounce();
             var submitPageInput = document.getElementById('page-input');
             if (submitPageInput) {
                 submitPageInput.value = '1';
@@ -183,6 +391,8 @@ document.addEventListener('DOMContentLoaded', function () {
             if (changedPageInput) {
                 changedPageInput.value = '1';
             }
+            // This request carries the typed search too.
+            cancelSearchDebounce();
             dispatchTrackersChanged();
         });
 
@@ -213,6 +423,9 @@ document.addEventListener('DOMContentLoaded', function () {
                         return;
                     }
 
+                    // The search still pending from the last keystroke would
+                    // follow this request with one of its own.
+                    cancelSearchDebounce();
                     searchInput.value = '';
                     var clearPageInput = document.getElementById('page-input');
                     if (clearPageInput) {
@@ -307,9 +520,67 @@ document.addEventListener('click', function (event) {
 // came back unticked while the list behind it stayed filtered by the old
 // selection — and after a rename or delete, by a name that no longer exists,
 // so the page read "No trackers found" with no filter showing. The ticks are
-// carried across the swap by name, case-insensitively as the list filters
-// them, and a ticked tag that is gone takes its filter with it.
-var tickedTagNamesBeforeSwap = null;
+// carried across the swap by tag id, so a renamed tag stays ticked under its
+// new name (by name, case-insensitively as the list filters them, for markup
+// without ids), and a ticked tag that is gone takes its filter with it.
+var tickedTagsBeforeSwap = null;
+
+// A tag change answers with both trackersChanged and profileTagsChanged, and
+// htmx raises them in that order: the list used to reload at once, filtered by
+// the old tag name, then again once the menu came back with the new one —
+// twice per rename, the second skeleton wiping the first list mid-settle. The
+// list now waits for the menu: a non-user trackersChanged that arrives while
+// the menu is being re-fetched is owed, and paid once its ticks are restored.
+var tagMenuRefreshPending = false;
+var tagMenuRefreshTimer = null;
+var listRefreshOwed = false;
+
+var settleTagMenuRefresh = function (ticksChanged) {
+    var owed = listRefreshOwed;
+    tagMenuRefreshPending = false;
+    listRefreshOwed = false;
+    if (tagMenuRefreshTimer) {
+        window.clearTimeout(tagMenuRefreshTimer);
+        tagMenuRefreshTimer = null;
+    }
+    if (ticksChanged) {
+        var tagsPageInput = document.getElementById('page-input');
+        if (tagsPageInput) {
+            tagsPageInput.value = '1';
+        }
+    }
+    if (owed || ticksChanged) {
+        window.dispatchTrackersChanged('system');
+    }
+};
+
+document.body.addEventListener('htmx:beforeOnLoad', function (event) {
+    var xhr = event && event.detail ? event.detail.xhr : null;
+    var header = xhr && typeof xhr.getResponseHeader === 'function' ? xhr.getResponseHeader('HX-Trigger') : null;
+    if (!header || header.indexOf('profileTagsChanged') === -1 || !document.getElementById('filter-tags-dropdown')) {
+        return;
+    }
+    tagMenuRefreshPending = true;
+    if (tagMenuRefreshTimer) {
+        window.clearTimeout(tagMenuRefreshTimer);
+    }
+    // Should the menu never ask, the list is not kept waiting.
+    tagMenuRefreshTimer = window.setTimeout(function () {
+        tagMenuRefreshTimer = null;
+        if (tagMenuRefreshPending) {
+            settleTagMenuRefresh(false);
+        }
+    }, 10000);
+});
+
+document.body.addEventListener('htmx:afterRequest', function (event) {
+    var elt = event && event.detail ? event.detail.elt : null;
+    if (!tagMenuRefreshPending || !elt || !elt.closest || !elt.closest('#filter-tags-dropdown')) {
+        return;
+    }
+    // Reached only when the menu failed to come back (a swap settles it first).
+    settleTagMenuRefresh(false);
+});
 
 document.body.addEventListener('htmx:beforeSwap', function (event) {
     var target = event && event.detail ? event.detail.target : null;
@@ -317,43 +588,48 @@ document.body.addEventListener('htmx:beforeSwap', function (event) {
         return;
     }
 
-    // Prototype-less, so a tag called "constructor" is not found ticked.
-    tickedTagNamesBeforeSwap = Object.create(null);
+    tickedTagsBeforeSwap = [];
     Array.prototype.forEach.call(target.querySelectorAll('input[name="tags"]:checked'), function (box) {
-        tickedTagNamesBeforeSwap[String(box.value).toLowerCase()] = true;
+        tickedTagsBeforeSwap.push({
+            id: box.getAttribute('data-tag-id') || '',
+            name: String(box.value).toLowerCase()
+        });
     });
 });
 
 var restoreTickedFilterTags = function (menu) {
-    var wanted = tickedTagNamesBeforeSwap;
-    tickedTagNamesBeforeSwap = null;
-    if (!wanted) {
-        return;
-    }
+    var wanted = tickedTagsBeforeSwap || [];
+    tickedTagsBeforeSwap = null;
 
-    var present = Object.create(null);
-    Array.prototype.forEach.call(menu.querySelectorAll('input[name="tags"]'), function (box) {
-        var name = String(box.value).toLowerCase();
-        if (wanted[name]) {
-            box.checked = true;
-            present[name] = true;
+    var boxes = Array.prototype.slice.call(menu.querySelectorAll('input[name="tags"]'));
+    var ticksChanged = false;
+    wanted.forEach(function (tick) {
+        var box = null;
+        if (tick.id) {
+            box = boxes.filter(function (candidate) {
+                return candidate.getAttribute('data-tag-id') === tick.id;
+            })[0] || null;
+        }
+        if (!box) {
+            box = boxes.filter(function (candidate) {
+                return String(candidate.value).toLowerCase() === tick.name;
+            })[0] || null;
+        }
+        if (!box) {
+            ticksChanged = true;
+            return;
+        }
+        box.checked = true;
+        if (String(box.value).toLowerCase() !== tick.name) {
+            ticksChanged = true;
         }
     });
 
-    var lostTickedTag = Object.keys(wanted).some(function (name) {
-        return !present[name];
-    });
-    if (!lostTickedTag) {
-        return;
+    // The list was fetched with the old names (or not at all yet); one
+    // request now matches the ticks the menu shows.
+    if (tagMenuRefreshPending || ticksChanged) {
+        settleTagMenuRefresh(ticksChanged);
     }
-
-    // The list was fetched with the old names before the menu came back; ask
-    // again so it matches the ticks the menu now shows.
-    var lostTagPageInput = document.getElementById('page-input');
-    if (lostTagPageInput) {
-        lostTagPageInput.value = '1';
-    }
-    window.dispatchTrackersChanged('system');
 };
 
 var normalizeRatingValue = function (value) {
@@ -760,23 +1036,20 @@ window.renderTrackersSkeleton = function (viewMode) {
         '<div class="' + (mode === 'list' ? 'cards-list' : 'cards-grid') + '">' + items.join('') + '</div>';
 };
 
-// A silent cover refresh replaces the whole trackers region, and everything
-// the user was holding open or pointing at goes with it: the connector menu
-// and the rating popovers are <details> elements that come back closed, and a
-// hovered link loses its highlight for the instant the element is swapped —
-// which reads as the page flickering under the cursor for no reason. The
-// covers being waited on are never urgent, so the refresh yields to whatever
-// the user is doing and asks again shortly. Hover only counts over the
-// connector strip: the pointer rests over the card grid most of the time, and
-// deferring on that would stop covers from ever arriving.
+// A silent cover refresh replaces the whole trackers region. A hovered link
+// loses its highlight for the instant the element is swapped — which reads as
+// the page flickering under the cursor for no reason — and a focused control
+// is taken from under the reader. The covers being waited on are never
+// urgent, so the refresh yields to those and asks again shortly. Hover only
+// counts over the connector strip: the pointer rests over the card grid most
+// of the time, and deferring on that would stop covers from ever arriving. An
+// open rating popover or connector menu no longer holds it off: it is carried
+// across the swap instead (heldOpenMenus below), so it neither closes under the
+// reader nor keeps the covers waiting.
 window.trackersInteractionInProgress = function () {
     var zone = document.getElementById('trackers-zone');
     if (!zone) {
         return false;
-    }
-
-    if (zone.querySelector('details[open]')) {
-        return true;
     }
 
     var strip = zone.querySelector('.pagination-site-links');
@@ -792,14 +1065,179 @@ window.trackersInteractionInProgress = function () {
     return false;
 };
 
+// The list request in flight, and whether it is a silent one.
+var listRequest = null;
+var silentRefreshOwed = false;
+
+var isListTrigger = function (detail) {
+    return !!(detail && detail.elt && detail.elt.id === 'tracker-filters');
+};
+
+// A silent refresh is sent by #trackers-quiet-refresh, never by the filters
+// form, so the two never wait on each other: htmx lets one element have one
+// request out and queues the rest, and the reader's click used to queue behind
+// a silent refresh — nothing showed until the old list had been re-rendered,
+// and only then did the skeleton come up. The silent one is held while a
+// search is still being typed (it would apply the half-typed text), and owed
+// while the reader's own request is out. One asked for while another silent
+// one is out follows it, and the earlier answer is dropped: it may have been
+// asked before what this one is for (the card a delete just removed).
+var startQuietRefresh = function () {
+    if (trackersSearchPending()) {
+        return;
+    }
+    if (listRequest) {
+        if (!listRequest.silent) {
+            silentRefreshOwed = true;
+            return;
+        }
+        listRequest.xhr.__trackersSuperseded = true;
+    }
+    var source = document.getElementById('trackers-quiet-refresh');
+    if (source && window.htmx && typeof window.htmx.trigger === 'function') {
+        window.htmx.trigger(source, 'trackersQuietRefresh');
+    }
+};
+
+// Every trackersChanged reaches the filters form first.
+//
+// - A silent one is turned into a request from #trackers-quiet-refresh.
+// - The reader's request goes ahead at once; a silent one still out is left to
+//   finish, but its answer is not swapped in (htmx:beforeSwap below): it was
+//   asked for a list the reader has just moved away from. Aborting it instead
+//   had htmx log the abort as an error.
+// - While the tag menu is re-rendering after a tag change, a list refresh
+//   that did not come from the reader waits for it (see tagMenuRefreshPending).
+document.body.addEventListener('htmx:confirm', function (event) {
+    var detail = event && event.detail;
+    if (!isListTrigger(detail)) {
+        return;
+    }
+    var trigger = detail.triggeringEvent;
+    var silent = window.isQuietTrigger(trigger);
+    if (window.__silentCoverRefresh) {
+        window.__silentCoverRefresh = false;
+        silent = true;
+    }
+    var fromReader = !!(trigger && trigger.detail && trigger.detail.reason === 'user');
+
+    if (tagMenuRefreshPending && trigger && trigger.type === 'trackersChanged' && !fromReader) {
+        listRefreshOwed = true;
+        event.preventDefault();
+        return;
+    }
+
+    if (silent) {
+        event.preventDefault();
+        startQuietRefresh();
+        return;
+    }
+
+    if (listRequest && listRequest.silent) {
+        listRequest.xhr.__trackersSuperseded = true;
+    }
+});
+
+// The cover refresh: a list rendered while covers or chapter links were still
+// being looked up asks for itself again, quietly, until they have all landed
+// (or a bounded number of times). This used to be an inline script in the
+// trackers partial; a list request starting right after a swap wiped that
+// script before htmx ran it ("Cannot read properties of null (reading
+// 'insertBefore')"), so it lives here and reads the partial's
+// #trackers-list-state instead.
+var coverRefreshAttempts = {};
+var silentRefreshDeferUntil = 0;
+var quietRetryAttempts = 0;
+
+var clearPendingSilentRefresh = function () {
+    if (window.__pendingTrackersRefreshTimer) {
+        window.clearTimeout(window.__pendingTrackersRefreshTimer);
+        window.__pendingTrackersRefreshTimer = null;
+    }
+};
+
+var runSilentRefresh = function () {
+    window.__pendingTrackersRefreshTimer = null;
+
+    var zone = document.getElementById('trackers-zone');
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && sel.toString() && zone && sel.anchorNode && zone.contains(sel.anchorNode)) {
+        window.__pendingTrackersRefreshTimer = window.setTimeout(runSilentRefresh, 500);
+        return;
+    }
+
+    // The search box's own request is about to replace the list anyway.
+    if (trackersSearchPending()) {
+        window.__pendingTrackersRefreshTimer = window.setTimeout(runSilentRefresh, 500);
+        return;
+    }
+
+    // Bounded, so a control simply left focused eventually gives the covers
+    // their turn.
+    if (window.trackersInteractionInProgress()) {
+        var now = new Date().getTime();
+        if (!silentRefreshDeferUntil) {
+            silentRefreshDeferUntil = now + 15000;
+        }
+        if (now < silentRefreshDeferUntil) {
+            window.__pendingTrackersRefreshTimer = window.setTimeout(runSilentRefresh, 500);
+            return;
+        }
+    }
+
+    window.dispatchTrackersChanged('silent');
+};
+
+var queueSilentRefresh = function (delayMs) {
+    clearPendingSilentRefresh();
+    silentRefreshDeferUntil = 0;
+    window.__pendingTrackersRefreshTimer = window.setTimeout(runSilentRefresh, delayMs);
+};
+
+var scheduleCoverRefresh = function (list) {
+    if (!list || !list.refreshKey) {
+        clearPendingSilentRefresh();
+        return;
+    }
+    if (!list.pendingCovers) {
+        clearPendingSilentRefresh();
+        delete coverRefreshAttempts[list.refreshKey];
+        return;
+    }
+    var attempts = Number(coverRefreshAttempts[list.refreshKey] || 0);
+    if (attempts >= 30) {
+        clearPendingSilentRefresh();
+        return;
+    }
+    coverRefreshAttempts[list.refreshKey] = attempts + 1;
+    queueSilentRefresh(Math.min(3000, 600 + (attempts * 200)));
+};
+
+// A silent refresh that fails is not the reader's to hear about: the list on
+// screen stays as it is, and the refresh is tried again later, a few times,
+// further apart each time. It used to put "Failed to load trackers" over a list
+// the reader had done nothing to, and the covers it was waiting for stopped
+// arriving for good.
+var retryQuietlyLater = function () {
+    if (quietRetryAttempts >= 5) {
+        return;
+    }
+    var delayMs = Math.min(60000, 5000 * Math.pow(2, quietRetryAttempts));
+    quietRetryAttempts += 1;
+    queueSilentRefresh(delayMs);
+};
+
 document.body.addEventListener('htmx:beforeRequest', function (event) {
     var detail = event && event.detail;
     if (!detail || !detail.target || detail.target.id !== 'trackers-zone') {
         return;
     }
 
-    if (window.__silentCoverRefresh) {
-        window.__silentCoverRefresh = false;
+    var silent = window.isQuietListRequest(detail);
+    listRequest = { xhr: detail.xhr, silent: silent };
+    // Before the skeleton takes the pinned card off the page.
+    holdPinnedCardBeforeSwap();
+    if (silent) {
         return;
     }
 
@@ -833,7 +1271,30 @@ document.body.addEventListener('htmx:beforeRequest', function (event) {
 
 document.body.addEventListener('htmx:afterRequest', function (event) {
     var detail = event && event.detail;
-    if (!detail || detail.successful || !detail.target || detail.target.id !== 'trackers-zone') {
+    if (!detail || !detail.target || detail.target.id !== 'trackers-zone') {
+        return;
+    }
+    var xhr = detail.xhr;
+    var wasSilent = window.isQuietListRequest(detail);
+    if (listRequest && listRequest.xhr === xhr) {
+        listRequest = null;
+    }
+    // Overtaken by the reader's own request, which is already on its way.
+    if (xhr && xhr.__trackersSuperseded) {
+        return;
+    }
+    if (silentRefreshOwed && !wasSilent) {
+        silentRefreshOwed = false;
+        // After htmx has started whatever it queued behind this request.
+        window.setTimeout(function () {
+            window.dispatchTrackersChanged('silent');
+        }, 0);
+    }
+    if (detail.successful) {
+        return;
+    }
+    if (wasSilent) {
+        retryQuietlyLater();
         return;
     }
     // Nothing is swapped in for a failed request. The skeleton only ever
@@ -912,6 +1373,134 @@ var restoreDashboardScroll = function () {
     window.scrollTo(0, saved.y);
 };
 
+// A silent refresh re-renders the same list, so what the reader holds open in
+// it is opened again in the new copy: a rating popover with the value picked
+// but not yet saved (and focus on its stars), the connector "+N" menu. They
+// used to come back closed — after the 15s the refresh would wait for them —
+// with the picked rating lost. Recorded in the capture phase, before
+// dashboard-core.js takes focus out of the region.
+var heldOpenMenus = null;
+
+document.addEventListener('htmx:beforeSwap', function (event) {
+    var detail = event && event.detail;
+    if (!detail || !detail.target || detail.target.id !== 'trackers-zone' || detail.shouldSwap === false) {
+        return;
+    }
+    heldOpenMenus = null;
+    // A silent refresh overtaken by the reader's request answers for a list
+    // that is no longer wanted; its answer is dropped, not swapped over the
+    // reader's skeleton.
+    if (detail.xhr && detail.xhr.__trackersSuperseded) {
+        detail.shouldSwap = false;
+        return;
+    }
+    if (!window.isQuietListRequest(detail)) {
+        return;
+    }
+    // A silent refresh shows no skeleton, so the pinned card is still on the
+    // page — unless it was deleted while the request was out.
+    holdPinnedCardBeforeSwap();
+    var zone = detail.target;
+    var held = { ratings: [], connectorMenu: !!zone.querySelector('details.site-links-more[open]') };
+    Array.prototype.forEach.call(zone.querySelectorAll('details.tracker-rating[open]'), function (menu) {
+        var card = menu.closest('.tracker-card');
+        var form = menu.querySelector('.tracker-rating__popover');
+        if (!card || !card.id || !form) {
+            return;
+        }
+        held.ratings.push({
+            cardID: card.id,
+            value: getSelectedRatingValue(form),
+            focused: menu.contains(document.activeElement)
+        });
+    });
+    heldOpenMenus = held;
+}, true);
+
+var reopenHeldMenus = function (zone) {
+    var held = heldOpenMenus;
+    heldOpenMenus = null;
+    if (!held) {
+        return;
+    }
+    held.ratings.forEach(function (rating) {
+        var card = document.getElementById(rating.cardID);
+        var menu = card ? card.querySelector('details.tracker-rating') : null;
+        var form = menu ? menu.querySelector('.tracker-rating__popover') : null;
+        if (!menu || !form) {
+            return;
+        }
+        var label = normalizeRatingValue(rating.value).toFixed(1);
+        form.setAttribute('data-restore-rating', label);
+        setSelectedRatingValue(form, label);
+        menu.open = true;
+        if (rating.focused) {
+            var control = form.querySelector('.js-rating-control');
+            if (control) {
+                control.focus({ preventScroll: true });
+            }
+        }
+    });
+    if (held.connectorMenu) {
+        var connectorMenu = zone.querySelector('details.site-links-more');
+        if (connectorMenu) {
+            connectorMenu.open = true;
+        }
+    }
+};
+
+// "No trackers found — add your first source entry" was all a profile whose
+// trackers are all caught up saw on opening: Reading, the default, leaves out
+// the trackers whose latest chapter has been read. On Reading the empty state
+// says so instead.
+var explainEmptyList = function (zone, list) {
+    var empty = zone.querySelector('.empty-state');
+    if (!empty || !list) {
+        return;
+    }
+    var onReading = listStatusFilter(list) === 'reading';
+    Array.prototype.forEach.call(empty.querySelectorAll('[data-empty-hint]'), function (hint) {
+        hint.hidden = (hint.getAttribute('data-empty-hint') === 'reading') !== onReading;
+    });
+};
+
+// After an Edit save the card is swapped in place, where it stayed even when it
+// no longer belonged to the list: a tracker moved from Reading to Completed, or
+// stripped of the tag the list is filtered by, sat there until some other
+// reload. When the saved card no longer matches the list on screen — or a
+// search, tag or site filter is on, which the card cannot be checked against —
+// the list is refreshed quietly.
+var checkEditedCard = function (cardID) {
+    var card = document.getElementById(cardID);
+    if (!card) {
+        return;
+    }
+    if (!cardMatchesShownList(card, shownTrackersList())) {
+        window.dispatchTrackersChanged('silent');
+    }
+};
+
+document.body.addEventListener('htmx:beforeRequest', function (event) {
+    var detail = event && event.detail;
+    var elt = detail && detail.elt;
+    var xhr = detail && detail.xhr;
+    if (!elt || !xhr || !elt.matches || !elt.matches('#modal-zone form.tracker-form')) {
+        return;
+    }
+    var path = (detail.requestConfig && detail.requestConfig.path) || elt.getAttribute('hx-post') || '';
+    var match = /\/dashboard\/trackers\/(\d+)(?:\?|$)/.exec(path);
+    if (!match) {
+        return;
+    }
+    // The card has been swapped by the time the request's own load handler
+    // (htmx's) has run, also when the modal was closed in the meantime.
+    xhr.addEventListener('load', function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+            checkEditedCard('tracker-card-' + match[1]);
+        }
+    });
+});
+
 document.body.addEventListener('htmx:afterSwap', function (event) {
     var target = event && event.target;
     if (!target) {
@@ -935,19 +1524,12 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
         restoreDashboardScroll();
     }
 
-    // A tracker created moments ago is pinned to the top of the container, and
-    // that pin has to survive every re-render of the list (this used to be an
-    // inline script inside the trackers partial, run on each swap).
-    if (window.__freezeTrackersOrder && window.__pinnedTrackerID) {
-        var pinnedContainer = document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
-        var pinnedCard = document.getElementById(window.__pinnedTrackerID);
-        if (pinnedContainer && pinnedCard) {
-            if (pinnedContainer.firstElementChild !== pinnedCard) {
-                pinnedContainer.insertBefore(pinnedCard, pinnedContainer.firstElementChild);
-            }
-            pinnedCard.style.order = '-9999';
-        }
-    }
+    var list = shownTrackersList();
+    quietRetryAttempts = 0;
+    restorePinnedCardAfterSwap();
+    reopenHeldMenus(target);
+    explainEmptyList(target, list);
+    scheduleCoverRefresh(list);
 
     if (typeof window.syncTrackerCardHoverState === 'function') {
         window.syncTrackerCardHoverState();

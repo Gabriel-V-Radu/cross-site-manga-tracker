@@ -5,11 +5,16 @@ article carrying an hx-swap-oob attribute. Keeping only the wrapper duplicated
 is what stops the two from drifting: every copy of the body was hand-maintained
 before, so a one-line change to a card meant editing it in five places.
 
+Every wrapper carries the card's status and chapter numbers (data-status,
+data-last-read, data-latest): dashboard-trackers.js reads them to tell whether
+a new or edited card belongs on the list on screen — Reading leaves out a
+tracker whose last read chapter has reached the latest.
+
 The title is repeated in a title attribute: the card clamps it to two lines
 and the row to one, and the hover text is the only way to read it whole.
 */}}
 {{define "tracker_card_list"}}
-<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card">
+<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}">
 {{template "tracker_card_list_body" .}}
 </article>
 {{end}}
@@ -114,7 +119,7 @@ and the row to one, and the hover text is the only way to read it whole.
 {{end}}
 
 {{define "tracker_card_grid"}}
-<article id="tracker-card-{{.ID}}" class="tracker-card">
+<article id="tracker-card-{{.ID}}" class="tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}">
 {{template "tracker_card_grid_body" .}}
 </article>
 {{end}}

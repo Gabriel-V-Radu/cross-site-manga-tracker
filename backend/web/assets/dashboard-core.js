@@ -121,6 +121,9 @@ document.addEventListener('pointerleave', function () {
     window.syncTrackerCardHoverState();
 }, true);
 
+// "user" is the reader asking for another list; "silent" is the page bringing
+// the list it already shows up to date (covers, a count after a delete), which
+// shows no skeleton and reports no failure; "system" is anything else.
 window.dispatchTrackersChanged = function (reason) {
     if (!document || !document.body) {
         return;
@@ -128,7 +131,6 @@ window.dispatchTrackersChanged = function (reason) {
 
     var kind = String(reason || 'system').toLowerCase();
     if (kind === 'user') {
-        window.__freezeTrackersOrder = false;
         window.__pinnedTrackerID = '';
 
         if (window.__pendingTrackersRefreshTimer) {
@@ -355,6 +357,96 @@ document.addEventListener('click', function (event) {
     Array.prototype.forEach.call(form.querySelectorAll('.source-search-results .request-error'), function (node) {
         node.remove();
     });
+});
+
+// HX-Trigger events are dispatched on the element that sent the request. A
+// modal closed while its Save was in flight takes that element out of the
+// page, and an event dispatched on a detached element reaches no listener: the
+// tracker was created but the page never heard of it, so it never appeared and
+// the count stayed as it was. Each request watches its own element, and when
+// the answer comes back to an element no longer in the page, the events are
+// raised on <body>, where everything listens. htmx dispatches them on the
+// element right after htmx:beforeOnLoad, which still reaches a detached
+// element's own listeners.
+var forwardResponseTriggers = function (xhr) {
+    var header = xhr && typeof xhr.getResponseHeader === 'function' ? xhr.getResponseHeader('HX-Trigger') : null;
+    if (!header) {
+        return;
+    }
+    var triggers = {};
+    if (header.charAt(0) === '{') {
+        try {
+            triggers = JSON.parse(header);
+        } catch (_) {
+            return;
+        }
+    } else {
+        header.split(',').forEach(function (name) {
+            if (name.trim()) {
+                triggers[name.trim()] = {};
+            }
+        });
+    }
+    Object.keys(triggers).forEach(function (name) {
+        var detail = triggers[name];
+        if (detail === null || typeof detail !== 'object' || Array.isArray(detail)) {
+            detail = { value: detail };
+        }
+        if (window.htmx && typeof window.htmx.trigger === 'function') {
+            window.htmx.trigger(document.body, name, detail);
+        } else {
+            document.body.dispatchEvent(new CustomEvent(name, { bubbles: true, detail: detail }));
+        }
+    });
+};
+
+document.body.addEventListener('htmx:beforeRequest', function (event) {
+    var detail = event && event.detail;
+    var elt = detail && detail.elt;
+    var xhr = detail && detail.xhr;
+    if (!elt || !xhr || typeof elt.addEventListener !== 'function') {
+        return;
+    }
+    xhr.__requestElt = elt;
+    var onLoad = function (loadEvent) {
+        // The answer to a request from inside the element (the form's own
+        // Cancel button) bubbles through it too, and is not this one.
+        if (!loadEvent || loadEvent.target !== elt) {
+            return;
+        }
+        elt.removeEventListener('htmx:beforeOnLoad', onLoad);
+        // A listener left by a request that was aborted before its answer
+        // came is dropped by the next answer, which is not its own.
+        if (!loadEvent.detail || loadEvent.detail.xhr !== xhr) {
+            return;
+        }
+        if (!document.body.contains(elt)) {
+            forwardResponseTriggers(xhr);
+        }
+    };
+    elt.addEventListener('htmx:beforeOnLoad', onLoad);
+});
+
+// The same closed modal's answer is still swapped into #modal-zone. When the
+// reader has opened another modal in the meantime, that one would be wiped by
+// the answer to the one they closed; the answer goes into a hidden holder
+// instead, where its out-of-band card and its scripts still do their work.
+document.body.addEventListener('htmx:beforeSwap', function (event) {
+    var detail = event && event.detail;
+    if (!detail || !detail.target || detail.target.id !== 'modal-zone' || !detail.xhr || detail.shouldSwap === false) {
+        return;
+    }
+    var elt = detail.xhr.__requestElt;
+    if (!elt || document.body.contains(elt) || !detail.target.querySelector('.modal-backdrop')) {
+        return;
+    }
+    var holder = document.createElement('div');
+    holder.hidden = true;
+    document.body.appendChild(holder);
+    detail.target = holder;
+    window.setTimeout(function () {
+        holder.remove();
+    }, 1000);
 });
 
 // htmx swaps a region by inserting the new nodes before the old ones and only

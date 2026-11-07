@@ -27,14 +27,17 @@
     })();
 </script>
 {{end}}
-{{if eq .ViewMode "list"}}
-<article id="tracker-card-{{.ReplaceCard.ID}}" class="tracker-row tracker-card" hx-swap-oob="outerHTML:#tracker-card-{{.ReplaceCard.ID}}">
-{{template "tracker_card_list_body" .ReplaceCard}}
+{{/* The data- attributes match tracker_card_templates.html's wrappers. */}}
+{{with .ReplaceCard}}
+{{if eq $.ViewMode "list"}}
+<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="outerHTML:#tracker-card-{{.ID}}">
+{{template "tracker_card_list_body" .}}
 </article>
 {{else}}
-<article id="tracker-card-{{.ReplaceCard.ID}}" class="tracker-card" hx-swap-oob="outerHTML:#tracker-card-{{.ReplaceCard.ID}}">
-{{template "tracker_card_grid_body" .ReplaceCard}}
+<article id="tracker-card-{{.ID}}" class="tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="outerHTML:#tracker-card-{{.ID}}">
+{{template "tracker_card_grid_body" .}}
 </article>
+{{end}}
 {{end}}
 {{end}}
 
@@ -84,9 +87,11 @@
             if (document.getElementById(cardID) !== node) {
                 return;
             }
-            // Swapping the card out would close an open rating popover and
-            // drop focus from under the user, so it waits for them instead.
-            if (node.querySelector('details[open]') || node.contains(document.activeElement)) {
+            // Swapping the card out would close an open rating popover, so it
+            // waits for it. Focus is no reason to wait: the card's focused
+            // button or link is focused again in the new copy (and after an
+            // Edit focus is back on the card's Edit button, where it stays).
+            if (node.querySelector('details[open]')) {
                 schedule();
                 return;
             }
@@ -108,17 +113,8 @@
                     if (!fresh || fresh.id !== cardID || document.getElementById(cardID) !== node) {
                         return;
                     }
-                    if (node.style && node.style.order) {
-                        fresh.style.order = node.style.order;
-                    }
-                    node.parentNode.replaceChild(fresh, node);
+                    window.replaceTrackerCard(node, fresh);
                     node = fresh;
-                    if (window.htmx && typeof window.htmx.process === 'function') {
-                        window.htmx.process(fresh);
-                    }
-                    if (typeof window.syncTrackerCardHoverState === 'function') {
-                        window.syncTrackerCardHoverState();
-                    }
                     if (result.pending) {
                         schedule();
                     }
@@ -131,14 +127,14 @@
     })();
 </script>
 {{end}}
-{{if .PrependCard}}
-{{if eq .ViewMode "list"}}
-<article id="tracker-card-{{.PrependCard.ID}}" class="tracker-row tracker-card" hx-swap-oob="afterbegin:#cards-container-list">
-{{template "tracker_card_list_body" .PrependCard}}
+{{with .PrependCard}}
+{{if eq $.ViewMode "list"}}
+<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="afterbegin:#cards-container-list">
+{{template "tracker_card_list_body" .}}
 </article>
 {{else}}
-<article id="tracker-card-{{.PrependCard.ID}}" class="tracker-card" hx-swap-oob="afterbegin:#cards-container-grid">
-{{template "tracker_card_grid_body" .PrependCard}}
+<article id="tracker-card-{{.ID}}" class="tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="afterbegin:#cards-container-grid">
+{{template "tracker_card_grid_body" .}}
 </article>
 {{end}}
 {{end}}
