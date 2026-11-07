@@ -220,30 +220,58 @@ window.addTrackerLinkedSource = function (button) {
 // Some sources cannot put a chapter number in their search listing — MangaFire's
 // spans every language it hosts and MangaBuddy's carries no chapters at all — so
 // the number is fetched for the one result the user picked, rather than left for
-// the first poll after saving to discover. Resolves to null when the source has
-// no number to give or could not be read; both leave the field to the user.
+// the first poll after saving to discover. It always resolves: to the source's
+// answer, or to { error } saying why there is none, which leaves the field to
+// the user.
 window.requestSourceChapter = function (sourceId, sourceUrl) {
     var endpoint = '/dashboard/trackers/source-chapter?source_id=' +
         encodeURIComponent(String(sourceId)) + '&url=' + encodeURIComponent(sourceUrl);
 
     return fetch(endpoint, { headers: { Accept: 'application/json' } })
         .then(function (response) {
-            // A server that predates this endpoint answers 404 with an HTML
-            // body, which would otherwise surface as an unexplained blank field.
-            if (!response.ok && response.status !== 200) {
-                return { error: 'This source lookup is not available on the server (HTTP ' + response.status + ')' };
-            }
-            return response.json();
-        })
-        .then(function (payload) {
-            if (!payload) {
-                return { error: 'Empty response from the source lookup' };
-            }
-            return payload;
+            return response.text().then(function (body) {
+                return sourceChapterAnswer(response, body);
+            });
         })
         .catch(function () {
             return { error: 'Could not reach the source lookup' };
         });
+};
+
+// Every refusal used to read "not available on the server", a server that
+// crashed on the lookup included, which sent the reader looking for a missing
+// endpoint. The endpoint explains its own refusals in a JSON error, and that
+// is what is shown. Otherwise only a 404 means the endpoint is missing (a
+// server that predates it answers one with an HTML page); any other status is
+// a lookup that failed, said with the server's own short text when it sent
+// one, as the htmx requests do (dashboard-core.js).
+var sourceChapterAnswer = function (response, body) {
+    var text = String(body || '').trim();
+    var payload = null;
+    try {
+        payload = JSON.parse(text);
+    } catch (_) {
+        payload = null;
+    }
+    var hasPayload = !!payload && typeof payload === 'object' && !Array.isArray(payload);
+
+    if (response.ok) {
+        if (!text) {
+            return { error: 'Empty response from the source lookup' };
+        }
+        return hasPayload ? payload : { error: 'Unreadable response from the source lookup' };
+    }
+
+    if (hasPayload && typeof payload.error === 'string' && payload.error.trim()) {
+        return { error: payload.error.trim() };
+    }
+    if (response.status === 404) {
+        return { error: 'This source lookup is not available on the server (HTTP 404)' };
+    }
+    if (text && text.charAt(0) !== '<' && text.length <= 300 && !hasPayload) {
+        return { error: 'The source lookup failed: ' + text };
+    }
+    return { error: 'The source lookup failed (HTTP ' + response.status + ')' };
 };
 
 window.fetchTrackerSourceChapter = function (form, sourceId, sourceUrl) {
