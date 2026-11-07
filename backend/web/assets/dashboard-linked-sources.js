@@ -10,6 +10,7 @@ window.renderLinkedSources = function (form) {
     }
 
     var items = window.parseJSONArray(hidden.value);
+    window.syncReadingSiteSelect(form);
 
     if (items.length === 0) {
         list.innerHTML = '<p class="search-message">No linked sites yet.</p>';
@@ -108,6 +109,168 @@ window.syncLinkedSourceSelect = function (form) {
     select.value = hasPreviousValue ? previousValue : '';
 };
 
+// Reading Site offers the linked sites, but only the server filled it in, when
+// the form opened: a site added here could not be chosen until the form was
+// closed and opened again, and a removed one stayed on offer, so a save could
+// pin reading to a site the tracker no longer links. The options follow the
+// list as it changes. The current choice stays while its site is still linked
+// and falls back to Auto when it is not.
+window.syncReadingSiteSelect = function (form) {
+    if (!form) {
+        return;
+    }
+
+    var select = form.querySelector('#reading-source-id');
+    var hidden = form.querySelector('#linked-sources-json');
+    if (!select || !hidden) {
+        return;
+    }
+
+    var sourceNames = {};
+    var allSourcesHidden = form.querySelector('#all-sources-json');
+    window.parseJSONArray(allSourcesHidden ? allSourcesHidden.value : '').forEach(function (source) {
+        var sourceID = Number(source && source.id);
+        if (sourceID > 0) {
+            sourceNames[sourceID] = source.name || '';
+        }
+    });
+
+    var previousValue = select.value;
+    var hasPreviousValue = false;
+    var listed = {};
+    var optionHtml = '<option value="0">Auto (best available)</option>';
+
+    window.parseJSONArray(hidden.value).forEach(function (item) {
+        var sourceID = Number(item && item.sourceId);
+        if (!(sourceID > 0) || listed[sourceID]) {
+            return;
+        }
+        listed[sourceID] = true;
+
+        var value = String(sourceID);
+        if (value === previousValue) {
+            hasPreviousValue = true;
+        }
+
+        var name = item.sourceName || sourceNames[sourceID] || ('Source #' + value);
+        optionHtml += '<option value="' + value + '">' + window.escapeHtml(name) + '</option>';
+    });
+
+    select.innerHTML = optionHtml;
+    select.value = hasPreviousValue ? previousValue : '0';
+};
+
+// A linked site whose chapter is ahead takes over the main fields the moment it
+// is added (see addTrackerLinkedSource). Removing it again used to leave it
+// there: the form still named it as the source, with its URL and chapter, and
+// the save, which keeps the main fields as sent whenever the linked list ends up
+// as it was stored, made the removed site the primary and linked it back. So
+// each promotion remembers the fields as they stood before it, and removing the
+// site puts back the ones that still hold what it wrote. A field the user has
+// changed since, a chapter typed by hand say, is theirs and stays.
+var promotedTrackerFields = [
+    'select[name="source_id"]',
+    'input[name="source_url"]',
+    'input[name="source_item_id"]',
+    'input[name="related_titles_json"]',
+    'input[name="latest_release_at"]',
+    'input[name="latest_known_chapter"]'
+];
+
+var promotedSourceURLField = 'input[name="source_url"]';
+
+var linkedSourceKey = function (sourceId, sourceUrl) {
+    return String(Number(sourceId) || 0) + '|' + String(sourceUrl || '').trim().toLowerCase();
+};
+
+// The pick markers (rememberPickedTrackerField) travel with the fields they
+// describe, or a restored item id or chapter would still count as the
+// promotion's leftover and be cleared by the next search pick.
+var snapshotPromotedFields = function (form) {
+    var snapshot = { values: {}, picked: {} };
+    promotedTrackerFields.forEach(function (selector) {
+        var field = form.querySelector(selector);
+        snapshot.values[selector] = field ? field.value : null;
+        if (pickedTrackerFieldKeys[selector]) {
+            snapshot.picked[selector] = form.dataset[pickedTrackerFieldKeys[selector]] || '';
+        }
+    });
+    return snapshot;
+};
+
+// The source select is written without events: the main title search re-runs
+// when it changes (tracker_form_modal.html), and a promotion is not the user
+// choosing a site to search. It fired that search, a live one on the site
+// whenever the search box held a title.
+var writePromotedField = function (form, selector, value) {
+    var field = form.querySelector(selector);
+    if (!field || value === null || value === undefined) {
+        return;
+    }
+    if (field.tagName === 'SELECT') {
+        field.value = value;
+        return;
+    }
+    window.setTrackerFormField(form, selector, value, true);
+};
+
+var undoLinkedSourcePromotion = function (form, item) {
+    if (!item) {
+        return;
+    }
+    var key = linkedSourceKey(item.sourceId, item.sourceUrl);
+
+    // A chapter lookup still under way for the removed site must not promote
+    // it when it answers.
+    if (form.__linkedSourceLookups) {
+        delete form.__linkedSourceLookups[key];
+    }
+
+    var promotions = form.__linkedSourcePromotions || [];
+    for (var index = promotions.length - 1; index >= 0; index--) {
+        var promotion = promotions[index];
+        if (promotion.key !== key) {
+            continue;
+        }
+        promotions.splice(index, 1);
+
+        // The URL says whose the main fields are: a later promotion, a search
+        // pick or a URL typed by hand replaces it, and then this site is no
+        // longer what the form saves as its source.
+        var current = snapshotPromotedFields(form);
+        if (current.values[promotedSourceURLField] === promotion.after.values[promotedSourceURLField]) {
+            promotedTrackerFields.forEach(function (selector) {
+                if (current.values[selector] !== promotion.after.values[selector]) {
+                    return;
+                }
+                writePromotedField(form, selector, promotion.before.values[selector]);
+                if (pickedTrackerFieldKeys[selector]) {
+                    form.dataset[pickedTrackerFieldKeys[selector]] = promotion.before.picked[selector];
+                }
+            });
+            continue;
+        }
+
+        // A later promotion took over from this one and would hand the fields
+        // back to it, a site no longer linked; it hands them back to what this
+        // one replaced instead.
+        promotions.slice(index).forEach(function (later) {
+            if (later.before.values[promotedSourceURLField] !== promotion.after.values[promotedSourceURLField]) {
+                return;
+            }
+            promotedTrackerFields.forEach(function (selector) {
+                if (later.before.values[selector] !== promotion.after.values[selector]) {
+                    return;
+                }
+                later.before.values[selector] = promotion.before.values[selector];
+                if (pickedTrackerFieldKeys[selector]) {
+                    later.before.picked[selector] = promotion.before.picked[selector];
+                }
+            });
+        });
+    }
+};
+
 window.removeTrackerLinkedSource = function (index, button) {
     var form = window.findTrackerForm(button);
     if (!form) {
@@ -121,10 +284,18 @@ window.removeTrackerLinkedSource = function (index, button) {
 
     var items = window.parseJSONArray(hidden.value);
 
-    items.splice(index, 1);
+    var removed = items.splice(index, 1);
     hidden.value = JSON.stringify(items);
+    undoLinkedSourcePromotion(form, removed[0]);
     window.renderLinkedSources(form);
     window.syncLinkedSourceSelect(form);
+
+    // "<site> added" no longer holds once a site is removed again; results of
+    // a search in progress are left where they are.
+    var addedNotice = form.querySelector('#linked-search-results [data-linked-source-added]');
+    if (addedNotice) {
+        addedNotice.remove();
+    }
 };
 
 window.addTrackerLinkedSource = function (button) {
@@ -147,6 +318,11 @@ window.addTrackerLinkedSource = function (button) {
     if (!sourceId || !sourceUrl) {
         return;
     }
+    // Read now: the result list is replaced below, and the chapter lookup can
+    // answer long after.
+    var sourceName = button.dataset.sourceName || '';
+    var sourceItemId = button.dataset.sourceItemId || '';
+    var relatedTitles = window.parseRelatedTitlesDataset(button.dataset.relatedTitles);
 
     var items = window.parseJSONArray(hidden.value);
 
@@ -159,11 +335,13 @@ window.addTrackerLinkedSource = function (button) {
 
     items.push({
         sourceId: sourceId,
-        sourceName: button.dataset.sourceName || '',
-        sourceItemId: button.dataset.sourceItemId || '',
+        sourceName: sourceName,
+        sourceItemId: sourceItemId,
         sourceUrl: sourceUrl
     });
     hidden.value = JSON.stringify(items);
+
+    var key = linkedSourceKey(sourceId, sourceUrl);
 
     // Whether this source should take over as primary rests entirely on its
     // chapter number, so a listing that carries none has to be asked before the
@@ -183,17 +361,15 @@ window.addTrackerLinkedSource = function (button) {
             return;
         }
 
-        // allowEmpty: an empty source_item_id must still overwrite whatever the
-        // previous primary source left behind.
-        var setField = function (selector, value) {
-            window.setTrackerFormField(form, selector, value, true);
-        };
+        var before = snapshotPromotedFields(form);
 
-        setField('select[name="source_id"]', String(sourceId));
-        setField('input[name="source_url"]', sourceUrl);
-        setField('input[name="source_item_id"]', button.dataset.sourceItemId || '');
-        setField('input[name="latest_known_chapter"]', String(incomingLatest));
-        setField('input[name="related_titles_json"]', JSON.stringify(window.parseRelatedTitlesDataset(button.dataset.relatedTitles)));
+        // Empty values are written too: an empty source_item_id must still
+        // overwrite whatever the previous primary source left behind.
+        writePromotedField(form, 'select[name="source_id"]', String(sourceId));
+        writePromotedField(form, 'input[name="source_url"]', sourceUrl);
+        writePromotedField(form, 'input[name="source_item_id"]', sourceItemId);
+        writePromotedField(form, 'input[name="latest_known_chapter"]', String(incomingLatest));
+        writePromotedField(form, 'input[name="related_titles_json"]', JSON.stringify(relatedTitles));
         rememberPickedTrackerField(form, 'input[name="source_item_id"]', true);
         rememberPickedTrackerField(form, 'input[name="latest_known_chapter"]', true);
 
@@ -201,12 +377,25 @@ window.addTrackerLinkedSource = function (button) {
         if (latestReleaseField && typeof latestReleaseAt !== 'undefined') {
             latestReleaseField.value = latestReleaseAt || '';
         }
+
+        var promotions = form.__linkedSourcePromotions || (form.__linkedSourcePromotions = []);
+        promotions.push({ key: key, before: before, after: snapshotPromotedFields(form) });
     };
 
     if (String(button.dataset.latestChapter || '').trim()) {
         promoteIfAhead(button.dataset.latestChapter, button.dataset.latestReleaseAt);
     } else {
+        // The answer can come after the site was removed again, or removed and
+        // added once more: only the lookup for the site as it is linked now may
+        // promote it (undoLinkedSourcePromotion drops the entry on removal).
+        var lookups = form.__linkedSourceLookups || (form.__linkedSourceLookups = {});
+        var lookup = {};
+        lookups[key] = lookup;
         window.requestSourceChapter(sourceId, sourceUrl).then(function (payload) {
+            if (lookups[key] !== lookup) {
+                return;
+            }
+            delete lookups[key];
             if (payload && !payload.error) {
                 promoteIfAhead(payload.latestChapter, payload.latestReleaseAt);
             }
@@ -215,6 +404,18 @@ window.addTrackerLinkedSource = function (button) {
 
     window.renderLinkedSources(form);
     window.syncLinkedSourceSelect(form);
+
+    // The results stayed on screen after the pick, all still clickable, though
+    // the site had already left Site to Add: clicking the same one again did
+    // nothing, and another one linked the same site a second time. They give
+    // way to what just happened. The title stays in the search box, so picking
+    // the next site searches it there straight away.
+    var results = form.querySelector('#linked-search-results');
+    if (results) {
+        results.innerHTML = '<p class="search-message" data-linked-source-added>' +
+            window.escapeHtml((sourceName || 'The site') + ' added. Pick another Site to Add to search it for this title too.') +
+            '</p>';
+    }
 };
 
 // Some sources cannot put a chapter number in their search listing — MangaFire's

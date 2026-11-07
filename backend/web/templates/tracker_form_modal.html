@@ -87,9 +87,12 @@
             <p id="linked-search-loading" class="search-loading htmx-indicator">Searching…</p>
             <div id="linked-search-results" class="source-search-results"></div>
 
+            {{/* Rendered for the sites linked when the form opens;
+                 syncReadingSiteSelect (dashboard-linked-sources.js) keeps the
+                 options in step as sites are added and removed here. */}}
             <label>
                 Reading Site
-                <select name="reading_source_id">
+                <select name="reading_source_id" id="reading-source-id">
                     <option value="0" {{if eq .ReadingSourceID 0}}selected{{end}}>Auto (best available)</option>
                     {{range .ReadingOptions}}
                     <option value="{{.SourceID}}" {{if eq $.ReadingSourceID .SourceID}}selected{{end}}>{{.SourceName}}</option>
