@@ -15,7 +15,13 @@
     {{if .Stopping}}
     Stopping after the current series: {{.Done}}/{{.Total}} checked, {{.WithCandidates}} with candidates
     {{else}}
+    {{/* Until the scan has counted its trackers there is no total to show,
+         and "0/0 series checked" read as a scan with nothing to do. */}}
+    {{if .Starting}}
+    Starting the {{.SourceName}} scan: counting the series to check…
+    {{else}}
     Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
+    {{end}}
     <button type="button" class="action-btn link-scan-status__stop"
             hx-post="/dashboard/links/scan/stop"
             hx-target="closest .link-scan-status"
@@ -25,12 +31,18 @@
     {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>{{end}}
 </div>
 {{else}}
-<div id="link-scan-status" class="link-scan-status">
+<!-- A scan another profile started is not this page's to follow or stop, but
+     it holds the scanner until it ends, so the line says so and checks back
+     now and then; these polls carry no poll=1, as that scan's end changes
+     nothing in this profile's queue. -->
+<div id="link-scan-status" class="link-scan-status"
+     {{if .BusyElsewhere}}hx-get="/dashboard/links/scan-status" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML"{{end}}>
     {{if .SourceName}}
     Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Stopped}} — stopped early{{end}}.
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
     {{end}}
-    {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>{{end}}
+    {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>
+    {{else if .BusyElsewhere}}<span role="status">Another profile is running a scan; yours can start once it finishes.</span>{{end}}
     {{if .JustFinished}}
     <span hx-get="/dashboard/links/queue"
           hx-include="#links-scope"

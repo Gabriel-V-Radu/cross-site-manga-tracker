@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -203,19 +204,88 @@ func TestApplyManualLinkSettlesTheReview(t *testing.T) {
 		t.Fatalf("scan targets after the manual link = %+v, want empty", targets)
 	}
 
-	// Another profile's tracker is not reachable through the same call.
+	// Another profile's tracker is not reachable through the same call, and
+	// the refusal says so instead of passing for a link that was made.
 	other := seedLinkTracker(t, db, "other")
 	if _, err := db.Exec(`UPDATE trackers SET profile_id = 2 WHERE id = ?`, other); err != nil {
 		t.Fatalf("move tracker to another profile: %v", err)
 	}
-	if err := repo.ApplyManualLink(context.Background(), 1, other, models.TrackerSource{
+	err = repo.ApplyManualLink(context.Background(), 1, other, models.TrackerSource{
 		SourceID:  mangadex,
 		SourceURL: "https://mangadex.org/title/def",
-	}, comick); err != nil {
-		t.Fatalf("apply manual link for a foreign tracker: %v", err)
+	}, comick)
+	if !errors.Is(err, repository.ErrLinkTrackerNotFound) {
+		t.Fatalf("manual link for a foreign tracker = %v, want ErrLinkTrackerNotFound", err)
 	}
 	if got := countLinkRows(t, db, other, mangadex); got != 0 {
 		t.Fatalf("foreign tracker gained %d link rows", got)
+	}
+}
+
+// TestApplyManualLinkRefusesTheTrackersOwnPrimary covers pasting the
+// tracker's own address: it used to settle the review as if a fallback had
+// been found — candidates rejected, the tracker marked dismissed for the
+// source under review and gone from every later scan — while linking nothing.
+func TestApplyManualLinkRefusesTheTrackersOwnPrimary(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	comick := sourceIDByKey(t, db, "comick")
+	mangafire := sourceIDByKey(t, db, "mangafire")
+	trackerID := seedLinkTracker(t, db, "series")
+	seedTwoCandidates(t, db, trackerID, comick)
+
+	for _, pasted := range []string{"https://mangafire.to/manga/series", "https://mangafire.to/title/abc12-series"} {
+		err := repo.ApplyManualLink(context.Background(), 1, trackerID, models.TrackerSource{
+			SourceID:  mangafire,
+			SourceURL: pasted,
+		}, comick)
+		if !errors.Is(err, repository.ErrLinkIsTrackerPrimary) {
+			t.Fatalf("manual link of %q on the primary's site = %v, want ErrLinkIsTrackerPrimary", pasted, err)
+		}
+	}
+
+	if got := countLinkRows(t, db, trackerID, mangafire); got != 0 {
+		t.Fatalf("mangafire link rows = %d, want none written", got)
+	}
+	if got := suggestionStatusByURL(t, db, bestCandidateURL); got != repository.LinkSuggestionPending {
+		t.Fatalf("candidate status = %q, want still pending", got)
+	}
+	targets, err := repo.ListScanTargets(context.Background(), 1, comick, repository.LinkScanFilter{})
+	if err != nil {
+		t.Fatalf("list scan targets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].TrackerID != trackerID {
+		t.Fatalf("scan targets = %+v, want the tracker still there: it must not be dismissed", targets)
+	}
+}
+
+// TestDismissTrackerRefusesAForeignOrDeletedTracker: a dismissal for a
+// tracker the profile does not have must say so, not pass for a success.
+func TestDismissTrackerRefusesAForeignOrDeletedTracker(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	comick := sourceIDByKey(t, db, "comick")
+
+	foreign := seedLinkTracker(t, db, "foreign")
+	if _, err := db.Exec(`UPDATE trackers SET profile_id = 2 WHERE id = ?`, foreign); err != nil {
+		t.Fatalf("move tracker to another profile: %v", err)
+	}
+	deleted := seedLinkTracker(t, db, "deleted")
+	if _, err := db.Exec(`DELETE FROM trackers WHERE id = ?`, deleted); err != nil {
+		t.Fatalf("delete tracker: %v", err)
+	}
+
+	for _, trackerID := range []int64{foreign, deleted} {
+		if err := repo.DismissTracker(context.Background(), 1, trackerID, comick); !errors.Is(err, repository.ErrLinkTrackerNotFound) {
+			t.Fatalf("dismiss tracker %d = %v, want ErrLinkTrackerNotFound", trackerID, err)
+		}
+	}
+	var markers int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM source_link_suggestions WHERE status = 'dismissed'`).Scan(&markers); err != nil {
+		t.Fatalf("count dismissal markers: %v", err)
+	}
+	if markers != 0 {
+		t.Fatalf("dismissal markers = %d, want none", markers)
 	}
 }
 

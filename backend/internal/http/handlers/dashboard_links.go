@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 	"github.com/gabriel/cross-site-tracker/backend/internal/linkscan"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
@@ -30,13 +34,28 @@ type linksPageData struct {
 	ActiveProfile    models.Profile
 	Sources          []models.Source
 	SelectedSourceID int64
-	// The scope selects reopen showing the last scan's slice: the queue's
-	// point after a scan is reviewing what that scan covered, not everything
-	// that has ever gone unlinked.
+	// The scope selects open on what the page's URL names (links.js keeps the
+	// URL in step with them), so a reload shows what the reader had chosen.
+	// Without one they open on the profile's last scan while it runs or just
+	// after: the queue's point then is reviewing what that scan covered, not
+	// everything that has ever gone unlinked.
 	SelectedStatus     string
 	SelectedPrimary    string
 	SelectedAlternates string
+	SelectedShow       string
+	// ScopeFromLastScan says the selects were preset from the last scan, so
+	// the page can say so: a narrowed scope nobody remembered choosing read
+	// as a queue that had lost most of its series.
+	ScopeFromLastScan bool
 }
+
+// linkScopeCarryOver is how long after a scan ends the review page still
+// opens on that scan's scope. Past that, it is not "the scan I just ran" any
+// more, and a page that kept narrowing itself to it hid the rest of the queue.
+const linkScopeCarryOver = 15 * time.Minute
+
+// linkScopeKeys are the scope controls a page URL can carry.
+var linkScopeKeys = []string{"source", "status", "primary", "alternates", "show"}
 
 // linkScanScope is the parsed form of the scope controls: what slice of the
 // library a scan (and the queue view) covers. Most sessions only need the
@@ -180,9 +199,11 @@ type linkReviewTrackerView struct {
 	LatestReleaseAgo   string
 	PrimaryURL         string
 	PrimarySourceName  string
-	// Error carries a failed manual-link attempt back onto the re-rendered
-	// row instead of losing it to a dead end.
-	Error string
+	// Moved marks a "no candidate" row rendered in place of a card that just
+	// lost its last candidate: links.js moves it into that section's list,
+	// in front of MoveBefore's row to keep title order (zero: at the end).
+	Moved      bool
+	MoveBefore int64
 }
 
 type linkReviewGroupView struct {
@@ -204,10 +225,16 @@ type linkQueueData struct {
 	Summary      linkQueueSummaryView
 	Groups       []linkReviewGroupView
 	NoCandidates []linkReviewTrackerView
+	// ShowNoCandidates renders the "no candidate found" section even while it
+	// is empty, unless the view filter hides it: a reject that takes a
+	// tracker's last candidate moves its row there (Moved, and links.js).
+	ShowNoCandidates bool
 }
 
 type linkScanStatusData struct {
 	Running        bool
+	Starting       bool
+	BusyElsewhere  bool
 	SourceID       int64
 	SourceName     string
 	Total          int
@@ -242,26 +269,56 @@ func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
 	}
 
-	lastScope := h.lastLinkScanScopeValues()
 	data := linksPageData{
-		ActiveProfile:      *profile,
-		Sources:            sources,
-		SelectedSourceID:   h.selectedLinkSource(c, sources),
-		SelectedStatus:     lastScope["status"],
-		SelectedPrimary:    lastScope["primary"],
-		SelectedAlternates: lastScope["alternates"],
+		ActiveProfile:    *profile,
+		Sources:          sources,
+		SelectedSourceID: h.selectedLinkSource(c, sources),
 	}
-	if c.Query("source") == "" {
-		if id, err := strconv.ParseInt(lastScope["source"], 10, 64); err == nil && id > 0 {
+	scope := map[string]string{}
+	carried := false
+	if pageURLNamesLinkScope(c) {
+		for _, key := range linkScopeKeys {
+			scope[key] = strings.ToLower(strings.TrimSpace(c.Query(key)))
+		}
+	} else if last, ok := h.carriedLinkScanScope(profile.ID); ok {
+		scope, carried = last, true
+		if id, err := strconv.ParseInt(scope["source"], 10, 64); err == nil && id > 0 {
 			data.SelectedSourceID = id
 		}
 	}
+	data.SelectedStatus = valueOr(scope["status"], "all")
+	data.SelectedPrimary = valueOr(scope["primary"], "any")
+	data.SelectedAlternates = valueOr(scope["alternates"], "any")
+	data.SelectedShow = valueOr(scope["show"], "all")
+	// Only a scope that narrows anything needs saying: a carried "everything"
+	// looks exactly like the defaults.
+	data.ScopeFromLastScan = carried &&
+		(data.SelectedStatus != "all" || data.SelectedPrimary != "any" || data.SelectedAlternates != "any")
 	return h.render(c, "links_page.html", data)
 }
 
-// rememberLinkScanScope keeps the raw scope values a scan launched with, and
-// lastLinkScanScopeValues serves them back with defaults filled in.
-func (h *DashboardHandler) rememberLinkScanScope(c *fiber.Ctx, sourceID int64) {
+func valueOr(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+// pageURLNamesLinkScope reports a page URL that carries scope controls: the
+// reader's own choice, which a reload must show as it was.
+func pageURLNamesLinkScope(c *fiber.Ctx) bool {
+	for _, key := range linkScopeKeys {
+		if strings.TrimSpace(c.Query(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// rememberLinkScanScope keeps the raw scope values a profile's scan launched
+// with, and carriedLinkScanScope serves them back while that scan runs or for
+// linkScopeCarryOver after it ends.
+func (h *DashboardHandler) rememberLinkScanScope(c *fiber.Ctx, profileID int64, sourceID int64) {
 	// Cloned for the same reason the page gate clones: a form value borrows the
 	// request's body buffer, ToLower returns the input unchanged when it is
 	// already lowercase, and this map is kept on the handler until the next
@@ -274,20 +331,32 @@ func (h *DashboardHandler) rememberLinkScanScope(c *fiber.Ctx, sourceID int64) {
 		"alternates": strings.Clone(strings.ToLower(strings.TrimSpace(c.FormValue("alternates")))),
 	}
 	h.lastLinkScanMu.Lock()
-	h.lastLinkScanScope = scope
+	if h.lastLinkScanScope == nil {
+		h.lastLinkScanScope = map[int64]map[string]string{}
+	}
+	h.lastLinkScanScope[profileID] = scope
 	h.lastLinkScanMu.Unlock()
 }
 
-func (h *DashboardHandler) lastLinkScanScopeValues() map[string]string {
-	values := map[string]string{"source": "", "status": "all", "primary": "any", "alternates": "any"}
+func (h *DashboardHandler) carriedLinkScanScope(profileID int64) (map[string]string, bool) {
+	progress := h.linkScanner.StatusFor(profileID).Progress
+	recent := progress.Running ||
+		(progress.FinishedAt != nil && time.Since(*progress.FinishedAt) < linkScopeCarryOver)
+	if !recent {
+		return nil, false
+	}
+
 	h.lastLinkScanMu.Lock()
 	defer h.lastLinkScanMu.Unlock()
-	for key, value := range h.lastLinkScanScope {
-		if strings.TrimSpace(value) != "" {
-			values[key] = value
-		}
+	remembered, ok := h.lastLinkScanScope[profileID]
+	if !ok {
+		return nil, false
 	}
-	return values
+	scope := make(map[string]string, len(remembered))
+	for key, value := range remembered {
+		scope[key] = value
+	}
+	return scope, true
 }
 
 // scannableSources are the enabled sources that have a registered connector —
@@ -369,7 +438,8 @@ func (h *DashboardHandler) buildLinkQueue(ctx context.Context, profileID int64, 
 	}
 
 	data := linkQueueData{
-		Summary: linkQueueSummaryView{SourceID: source.ID, SourceName: source.Name},
+		Summary:          linkQueueSummaryView{SourceID: source.ID, SourceName: source.Name},
+		ShowNoCandidates: scope.Show != "with",
 	}
 	for _, item := range queue {
 		trackerView := h.toLinkReviewTrackerView(item, source.ID)
@@ -477,41 +547,59 @@ func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
 		// An already-running scan is not a failure worth a dead end: show the
 		// live status instead, with a notice — on its own that status read as
 		// if the click had started the new scope, which it never did.
-		notice := "A scan is still running; start the new one once it finishes."
-		if !errors.Is(err, linkscan.ErrScanRunning) {
+		var notice string
+		switch {
+		case errors.Is(err, linkscan.ErrScanRunning):
+			notice = "A scan is still running; start the new one once it finishes."
+		case errors.Is(err, linkscan.ErrScanRunningElsewhere):
+			notice = "Another profile's scan is running; start yours once it finishes."
+		default:
 			slog.Warn("link scan did not start", "source", source.Key, "error", err)
 			notice = "The scan could not start; try again in a moment."
 		}
-		return h.renderLinkScanStatus(c, false, notice)
+		return h.renderLinkScanStatus(c, profile.ID, false, notice)
 	}
-	h.rememberLinkScanScope(c, source.ID)
+	h.rememberLinkScanScope(c, profile.ID, source.ID)
 	// A scope with nothing to check finishes before this render; counting it
 	// as the end of a scan refreshes the queue for it like any other.
-	return h.renderLinkScanStatus(c, true, "")
+	return h.renderLinkScanStatus(c, profile.ID, true, "")
 }
 
-// StopLinkScan winds down a running scan after the tracker it is on; what it
-// already stored stands. The Stop button exists only on the running status,
-// so a scan already over by now is the transition the queue refresh is for.
+// StopLinkScan winds down the profile's running scan after the tracker it is
+// on; what it already stored stands. The Stop button exists only on the
+// running status, so a scan already over by now is the transition the queue
+// refresh is for. Another profile's scan is never stopped from here.
 func (h *DashboardHandler) StopLinkScan(c *fiber.Ctx) error {
-	h.linkScanner.Stop()
-	return h.renderLinkScanStatus(c, true, "")
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return h.failProfile(c, err)
+	}
+	h.linkScanner.Stop(profile.ID)
+	return h.renderLinkScanStatus(c, profile.ID, true, "")
 }
 
 // LinkScanStatus answers the page-load request and the running status's polls.
 // Only the polls carry poll=1 (hx-vals on the running div).
 func (h *DashboardHandler) LinkScanStatus(c *fiber.Ctx) error {
-	return h.renderLinkScanStatus(c, c.Query("poll") == "1", "")
+	profile, err := h.profileResolver.Resolve(c)
+	if err != nil {
+		return h.failProfile(c, err)
+	}
+	return h.renderLinkScanStatus(c, profile.ID, c.Query("poll") == "1", "")
 }
 
-// renderLinkScanStatus renders the status line. afterRunning says the request
-// comes from a moment the scan was known to be running, so a scan found
-// finished now is the transition edge, and that render carries the one-shot
-// queue refresh.
-func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, afterRunning bool, notice string) error {
-	progress := h.linkScanner.Snapshot()
+// renderLinkScanStatus renders the profile's status line: its own scan only,
+// and a plain word when another profile's scan holds the scanner. afterRunning
+// says the request comes from a moment the scan was known to be running, so a
+// scan found finished now is the transition edge, and that render carries the
+// one-shot queue refresh.
+func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, profileID int64, afterRunning bool, notice string) error {
+	status := h.linkScanner.StatusFor(profileID)
+	progress := status.Progress
 	data := linkScanStatusData{
 		Running:        progress.Running,
+		Starting:       progress.Starting,
+		BusyElsewhere:  status.BusyElsewhere,
 		SourceID:       progress.SourceID,
 		SourceName:     progress.SourceName,
 		Total:          progress.Total,
@@ -536,6 +624,11 @@ func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, afterRunning bool,
 // shows it inside the card that was clicked, so it is written for the reader.
 const staleSuggestionMessage = "That candidate is no longer pending; reload the queue to see the current ones."
 
+// staleTrackerMessage is the same answer for a card's tracker-level actions
+// (a pasted URL, No match, Dismiss) on a tracker deleted in another tab or
+// not the page's profile's.
+const staleTrackerMessage = "That series is no longer in this queue; reload the queue to see the current ones."
+
 func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
@@ -559,7 +652,7 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	}
 	h.invalidateLinkLookups()
 
-	return h.renderLinkCardResponse(c, profile.ID, accepted.SourceID, accepted.TrackerID, "")
+	return h.renderLinkCardResponse(c, profile.ID, accepted.SourceID, accepted.TrackerID)
 }
 
 func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
@@ -585,7 +678,7 @@ func (h *DashboardHandler) RejectLinkSuggestion(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to reject the suggestion", err)
 	}
 
-	return h.renderLinkCardResponse(c, profile.ID, suggestion.SourceID, suggestion.TrackerID, "")
+	return h.renderLinkCardResponse(c, profile.ID, suggestion.SourceID, suggestion.TrackerID)
 }
 
 func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
@@ -604,10 +697,13 @@ func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 	}
 
 	if err := h.linkSuggestionRepo.DismissTracker(c.Context(), profile.ID, trackerID, source.ID); err != nil {
+		if errors.Is(err, repository.ErrLinkTrackerNotFound) {
+			return h.fail(c, fiber.StatusNotFound, staleTrackerMessage, nil)
+		}
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to dismiss the tracker", err)
 	}
 
-	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "")
+	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID)
 }
 
 // ManualLinkTracker links a hand-pasted URL — the last resort for titles the
@@ -615,6 +711,11 @@ func (h *DashboardHandler) DismissLinkTracker(c *fiber.Ctx) error {
 // not just the source under review: what the user is saying is "this is where
 // this series lives", and once any alternate is linked the tracker leaves this
 // source's queue.
+//
+// Every refusal is an error status with a message for the reader, never a
+// re-rendered card: htmx leaves the card as it is, so the pasted URL stays in
+// its box to be corrected, and links.js shows the message inside the card. A
+// re-render came back with the box empty.
 func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	profile, err := h.profileResolver.Resolve(c)
 	if err != nil {
@@ -632,12 +733,12 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 
 	rawURL := strings.TrimSpace(c.FormValue("url"))
 	if rawURL == "" {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Paste a series URL first.")
+		return h.fail(c, fiber.StatusBadRequest, "Paste a series URL first.", nil)
 	}
 
-	_, link, err := h.resolveSourceLink(c.Context(), rawURL)
+	linkedSource, link, err := h.resolveSourceLink(c.Context(), rawURL)
 	if err != nil {
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, err.Error())
+		return h.fail(c, fiber.StatusBadRequest, readerSentence(err.Error()), err)
 	}
 
 	// Linking a different site still settles this tracker's review: the
@@ -646,24 +747,41 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 	// transaction as the link, so the queue can never end up holding a
 	// settled tracker's live candidates.
 	if err := h.linkSuggestionRepo.ApplyManualLink(c.Context(), profile.ID, trackerID, link, source.ID); err != nil {
-		// Reported inside the re-rendered row rather than as a status, so the
-		// user can retry the paste; the repository's own wording names tables
-		// and belongs in the log instead of the card.
-		slog.Error("manual link failed", "path", c.Path(), "tracker", trackerID, "source", source.ID, "error", err)
-		return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "Could not save that link.")
+		switch {
+		case errors.Is(err, repository.ErrLinkTrackerNotFound):
+			return h.fail(c, fiber.StatusNotFound, staleTrackerMessage, nil)
+		case errors.Is(err, repository.ErrLinkIsTrackerPrimary):
+			return h.fail(c, fiber.StatusBadRequest,
+				"That is already this tracker's own site ("+linkedSource.Name+"); paste the series' address on another site.", nil)
+		}
+		// The repository's own wording names tables and belongs in the log
+		// instead of the card.
+		return h.fail(c, fiber.StatusInternalServerError, "Could not save that link; try again.", err)
 	}
 	h.invalidateLinkLookups()
 
-	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID, "")
+	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID)
+}
+
+// readerSentence turns resolveSourceLink's lowercase clause — written to
+// follow the edit form's "Could not link the pasted URL: " — into a sentence
+// that stands on its own inside a review card.
+func readerSentence(clause string) string {
+	clause = strings.TrimSpace(clause)
+	if clause == "" {
+		return clause
+	}
+	first, size := utf8.DecodeRuneInString(clause)
+	return string(unicode.ToUpper(first)) + clause[size:] + "."
 }
 
 // resolveSourceLink turns a pasted series URL into the link to store. The
-// URL's host must map to a registered connector and source; verification
-// through the connector is best-effort, not a gate — the sites most worth
-// linking by hand are exactly the ones this server cannot reach (MangaFire
-// behind its browser challenge) while the reader's own browser can. An
-// unverified URL is linked as pasted and canonicalized whenever the site
-// answers again.
+// URL's host must map to a registered connector and source, and the URL must
+// have the shape of a series page; verification through the connector is
+// best-effort, not a gate — the sites most worth linking by hand are exactly
+// the ones this server cannot reach (MangaFire behind its browser challenge)
+// while the reader's own browser can. An unverified URL is linked as pasted
+// and canonicalized whenever the site answers again.
 //
 // It writes nothing: the connector call can take the full timeout, and with a
 // single SQLite connection no transaction may be open across it.
@@ -673,9 +791,29 @@ func (h *DashboardHandler) resolveSourceLink(parent context.Context, rawURL stri
 		return nil, models.TrackerSource{}, fmt.Errorf("a series URL is required")
 	}
 
+	parsed, err := url.Parse(trimmed)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Hostname() == "" {
+		return nil, models.TrackerSource{}, fmt.Errorf("paste the series' full address, starting with https://")
+	}
+
 	connector, ok := h.registry.Get(trimmed)
 	if !ok {
 		return nil, models.TrackerSource{}, fmt.Errorf("that site has no connector; the poller could not read it")
+	}
+
+	// Only the host used to be checked, and a failed resolve was ignored, so
+	// a site's home page was stored as a "series" link. Every supported site
+	// addresses a series below a route — /title/{id}, /manga/{slug},
+	// /series/{id}, or deeper still on Webtoons — so a page closer to the root
+	// than that (the home page, a listing, a search) is refused here, before
+	// any request. The connectors' own URL parsers are stricter, but they are
+	// not exported and run only inside a resolve, which may fail for reasons
+	// that have nothing to do with the URL.
+	switch segments := connectors.PathSegments(parsed); {
+	case len(segments) == 0:
+		return nil, models.TrackerSource{}, fmt.Errorf("that is %s's home page, not a series; open the series there and paste its address", connector.Name())
+	case len(segments) < 2:
+		return nil, models.TrackerSource{}, fmt.Errorf("that is not a series page on %s; open the series there and paste its address", connector.Name())
 	}
 	linkedSource, err := h.sourceRepo.GetByKey(parent, connector.Key())
 	if err != nil {
@@ -759,7 +897,7 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 // renderLinkCardResponse re-renders one tracker's review card after a
 // mutation — or renders its removal when the tracker left the queue — plus an
 // out-of-band summary refresh so the counters stay honest.
-func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64, sourceID int64, trackerID int64, errorMessage string) error {
+func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64, sourceID int64, trackerID int64) error {
 	source, err := h.sourceRepo.GetByID(c.Context(), sourceID)
 	if err != nil || source == nil {
 		return h.fail(c, fiber.StatusInternalServerError, "source lookup failed", err)
@@ -775,22 +913,29 @@ func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64,
 	response := linkCardResponseData{Summary: data.Summary}
 	for index := range data.Groups {
 		if data.Groups[index].Tracker.ID == trackerID {
-			data.Groups[index].Tracker.Error = errorMessage
 			response.Group = &data.Groups[index]
 			break
 		}
 	}
 	if response.Group == nil {
+		// A card action never leaves a "no candidate" row in place — those
+		// rows only link or leave — so a tracker found here just lost its last
+		// candidate to a Reject, and its row moves to that section instead of
+		// staying under "Candidates to review" until a reload.
 		for index := range data.NoCandidates {
 			if data.NoCandidates[index].ID == trackerID {
-				data.NoCandidates[index].Error = errorMessage
 				response.NoMatch = &data.NoCandidates[index]
+				response.NoMatch.Moved = true
+				if index+1 < len(data.NoCandidates) {
+					response.NoMatch.MoveBefore = data.NoCandidates[index+1].ID
+				}
 				break
 			}
 		}
 	}
-	// When neither is set the tracker left the queue and the card renders to
-	// nothing, which is exactly the removal the swap needs.
+	// When neither is set the tracker left the queue (or the view hides where
+	// it went) and the card renders to nothing, which is exactly the removal
+	// the swap needs.
 
 	return h.render(c, "links_card_response.html", response)
 }

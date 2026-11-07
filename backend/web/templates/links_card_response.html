@@ -1,6 +1,8 @@
 {{if .Group}}
 {{template "link_review_card" .Group}}
 {{else if .NoMatch}}
+{{/* Rendered where the clicked card was, marked as moved: links.js takes it
+     from there into the "No candidate found" list, in title order. */}}
 {{template "link_nomatch_row" .NoMatch}}
 {{end}}
 <div id="links-summary" class="links-summary" hx-swap-oob="true">

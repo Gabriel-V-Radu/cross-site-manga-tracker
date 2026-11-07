@@ -23,6 +23,17 @@ const (
 	LinkSuggestionDismissed = "dismissed"
 )
 
+// ErrLinkTrackerNotFound is a manual link or dismissal for a tracker that is
+// not the profile's: deleted in another tab, or never its own. Answering it
+// like a success made the card vanish as if the action had worked.
+var ErrLinkTrackerNotFound = errors.New("tracker not found for this profile")
+
+// ErrLinkIsTrackerPrimary is a manual link onto the site the tracker already
+// follows as its primary source. Storing it gains no fallback, yet it settled
+// the review as if one had been found: the tracker left the queue and was
+// marked dismissed for the source under review, out of every later scan.
+var ErrLinkIsTrackerPrimary = errors.New("the link is on the tracker's primary source")
+
 type LinkSuggestion struct {
 	ID                     int64
 	TrackerID              int64
@@ -517,6 +528,12 @@ func (r *LinkSuggestionRepository) AcceptSuggestion(ctx context.Context, profile
 // without its review settled leaves the tracker in the queue offering
 // candidates for a series that is already linked. Every statement goes through
 // tx — see the connection note there.
+//
+// It refuses, writing nothing, a tracker that is not the profile's
+// (ErrLinkTrackerNotFound) and a link on the tracker's own primary source
+// (ErrLinkIsTrackerPrimary). The primary is mirrored in tracker_sources and
+// never counts as an alternate, so such a link adds no fallback, while the
+// dismissal below would still take the tracker out of the review for good.
 func (r *LinkSuggestionRepository) ApplyManualLink(ctx context.Context, profileID int64, trackerID int64, link models.TrackerSource, reviewSourceID int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -524,12 +541,17 @@ func (r *LinkSuggestionRepository) ApplyManualLink(ctx context.Context, profileI
 	}
 	defer tx.Rollback()
 
-	owned, err := trackerOwnedByProfileTx(ctx, tx, trackerID, profileID)
-	if err != nil {
-		return err
+	var primarySourceID int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT source_id FROM trackers WHERE id = ? AND profile_id = ?
+	`, trackerID, profileID).Scan(&primarySourceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLinkTrackerNotFound
+		}
+		return fmt.Errorf("load tracker for manual link: %w", err)
 	}
-	if !owned {
-		return nil
+	if link.SourceID == primarySourceID {
+		return ErrLinkIsTrackerPrimary
 	}
 
 	if err := upsertTrackerSourceTx(ctx, tx, trackerID, link); err != nil {
@@ -661,7 +683,8 @@ func (r *LinkSuggestionRepository) MergeRelatedTitles(ctx context.Context, track
 }
 
 // DismissTracker records that the tracker has no match on the source: pending
-// candidates are rejected and a marker row keeps it out of future scans.
+// candidates are rejected and a marker row keeps it out of future scans. A
+// tracker that is not the profile's is ErrLinkTrackerNotFound.
 func (r *LinkSuggestionRepository) DismissTracker(ctx context.Context, profileID int64, trackerID int64, sourceID int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -677,7 +700,7 @@ func (r *LinkSuggestionRepository) DismissTracker(ctx context.Context, profileID
 		return err
 	}
 	if !owned {
-		return nil
+		return ErrLinkTrackerNotFound
 	}
 
 	if err := rejectPendingSuggestionsTx(ctx, tx, trackerID, sourceID, 0); err != nil {

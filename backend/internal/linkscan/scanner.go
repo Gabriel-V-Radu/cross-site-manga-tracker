@@ -33,10 +33,20 @@ const (
 // hold up shutdown for nothing.
 const shutdownGrace = 2 * time.Second
 
-// Progress is a snapshot of the running (or last finished) scan, for the
+// Progress is a snapshot of one scan, running or finished, for the
 // dashboard's polling indicator.
 type Progress struct {
-	Running    bool
+	// ProfileID is the profile that started the scan. A scan walks that
+	// profile's trackers only, so its progress, its Stop and its result are
+	// that profile's alone: shown to every profile, a second profile's page
+	// offered a Stop that cut the first one's scan short and then reported
+	// that scan as its own last result.
+	ProfileID int64
+	Running   bool
+	// Starting is a scan that has not counted its trackers yet. Total is not
+	// known until then, and the "0/0 series checked" it rendered read as a
+	// scan that had found nothing to do.
+	Starting   bool
 	SourceID   int64
 	SourceName string
 	Total      int
@@ -58,9 +68,26 @@ type Progress struct {
 	Stopping bool
 }
 
-// ErrScanRunning is Start's refusal while another scan is running, including
-// one still finishing its current tracker after Stop.
+// ErrScanRunning is Start's refusal while the same profile's scan is running,
+// including one still finishing its current tracker after Stop.
 var ErrScanRunning = errors.New("a link scan is already running")
+
+// ErrScanRunningElsewhere is Start's refusal while another profile's scan is
+// running. Only one scan runs at a time whoever starts it — two would share
+// the sites' pacing — but that profile is the only one that can stop it, so
+// the refused one is told to wait rather than shown a scan it cannot act on.
+var ErrScanRunningElsewhere = errors.New("another profile's link scan is running")
+
+// Status is one profile's view of the scanner.
+type Status struct {
+	// Progress is the profile's own scan: the one running, or the last one it
+	// finished. The zero value when it has not scanned since the process
+	// started.
+	Progress Progress
+	// BusyElsewhere reports a scan another profile started, running now: this
+	// profile cannot start one until it ends, and gets no Stop for it.
+	BusyElsewhere bool
+}
 
 // suggestionStore takes the context-carrying repository methods: a scan writes
 // from a background goroutine against a one-connection pool, so a statement
@@ -94,8 +121,12 @@ type Scanner struct {
 	lifetime context.Context
 	shutdown context.CancelFunc
 
-	mu            sync.Mutex
-	progress      Progress
+	mu sync.Mutex
+	// progress is the scan running now, or the last one to finish.
+	progress Progress
+	// finished keeps each profile's last finished scan, so a later scan by
+	// another profile does not take over its "Last scan" line.
+	finished      map[int64]Progress
 	stopRequested bool
 	// done is closed when the current scan's goroutine returns, so Close can
 	// wait for it instead of racing the caller's db.Close().
@@ -114,6 +145,7 @@ func NewScanner(store suggestionStore, registry *connectors.Registry, aid AidLoo
 		logger:   logger,
 		lifetime: lifetime,
 		shutdown: shutdown,
+		finished: map[int64]Progress{},
 	}
 }
 
@@ -151,6 +183,9 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.progress.Running {
+		if s.progress.ProfileID != profileID {
+			return ErrScanRunningElsewhere
+		}
 		return ErrScanRunning
 	}
 	if s.lifetime.Err() != nil {
@@ -159,7 +194,9 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 		return fmt.Errorf("the scanner is shutting down")
 	}
 	s.progress = Progress{
+		ProfileID:  profileID,
 		Running:    true,
+		Starting:   true,
 		SourceID:   sourceID,
 		SourceName: sourceName,
 		StartedAt:  time.Now().UTC(),
@@ -172,23 +209,34 @@ func (s *Scanner) Start(profileID int64, sourceID int64, sourceKey string, sourc
 	return nil
 }
 
-// Stop asks a running scan to wind down after the tracker it is on. Whatever
-// it already stored stands — stopping is for "that's enough requests", not a
-// rollback.
-func (s *Scanner) Stop() {
+// Stop asks profileID's running scan to wind down after the tracker it is on.
+// Whatever it already stored stands — stopping is for "that's enough
+// requests", not a rollback. It reports whether that profile had a scan to
+// stop: a scan another profile started is not this one's to cut short.
+func (s *Scanner) Stop(profileID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.progress.Running {
-		s.stopRequested = true
+	if !s.progress.Running || s.progress.ProfileID != profileID {
+		return false
 	}
+	s.stopRequested = true
+	return true
 }
 
-func (s *Scanner) Snapshot() Progress {
+// StatusFor returns what profileID's Link Review shows: its own scan, and
+// whether another profile's scan holds the scanner right now.
+func (s *Scanner) StatusFor(profileID int64) Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	progress := s.progress
-	progress.Stopping = progress.Running && s.stopRequested
-	return progress
+	if s.progress.Running && s.progress.ProfileID == profileID {
+		progress := s.progress
+		progress.Stopping = s.stopRequested
+		return Status{Progress: progress}
+	}
+	return Status{
+		Progress:      s.finished[profileID],
+		BusyElsewhere: s.progress.Running,
+	}
 }
 
 func (s *Scanner) shouldStop() bool {
@@ -202,8 +250,10 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 		s.mu.Lock()
 		now := time.Now().UTC()
 		s.progress.Running = false
+		s.progress.Starting = false
 		s.progress.FinishedAt = &now
 		s.progress.Stopped = s.stopRequested
+		s.finished[profileID] = s.progress
 		s.mu.Unlock()
 		close(done)
 	}()
@@ -216,6 +266,7 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 
 	s.mu.Lock()
 	s.progress.Total = len(targets)
+	s.progress.Starting = false
 	s.mu.Unlock()
 
 	for _, target := range targets {

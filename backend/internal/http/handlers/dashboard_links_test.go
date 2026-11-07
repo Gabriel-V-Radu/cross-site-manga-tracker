@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net/http/httptest"
@@ -368,5 +369,207 @@ func TestManualLinkAcceptsUnverifiableURL(t *testing.T) {
 	}
 	if linkedURL != "https://mangafire.to/title/l3z6m-kyou-kara-hajimeru-osananajimi" {
 		t.Fatalf("linked url = %q", linkedURL)
+	}
+}
+
+// linksPostForm posts a form as the named profile, the way the review page's
+// requests carry it (hx-headers on the body).
+func linksPostForm(t *testing.T, app *fiber.App, target string, form url.Values, profileKey string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest("POST", target, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Profile-Key", profileKey)
+	res, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("POST %s: %v", target, err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
+}
+
+func linksSourceID(t *testing.T, db *sql.DB, key string) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = ?`, key).Scan(&id); err != nil {
+		t.Fatalf("look up %s source: %v", key, err)
+	}
+	return id
+}
+
+func linksSeedTracker(t *testing.T, db *sql.DB, profileID int64, title string, sourceID int64, sourceURL string) int64 {
+	t.Helper()
+	result, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+		VALUES (?, ?, ?, ?, 'reading')
+	`, profileID, title, sourceID, sourceURL)
+	if err != nil {
+		t.Fatalf("seed tracker %q: %v", title, err)
+	}
+	id, _ := result.LastInsertId()
+	return id
+}
+
+// linksAssertUntouched checks that a refused manual link wrote nothing: no
+// link row beyond the primary's mirror, no decision, no dismissal marker.
+func linksAssertUntouched(t *testing.T, db *sql.DB, trackerID int64) {
+	t.Helper()
+	var links, markers int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM tracker_sources WHERE tracker_id = ?`, trackerID).Scan(&links); err != nil {
+		t.Fatalf("count links: %v", err)
+	}
+	if err := db.QueryRow(`
+		SELECT COUNT(1) FROM source_link_suggestions WHERE tracker_id = ? AND status != 'pending'
+	`, trackerID).Scan(&markers); err != nil {
+		t.Fatalf("count decisions: %v", err)
+	}
+	if links != 0 || markers != 0 {
+		t.Fatalf("tracker %d gained %d link row(s) and %d decision row(s), want none", trackerID, links, markers)
+	}
+}
+
+// TestManualLinkRefusesAPageThatIsNotASeries pins the series-URL check: a
+// site's home page (or any page closer to the root than a series) used to
+// answer 200, take the card away and link the home page as the series.
+func TestManualLinkRefusesAPageThatIsNotASeries(t *testing.T) {
+	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
+		if err := registry.Register(unreachableConnector{key: "mangadex", hosts: []string{"mangadex.org"}}); err != nil {
+			t.Fatalf("register connector: %v", err)
+		}
+	})
+	defer cleanup()
+
+	comick := linksSourceID(t, db, "comick")
+	trackerID := linksSeedTracker(t, db, 1, "Series", linksSourceID(t, db, "mangafire"), "https://mangafire.to/manga/series.abc")
+	target := "/dashboard/links/trackers/" + toString(int(trackerID)) + "/manual?source=" + toString(int(comick))
+
+	for pasted, want := range map[string]string{
+		"https://mangadex.org/":       "home page",
+		"https://www.mangadex.org":    "home page",
+		"https://mangadex.org/titles": "not a series page on mangadex",
+		"mangadex.org/title/abc":      "full address",
+		"https://example.com/a/b":     "has no connector",
+	} {
+		status, body := linksPostForm(t, app, target, url.Values{"url": {pasted}}, "profile1")
+		if status != fiber.StatusBadRequest {
+			t.Fatalf("pasting %q: status = %d, want 400: %s", pasted, status, body)
+		}
+		if !strings.Contains(body, want) || strings.Contains(body, "<") {
+			t.Fatalf("pasting %q answered %q, want a plain message mentioning %q", pasted, body, want)
+		}
+	}
+	linksAssertUntouched(t, db, trackerID)
+}
+
+// TestManualLinkRefusesTheTrackersOwnSite: pasting the tracker's own address
+// used to make the card vanish as if linked while nothing was linked, and the
+// dismissal marker kept the tracker out of that source's scans for good.
+func TestManualLinkRefusesTheTrackersOwnSite(t *testing.T) {
+	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
+		if err := registry.Register(unreachableConnector{key: "mangafire", hosts: []string{"mangafire.to"}}); err != nil {
+			t.Fatalf("register connector: %v", err)
+		}
+	})
+	defer cleanup()
+
+	comick := linksSourceID(t, db, "comick")
+	primaryURL := "https://mangafire.to/title/l3z6m-osananajimi"
+	trackerID := linksSeedTracker(t, db, 1, "Osananajimi", linksSourceID(t, db, "mangafire"), primaryURL)
+
+	status, body := linksPostForm(t, app,
+		"/dashboard/links/trackers/"+toString(int(trackerID))+"/manual?source="+toString(int(comick)),
+		url.Values{"url": {primaryURL}}, "profile1")
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", status, body)
+	}
+	if !strings.Contains(body, "already this tracker's own site") {
+		t.Fatalf("answer = %q, want it to say the URL is the tracker's own site", body)
+	}
+	linksAssertUntouched(t, db, trackerID)
+
+	_, queue := linksRequest(t, app, "GET", "/dashboard/links/queue?source="+toString(int(comick)))
+	if !strings.Contains(queue, "link-card-"+toString(int(trackerID))) {
+		t.Fatalf("the tracker left the review queue: %s", queue)
+	}
+}
+
+// TestCardActionsOnATrackerThatIsNotThereAnswer404: a manual link or a
+// dismissal for a tracker deleted elsewhere, or another profile's, used to
+// answer 200 with an empty card — the card vanished as if the action worked.
+func TestCardActionsOnATrackerThatIsNotThereAnswer404(t *testing.T) {
+	db, app, cleanup := setupTestAppWithRegistry(t, func(registry *connectors.Registry) {
+		if err := registry.Register(unreachableConnector{key: "mangadex", hosts: []string{"mangadex.org"}}); err != nil {
+			t.Fatalf("register connector: %v", err)
+		}
+	})
+	defer cleanup()
+
+	comick := linksSourceID(t, db, "comick")
+	mangafire := linksSourceID(t, db, "mangafire")
+	foreign := linksSeedTracker(t, db, 2, "Profile Two Series", mangafire, "https://mangafire.to/manga/two.abc")
+	deleted := linksSeedTracker(t, db, 1, "Deleted Series", mangafire, "https://mangafire.to/manga/gone.abc")
+	if _, err := db.Exec(`DELETE FROM trackers WHERE id = ?`, deleted); err != nil {
+		t.Fatalf("delete tracker: %v", err)
+	}
+
+	for _, trackerID := range []int64{foreign, deleted} {
+		base := "/dashboard/links/trackers/" + toString(int(trackerID))
+		status, body := linksPostForm(t, app, base+"/manual?source="+toString(int(comick)),
+			url.Values{"url": {"https://mangadex.org/title/0b8e1f3a-1111-2222-3333-444455556666"}}, "profile1")
+		if status != fiber.StatusNotFound || !strings.Contains(body, "no longer in this queue") {
+			t.Fatalf("manual link on tracker %d: %d %q, want 404 saying it is no longer in the queue", trackerID, status, body)
+		}
+		status, body = linksPostForm(t, app, base+"/dismiss?source="+toString(int(comick)), url.Values{}, "profile1")
+		if status != fiber.StatusNotFound || !strings.Contains(body, "no longer in this queue") {
+			t.Fatalf("dismiss on tracker %d: %d %q, want 404 saying it is no longer in the queue", trackerID, status, body)
+		}
+	}
+	linksAssertUntouched(t, db, foreign)
+}
+
+// TestRejectingTheLastCandidateMovesTheRow pins where a tracker goes when its
+// last candidate is rejected: its row is marked to move into the "no
+// candidate" list (always rendered for it, even empty), in front of the next
+// row in title order, and the summary counts it there.
+func TestRejectingTheLastCandidateMovesTheRow(t *testing.T) {
+	db, app, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	comick := linksSourceID(t, db, "comick")
+	mangafire := linksSourceID(t, db, "mangafire")
+	rejected := linksSeedTracker(t, db, 1, "Alpha", mangafire, "https://mangafire.to/manga/alpha.a")
+	if _, err := db.Exec(`
+		INSERT INTO source_link_suggestions (tracker_id, source_id, candidate_url, candidate_title, score, status)
+		VALUES (?, ?, 'https://comick.io/comic/alpha', 'Alpha', 0.8, 'pending')
+	`, rejected, comick); err != nil {
+		t.Fatalf("seed suggestion: %v", err)
+	}
+
+	_, queue := linksRequest(t, app, "GET", "/dashboard/links/queue?source="+toString(int(comick)))
+	if !strings.Contains(queue, `id="links-nomatch-list"`) {
+		t.Fatalf("the empty no-candidate list is not rendered for a row to move into: %s", queue)
+	}
+
+	next := linksSeedTracker(t, db, 1, "Beta", mangafire, "https://mangafire.to/manga/beta.b")
+	var suggestionID int64
+	if err := db.QueryRow(`SELECT id FROM source_link_suggestions WHERE tracker_id = ?`, rejected).Scan(&suggestionID); err != nil {
+		t.Fatalf("read suggestion id: %v", err)
+	}
+	status, body := linksPostForm(t, app, "/dashboard/links/suggestions/"+toString(int(suggestionID))+"/reject", url.Values{}, "profile1")
+	if status != 200 {
+		t.Fatalf("reject status = %d: %s", status, body)
+	}
+	row := `id="link-card-` + toString(int(rejected)) + `" data-link-move-before="` + toString(int(next)) + `"`
+	if !strings.Contains(body, "link-card--nomatch") || !strings.Contains(body, row) {
+		t.Fatalf("the rejected tracker's row is not marked to move in front of %d: %s", next, body)
+	}
+	if !strings.Contains(body, "<strong>0</strong> candidate(s) across <strong>0</strong> series") ||
+		!strings.Contains(body, "<strong>2</strong> without a candidate") {
+		t.Fatalf("the summary does not count the moved row: %s", body)
+	}
+
+	// The view showing only trackers with candidates has nowhere to put it.
+	status, body = linksRequest(t, app, "GET", "/dashboard/links/queue?source="+toString(int(comick))+"&show=with")
+	if status != 200 || strings.Contains(body, `id="links-nomatch-list"`) {
+		t.Fatalf("the with-candidates view renders the no-candidate list: %s", body)
 	}
 }

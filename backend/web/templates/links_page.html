@@ -35,11 +35,16 @@
             </div>
         </header>
 
+        {{/* The selects open on what the server chose — the page URL's scope,
+             which links.js keeps in step with them, so a reload shows the
+             same queue. autocomplete="off" stops the browser from restoring
+             other values over them on Back after the queue was asked for. */}}
         <form id="links-scope" class="control-panel links-controls"
               hx-get="/dashboard/links/queue"
               hx-target="#links-queue"
               hx-swap="innerHTML"
-              hx-trigger="change">
+              hx-trigger="change"
+              autocomplete="off">
             <label class="links-controls__field">
                 Source to link
                 <select id="links-source-select" name="source">
@@ -85,9 +90,10 @@
             <label class="links-controls__field">
                 View
                 <select name="show">
-                    <option value="all">Everything</option>
-                    <option value="with">Only with candidates</option>
-                    <option value="without">Only without candidates</option>
+                    {{$show := .SelectedShow}}
+                    <option value="all" {{if eq $show "all"}}selected{{end}}>Everything</option>
+                    <option value="with" {{if eq $show "with"}}selected{{end}}>Only with candidates</option>
+                    <option value="without" {{if eq $show "without"}}selected{{end}}>Only without candidates</option>
                 </select>
             </label>
             <button type="button"
@@ -106,6 +112,11 @@
                  hx-trigger="load"
                  hx-target="this"
                  hx-swap="outerHTML"></div>
+            {{if .ScopeFromLastScan}}
+            {{/* links.js removes it at the first change: from then on the
+                 filters are the reader's own. */}}
+            <p class="links-controls__hint" data-scope-hint>Filters preset to the scope of your last scan.</p>
+            {{end}}
         </form>
 
         <section id="links-queue" class="links-queue"

@@ -2271,6 +2271,13 @@ input.is-loading::placeholder {
     max-width: 240px;
 }
 
+.links-controls__hint {
+    flex: 1 0 100%;
+    margin: 0;
+    font-size: 12px;
+    color: var(--ink-soft);
+}
+
 .link-scan-status__stop {
     padding: 6px 10px;
     font-size: 11px;
@@ -2331,6 +2338,15 @@ input.is-loading::placeholder {
     font-size: 13px;
 }
 
+/* A section whose last card was accepted, rejected or linked keeps no
+   heading standing over nothing; the "no candidate" one is also rendered
+   empty, ready for a row a reject moves there. */
+.links-section:not(:has(.link-card)) { display: none; }
+
+/* The single track is minmax(0, 1fr), not the implicit auto: an auto track
+   grows to its widest unbreakable content, and one long title or URL pushed
+   the card — and with it the whole page — wider than a phone's screen, with
+   "Link URL" off its edge. */
 .link-card {
     border: 1px solid var(--line);
     background: var(--card);
@@ -2338,10 +2354,16 @@ input.is-loading::placeholder {
     padding: 16px 18px;
     margin-top: 14px;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 12px;
+    min-width: 0;
 }
 
-.link-card__title { margin: 0; font-size: 1.05rem; }
+.link-card__title {
+    margin: 0;
+    font-size: 1.05rem;
+    overflow-wrap: anywhere;
+}
 
 .link-card__meta {
     margin: 4px 0 0;
@@ -2349,6 +2371,7 @@ input.is-loading::placeholder {
     color: var(--ink-soft);
     text-transform: uppercase;
     letter-spacing: 0.08em;
+    overflow-wrap: anywhere;
 }
 
 .link-card__open {
@@ -2364,6 +2387,7 @@ input.is-loading::placeholder {
     color: var(--accent-soft);
     border-left: 2px solid var(--accent);
     padding-left: 8px;
+    overflow-wrap: anywhere;
 }
 
 .link-card__candidates { display: grid; gap: 8px; }
@@ -2387,13 +2411,14 @@ input.is-loading::placeholder {
 
 .link-candidate__body { flex: 1 1 auto; min-width: 0; }
 
-.link-candidate__title { margin: 0; }
+.link-candidate__title { margin: 0; overflow-wrap: anywhere; }
 .link-candidate__title a { color: var(--ink); }
 
 .link-candidate__meta {
     margin: 4px 0 0;
     font-size: 12px;
     color: var(--ink-soft);
+    overflow-wrap: anywhere;
 }
 
 .link-score {
@@ -2438,6 +2463,8 @@ input.is-loading::placeholder {
     border: 1px solid var(--line);
     font-size: 13px;
 }
+
+.link-manual button { flex: none; }
 
 .link-card__dismiss { opacity: 0.75; }
 

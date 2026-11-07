@@ -104,14 +104,19 @@ func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid
 	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
+	waitForScanEnd(t, scanner, 1)
+	return scanner
+}
+
+func waitForScanEnd(t *testing.T, scanner *Scanner, profileID int64) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for scanner.Snapshot().Running {
+	for scanner.StatusFor(profileID).Progress.Running {
 		if time.Now().After(deadline) {
 			t.Fatal("scan did not finish")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return scanner
 }
 
 // blockingConnector parks inside SearchByTitle until its context is cancelled,
@@ -157,7 +162,7 @@ func TestCloseCancelsARunningScan(t *testing.T) {
 	<-connector.entered
 	scanner.Close()
 
-	if scanner.Snapshot().Running {
+	if scanner.StatusFor(1).Progress.Running {
 		t.Fatal("the scan goroutine outlived Close")
 	}
 	store.mu.Lock()
@@ -189,11 +194,13 @@ func TestStopReportsStoppingUntilTheScanEnds(t *testing.T) {
 	}
 	<-connector.entered
 
-	if scanner.Snapshot().Stopping {
+	if scanner.StatusFor(1).Progress.Stopping {
 		t.Fatal("a scan nobody asked to stop reports Stopping")
 	}
-	scanner.Stop()
-	progress := scanner.Snapshot()
+	if !scanner.Stop(1) {
+		t.Fatal("Stop found no scan of the profile that started it")
+	}
+	progress := scanner.StatusFor(1).Progress
 	if !progress.Running || !progress.Stopping {
 		t.Fatalf("after Stop mid-tracker: running=%v stopping=%v, want both true", progress.Running, progress.Stopping)
 	}
@@ -204,9 +211,146 @@ func TestStopReportsStoppingUntilTheScanEnds(t *testing.T) {
 	}
 
 	scanner.Close()
-	progress = scanner.Snapshot()
+	progress = scanner.StatusFor(1).Progress
 	if progress.Running || progress.Stopping || !progress.Stopped {
 		t.Fatalf("after the scan ended: running=%v stopping=%v stopped=%v, want only stopped", progress.Running, progress.Stopping, progress.Stopped)
+	}
+}
+
+// TestScanBelongsToTheProfileThatStartedIt pins the scanner's per-profile
+// view. A second profile used to see the first one's running scan with a Stop
+// that ended it, and afterwards that scan's result as its own "Last scan".
+func TestScanBelongsToTheProfileThatStartedIt(t *testing.T) {
+	connector := &blockingConnector{key: "weebcentral", entered: make(chan struct{})}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+
+	store := newStubStore(repository.LinkScanTarget{TrackerID: 1, Title: "First"})
+	scanner := NewScanner(store, registry, nil, slog.Default())
+	defer scanner.Close()
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	<-connector.entered
+
+	other := scanner.StatusFor(2)
+	if !other.BusyElsewhere {
+		t.Fatal("another profile is not told that a scan holds the scanner")
+	}
+	if other.Progress.Running || other.Progress.SourceName != "" {
+		t.Fatalf("another profile sees the running scan as its own: %+v", other.Progress)
+	}
+	if scanner.Stop(2) {
+		t.Fatal("another profile's Stop reported stopping a scan it did not start")
+	}
+	if own := scanner.StatusFor(1); own.BusyElsewhere || !own.Progress.Running || own.Progress.Stopping {
+		t.Fatalf("after another profile's Stop the owner sees %+v, want its scan running and not stopping", own)
+	}
+
+	if err := scanner.Start(2, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); !errors.Is(err, ErrScanRunningElsewhere) {
+		t.Fatalf("start by another profile = %v, want ErrScanRunningElsewhere", err)
+	}
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); !errors.Is(err, ErrScanRunning) {
+		t.Fatalf("second start by the owner = %v, want ErrScanRunning", err)
+	}
+
+	scanner.Close()
+	if own := scanner.StatusFor(1).Progress; own.Running || own.FinishedAt == nil || own.ProfileID != 1 {
+		t.Fatalf("the owner's finished scan = %+v, want it finished and its own", own)
+	}
+	if other := scanner.StatusFor(2); other.BusyElsewhere || other.Progress.SourceName != "" || other.Progress.FinishedAt != nil {
+		t.Fatalf("another profile inherited the finished scan: %+v", other)
+	}
+}
+
+// TestEachProfileKeepsItsOwnLastScan: a later scan by another profile must not
+// take over the earlier profile's "Last scan" line.
+func TestEachProfileKeepsItsOwnLastScan(t *testing.T) {
+	connector := &stubConnector{
+		key: "weebcentral",
+		searchResults: map[string][]connectors.MangaResult{
+			"Nano Machine": {{Title: "Nano Machine", URL: "https://weebcentral.com/series/01Y"}},
+		},
+	}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+	store := newStubStore(repository.LinkScanTarget{TrackerID: 3, Title: "Nano Machine"})
+	scanner := NewScanner(store, registry, nil, slog.Default())
+	defer scanner.Close()
+
+	if err := scanner.Start(1, 42, connector.Key(), "WeebCentral", repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start profile 1 scan: %v", err)
+	}
+	waitForScanEnd(t, scanner, 1)
+
+	store.mu.Lock()
+	store.targets = nil
+	store.mu.Unlock()
+	if err := scanner.Start(2, 43, connector.Key(), "MangaHub", repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start profile 2 scan: %v", err)
+	}
+	waitForScanEnd(t, scanner, 2)
+
+	first := scanner.StatusFor(1).Progress
+	if first.ProfileID != 1 || first.SourceName != "WeebCentral" || first.Total != 1 || first.WithCandidates != 1 {
+		t.Fatalf("profile 1's last scan = %+v, want its own WeebCentral scan", first)
+	}
+	second := scanner.StatusFor(2).Progress
+	if second.ProfileID != 2 || second.SourceName != "MangaHub" || second.Total != 0 {
+		t.Fatalf("profile 2's last scan = %+v, want its own MangaHub scan", second)
+	}
+}
+
+// gatedStore holds ListScanTargets until released, standing in for the moment
+// between Start and the trackers being counted.
+type gatedStore struct {
+	*stubStore
+	release chan struct{}
+}
+
+func (g *gatedStore) ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.stubStore.ListScanTargets(ctx, profileID, sourceID, filter)
+}
+
+// TestScanReportsStartingUntilItHasCountedItsTrackers pins the starting
+// state: before the targets are counted the total is unknown, and the status
+// line used to read "0/0 series checked" for a scan about to check dozens.
+func TestScanReportsStartingUntilItHasCountedItsTrackers(t *testing.T) {
+	connector := &stubConnector{key: "weebcentral"}
+	registry := connectors.NewRegistry()
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register connector: %v", err)
+	}
+	store := &gatedStore{
+		stubStore: newStubStore(
+			repository.LinkScanTarget{TrackerID: 1, Title: "First"},
+			repository.LinkScanTarget{TrackerID: 2, Title: "Second"},
+		),
+		release: make(chan struct{}),
+	}
+	scanner := NewScanner(store, registry, nil, slog.Default())
+	defer scanner.Close()
+	if err := scanner.Start(1, 42, connector.Key(), connector.Name(), repository.LinkScanFilter{}); err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	if progress := scanner.StatusFor(1).Progress; !progress.Running || !progress.Starting {
+		t.Fatalf("before the targets are counted: %+v, want running and starting", progress)
+	}
+	close(store.release)
+	waitForScanEnd(t, scanner, 1)
+
+	if progress := scanner.StatusFor(1).Progress; progress.Starting || progress.Total != 2 || progress.Done != 2 {
+		t.Fatalf("after the scan: %+v, want no longer starting with 2/2 checked", progress)
 	}
 }
 
@@ -248,7 +392,7 @@ func TestScanSkipsDecidedCandidatesBeforeRanking(t *testing.T) {
 	if len(store.stored[2]) != 0 {
 		t.Fatalf("a decided candidate came back: %+v", store.stored[2])
 	}
-	if got := scanner.Snapshot().WithCandidates; got != 1 {
+	if got := scanner.StatusFor(1).Progress.WithCandidates; got != 1 {
 		t.Fatalf("WithCandidates = %d, want 1: only the first tracker has anything new", got)
 	}
 }

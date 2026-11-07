@@ -38,10 +38,12 @@ type DashboardHandler struct {
 	sourceHealthMu        sync.Mutex
 	sourceHealthUnhealthy []int64
 	sourceHealthExpires   time.Time
-	// The raw scope values of the last scan launched, so reopening the review
-	// page shows the slice that scan covered instead of everything unlinked.
+	// The raw scope values of each profile's last scan launched, by profile
+	// id, so opening the review page while that scan runs or just after shows
+	// the slice it covered. One shared copy preselected one profile's scan
+	// scope on another profile's page.
 	lastLinkScanMu    sync.Mutex
-	lastLinkScanScope map[string]string
+	lastLinkScanScope map[int64]map[string]string
 	templates         *template.Template
 	templateErr       error
 	// Where this handler reads its templates and writes its uploads. Held

@@ -17,6 +17,9 @@
 {{end}}
 
 {{define "link_manual_form"}}
+{{/* A refused URL comes back as an error status, which htmx does not swap:
+     the card stays as it is, with the URL still in the box to be corrected,
+     and links.js puts the message in the card. */}}
 <form class="link-manual"
       hx-post="/dashboard/links/trackers/{{.ID}}/manual?source={{.SourceID}}"
       hx-include="#links-scope"
@@ -41,7 +44,6 @@
             Open on {{if .Tracker.PrimarySourceName}}{{.Tracker.PrimarySourceName}}{{else}}primary site{{end}}
         </a>
         {{end}}
-        {{if .Tracker.Error}}<p class="link-card__error">{{.Tracker.Error}}</p>{{end}}
     </div>
     <div class="link-card__candidates">
         {{range .Suggestions}}
@@ -83,7 +85,7 @@
 {{end}}
 
 {{define "link_nomatch_row"}}
-<article class="link-card link-card--nomatch" id="link-card-{{.ID}}">
+<article class="link-card link-card--nomatch" id="link-card-{{.ID}}"{{if .Moved}} data-link-move-before="{{.MoveBefore}}"{{end}}>
     <div class="link-card__tracker">
         <h3 class="link-card__title">{{.Title}}</h3>
         <p class="link-card__meta">
@@ -95,7 +97,6 @@
             Open on {{if .PrimarySourceName}}{{.PrimarySourceName}}{{else}}primary site{{end}}
         </a>
         {{end}}
-        {{if .Error}}<p class="link-card__error">{{.Error}}</p>{{end}}
     </div>
     <footer class="link-card__footer">
         {{template "link_manual_form" .}}
@@ -113,21 +114,32 @@
     {{template "link_queue_summary_body" .Summary}}
 </div>
 
+{{/* Each section hides itself once it holds no card (the .links-section rule
+     in dashboard.css): accepting or rejecting the last candidate left its
+     heading standing over nothing. */}}
 {{if .Groups}}
+<section class="links-section">
 <h2 class="links-section-heading">Candidates to review</h2>
 {{range .Groups}}
 {{template "link_review_card" .}}
 {{end}}
+</section>
 {{end}}
 
-{{if .NoCandidates}}
+{{if .ShowNoCandidates}}
+{{/* Rendered even while empty: rejecting a tracker's last candidate moves its
+     row into #links-nomatch-list (links.js). */}}
+<section class="links-section" id="links-nomatch">
 <h2 class="links-section-heading">No candidate found</h2>
 {{/* Not every series here was searched: a stopped scan, a narrower scan scope, a
      source never scanned and trackers added since all land here too. */}}
 <p class="links-section-hint">No candidate is pending for these series (not scanned yet, or the scan found nothing usable). Paste the series URL yourself — any supported site works — or dismiss them.</p>
+<div id="links-nomatch-list">
 {{range .NoCandidates}}
 {{template "link_nomatch_row" .}}
 {{end}}
+</div>
+</section>
 {{end}}
 
 {{if and (not .Groups) (not .NoCandidates)}}
