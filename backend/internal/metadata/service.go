@@ -293,11 +293,11 @@ func rowOf(trackerID int64, consolidated Consolidated, signature string, now tim
 }
 
 // backfillOrder is which linked site the backfill asks, best first. MangaFire
-// and ComicK are left out on purpose: both sit behind Cloudflare and react to
-// bursts, and the poller asks them on every rotation anyway, so a tracker
-// linked only there gets its metadata from the poller within a cycle or two
-// without the backfill adding to their load.
-var backfillOrder = []string{"mangaupdates", "mangadex", "asuracomic", "flamecomics", "freewebnovel", "webtoons", "mangahub", "mgeko"}
+// and ComicK come last on purpose: both sit behind Cloudflare and react to
+// bursts, so they are asked only for a tracker linked to nothing else — a
+// handful in a whole library. Leaving them out entirely left those trackers to
+// the poller, which visits a finished, quiet series only every few days.
+var backfillOrder = []string{"mangaupdates", "mangadex", "asuracomic", "flamecomics", "freewebnovel", "webtoons", "mangahub", "mgeko", "mangafire", "comick"}
 
 // maxBackfillPerPass bounds one pass so the reconcile loop keeps its rhythm;
 // the next pass picks up where this one stopped.

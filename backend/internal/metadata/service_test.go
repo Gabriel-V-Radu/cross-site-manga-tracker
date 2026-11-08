@@ -119,6 +119,75 @@ func TestServiceRecordsAtMostWeeklyAndReconciles(t *testing.T) {
 	}
 }
 
+// fakeConnector answers every resolve with fixed metadata and counts calls.
+type fakeConnector struct {
+	key   string
+	calls int
+}
+
+func (f *fakeConnector) Key() string                       { return f.key }
+func (f *fakeConnector) Name() string                      { return f.key }
+func (f *fakeConnector) Kind() string                      { return connectors.KindNative }
+func (f *fakeConnector) HealthCheck(context.Context) error { return nil }
+func (f *fakeConnector) SearchByTitle(context.Context, string, int) ([]connectors.MangaResult, error) {
+	return nil, nil
+}
+func (f *fakeConnector) ResolveByURL(_ context.Context, rawURL string) (*connectors.MangaResult, error) {
+	f.calls++
+	return &connectors.MangaResult{SourceKey: f.key, URL: rawURL, Metadata: &connectors.SeriesMetadata{Type: "manhwa", Genres: []string{"Action"}}}, nil
+}
+
+type fakeResolver map[string]connectors.Connector
+
+func (r fakeResolver) Get(key string) (connectors.Connector, bool) {
+	connector, ok := r[key]
+	return connector, ok
+}
+
+func TestBackfillAsksCloudflareSitesOnlyWhenNothingElseIsLinked(t *testing.T) {
+	db := openServiceTestDB(t)
+	ctx := context.Background()
+	mangafire, mangaupdates := sourceIDOf(t, db, "mangafire"), sourceIDOf(t, db, "mangaupdates")
+
+	insert := func(title string) int64 {
+		result, err := db.Exec(`INSERT INTO trackers (profile_id, title, source_id, source_url, status) VALUES (1, ?, ?, ?, 'completed')`,
+			title, mangafire, "https://mangafire.to/title/x."+title)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		return id
+	}
+	onlyMangaFire := insert("only")
+	alsoMU := insert("also")
+	if _, err := db.Exec(`INSERT INTO tracker_sources (tracker_id, source_id, source_url) VALUES (?, ?, 'https://www.mangaupdates.com/series/abc123/also')`, alsoMU, mangaupdates); err != nil {
+		t.Fatal(err)
+	}
+
+	mf, mu := &fakeConnector{key: "mangafire"}, &fakeConnector{key: "mangaupdates"}
+	repo := repository.NewMetadataRepository(db)
+	service := NewService(repo, fakeResolver{"mangafire": mf, "mangaupdates": mu}, Config{Backfill: true, BackfillGap: time.Millisecond}, nil)
+	service.backfillPass(ctx)
+	if _, err := service.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if mf.calls != 1 || mu.calls != 1 {
+		t.Fatalf("MangaFire asked %d times, MangaUpdates %d; want MangaFire only for the tracker linked to nothing else", mf.calls, mu.calls)
+	}
+	for _, id := range []int64{onlyMangaFire, alsoMU} {
+		if row, err := repo.GetTrackerMetadata(ctx, 1, id); err != nil || row == nil || row.SeriesType != "manhwa" {
+			t.Fatalf("tracker %d has no metadata after the backfill: %+v, %v", id, row, err)
+		}
+	}
+
+	// A second pass finds nothing left to ask.
+	service.backfillPass(ctx)
+	if mf.calls != 1 || mu.calls != 1 {
+		t.Fatalf("a tracker with metadata was asked again: MangaFire %d, MangaUpdates %d", mf.calls, mu.calls)
+	}
+}
+
 func TestServiceRecordIgnoresEmptyMetadata(t *testing.T) {
 	db := openServiceTestDB(t)
 	service := NewService(repository.NewMetadataRepository(db), nil, Config{}, nil)
