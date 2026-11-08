@@ -1,13 +1,21 @@
-// Package mangahub reads MangaHub (mangahub.io) through its open GraphQL API
-// at api.mghcdn.com. Measured 2026-08-21 it was exact on 6/7 benchmark series
+// Package mangahub reads MangaHub (mangahub.io) through its GraphQL API at
+// mangahub.io/graphql. Measured 2026-08-21 it was exact on 6/7 benchmark series
 // with real per-series update timestamps, one behind on the seventh — the
 // closest thing to MangaFire freshness after ComicK. The catalog is
 // English-only, so its chapter numbers are directly comparable to the
 // tracker's (verified live: Tales of Demons and Gods reports 527.6, the
 // English number, not a raw count).
 //
-// The API needs no key for search and manga lookups as long as the request
-// carries an Origin of mangahub.io; only the per-chapter reading query is
+// The API used to live at api.mghcdn.com. Since 2026-11-08 that host answers
+// every outside caller with a 403 ("This app does not have permission to access
+// the website content"), and the site's own bundle posts to its same-origin
+// /graphql instead (window.App.apiUrl is ""). That endpoint sits behind a
+// Cloudflare rule that challenges non-browser User-Agents — Go's and curl's —
+// but lets the shared BrowserUserAgent through on Go's own TLS, with no
+// mhub_access cookie or x-mhub-access header (verified live that day).
+//
+// The API needs no key for search and manga lookups; only the per-chapter
+// reading query is
 // gated ("API rate limit excessed"), which is why the reader URL is built
 // from the verified scheme /chapter/{slug}/chapter-{number} instead of being
 // resolved. Rate-limit and schema errors come back as HTTP 200 with a GraphQL
@@ -40,7 +48,7 @@ import (
 const (
 	canonicalHost    = "mangahub.io"
 	canonicalSiteURL = "https://" + canonicalHost
-	canonicalAPIURL  = "https://api.mghcdn.com/graphql"
+	canonicalAPIURL  = canonicalSiteURL + "/graphql"
 	coverCDNURL      = "https://thumb.mghcdn.com"
 
 	// variantCode selects the mangahub.io catalog in every query; the API also
@@ -53,7 +61,8 @@ const (
 // against a hostile or runaway response, not a size estimate.
 const maxResponseBytes = 4 << 20
 
-// apiClaimHost is the API origin, claimed for registry routing only. It sits
+// apiClaimHost is the former API origin (requests stopped going there on
+// 2026-11-08), still claimed for registry routing only. It sits
 // on a different registrable domain from the site, so HostAllowed's subdomain
 // rule does not cover it the way it covers api.comick.dev or
 // api.mangaupdates.com. The registry used to map it to this connector through
@@ -65,10 +74,11 @@ const maxResponseBytes = 4 << 20
 // fiction.
 const apiClaimHost = "api.mghcdn.com"
 
-// site is the connector's identity: the site domain plus the API origin the
-// registry must keep routing here. Home is purely the reader/site origin the
-// dashboard opens and the tracker stores — requests never go there, they go to
-// the API host (apiURL). MangaHub is a fresh aggregator — English-only and
+// site is the connector's identity: the site domain plus the former API origin
+// the registry must keep routing here. Home is the reader/site origin the
+// dashboard opens and the tracker stores; requests go to apiURL, which in
+// production is the /graphql endpoint on that same origin. MangaHub is a
+// fresh aggregator — English-only and
 // same-day on most series — so it outranks the default tier without displacing
 // the origin scanlators.
 var site = connectors.Site{
@@ -395,8 +405,9 @@ func (c *Connector) queryGraphQL(ctx context.Context, query string) (*apiRespons
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// The API refuses anonymous origins; presenting the site's own is what
-	// stands in for the access key the browser bundle carries.
+	// The site's own bundle sends this Origin; the User-Agent that actually
+	// gets past the Cloudflare rule in front of /graphql is the shared
+	// browser one, which DoJSON sets.
 	req.Header.Set("Origin", canonicalSiteURL)
 
 	var response apiResponse
