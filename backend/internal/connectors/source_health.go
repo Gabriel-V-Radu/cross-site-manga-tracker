@@ -91,6 +91,13 @@ func ClassifyOutcome(result *MangaResult, err error) Outcome {
 		return Outcome{Kind: OutcomeFailed, Label: "request signer rejected"}
 	}
 
+	// Checked before the status codes: the page an off-site redirect lands on
+	// may answer anything, and its status says nothing about this site.
+	var offSite *OffSiteRedirectError
+	if errors.As(err, &offSite) {
+		return Outcome{Kind: OutcomeFailed, Label: fmt.Sprintf("redirects to %s (site down or moved?)", offSite.To)}
+	}
+
 	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
 		switch code := statusErr.StatusCode; {

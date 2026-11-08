@@ -98,6 +98,36 @@ func TestHostAllowed(t *testing.T) {
 	}
 }
 
+// TestSameSite pins what counts as staying on a site through redirects: the
+// apex and its subdomains are one site, another domain is not, and an IP
+// address matches only itself.
+func TestSameSite(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"flamecomics.xyz", "flamecomics.xyz", true},
+		{"flamecomics.xyz", "www.flamecomics.xyz", true},
+		{"www.webtoons.com", "m.webtoons.com", true},
+		{"WWW.MGEKO.CC", "mgeko.cc.", true},
+		{"flamecomics.xyz", "discord.com", false},
+		{"asuracomic.net", "asurascans.com", false},
+		{"mangahub.io", "api.mghcdn.com", false},
+		{"127.0.0.1", "127.0.0.1", true},
+		{"127.0.0.1", "localhost", false},
+		{"10.0.0.1", "20.0.0.1", false},
+		{"", "flamecomics.xyz", false},
+	}
+	for _, tc := range cases {
+		if got := SameSite(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameSite(%q, %q) = %t, want %t", tc.a, tc.b, got, tc.want)
+		}
+		if got := SameSite(tc.b, tc.a); got != tc.want {
+			t.Errorf("SameSite(%q, %q) = %t, want %t (must be symmetric)", tc.b, tc.a, got, tc.want)
+		}
+	}
+}
+
 // TestReaderRankOrdering pins the tiers the dashboard's reading chain sorts by:
 // lower is better, and the info floor must stay last so a source nobody wants
 // to read on never wins over a real reader.

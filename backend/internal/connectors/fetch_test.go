@@ -360,6 +360,49 @@ func TestFetchHTML(t *testing.T) {
 	}
 }
 
+// TestFetchHTMLRefusesAnOffSiteRedirect: a site that 302s everything to
+// another domain (Flame to its Discord during an outage) must come back as
+// that redirect, not as the foreign page for a scraper to parse, while a
+// redirect that stays on the site is followed as before. The two test servers
+// share 127.0.0.1, so the foreign one is addressed as "localhost" to give it a
+// host of its own.
+func TestFetchHTMLRefusesAnOffSiteRedirect(t *testing.T) {
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "<html>Join our Discord</html>")
+	}))
+	defer foreign.Close()
+	foreignURL := strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)
+
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/series/154":
+			http.Redirect(w, r, foreignURL+"/invite", http.StatusFound)
+		case "/old":
+			http.Redirect(w, r, "/series/1", http.StatusMovedPermanently)
+		default:
+			io.WriteString(w, "<html>Chapter 12</html>")
+		}
+	}))
+	defer site.Close()
+
+	_, err := FetchHTML(context.Background(), site.Client(), site.URL+"/series/154")
+	var offSite *OffSiteRedirectError
+	if !errors.As(err, &offSite) {
+		t.Fatalf("err = %v, want an off-site redirect verdict", err)
+	}
+	if offSite.From != "127.0.0.1" || offSite.To != "localhost" {
+		t.Fatalf("redirect = %+v, want 127.0.0.1 -> localhost", offSite)
+	}
+
+	page, err := FetchHTML(context.Background(), site.Client(), site.URL+"/old")
+	if err != nil {
+		t.Fatalf("a redirect within the site must be followed, got %v", err)
+	}
+	if page != "<html>Chapter 12</html>" {
+		t.Fatalf("page = %q", page)
+	}
+}
+
 func TestFetchJSONDecodes(t *testing.T) {
 	recorder := &headerRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

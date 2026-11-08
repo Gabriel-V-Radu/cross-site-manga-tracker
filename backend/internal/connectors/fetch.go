@@ -25,7 +25,9 @@ const (
 // standard browser headers (User-Agent, Accept-Language) are applied only when
 // the request does not already carry them, so connectors with site-specific
 // header sets keep full control. The User-Agent is the one UserAgentFor picks
-// for the request's host. A non-2xx answer is returned as an *HTTPStatusError.
+// for the request's host. A non-2xx answer is returned as an *HTTPStatusError,
+// and an answer whose redirects ended on another site (SameSite) as an
+// *OffSiteRedirectError, whatever its status: it is not the resource asked for.
 func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte, string, error) {
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", UserAgentFor(req.URL.Hostname()))
@@ -43,6 +45,9 @@ func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte,
 	finalURL := req.URL.String()
 	if res.Request != nil && res.Request.URL != nil {
 		finalURL = res.Request.URL.String()
+		if from, to := req.URL.Hostname(), res.Request.URL.Hostname(); !SameSite(from, to) {
+			return nil, finalURL, &OffSiteRedirectError{From: from, To: to}
+		}
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {

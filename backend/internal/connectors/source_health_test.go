@@ -46,6 +46,7 @@ func TestClassifyOutcome(t *testing.T) {
 		{name: "foreign link", err: errors.New("url does not belong to comick"), kind: OutcomeBadLink, label: "unusable link"},
 		{name: "garbled json", err: errors.New("decode response: invalid character"), kind: OutcomeFailed, label: "unreadable response"},
 		{name: "layout changed", err: fmt.Errorf("asura series x-1: %w", ErrNoChaptersListed), kind: OutcomeFailed, label: "page lists no chapters (site layout changed?)"},
+		{name: "off-site redirect", err: fmt.Errorf("fetch series page: %w", &OffSiteRedirectError{From: "flamecomics.xyz", To: "discord.com"}), kind: OutcomeFailed, label: "redirects to discord.com (site down or moved?)"},
 		{name: "anything else", err: errors.New("no chapter entries found"), kind: OutcomeFailed, label: "request failed"},
 	}
 	for _, tc := range cases {

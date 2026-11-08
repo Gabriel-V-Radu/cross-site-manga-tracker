@@ -36,6 +36,23 @@ func IsNotFound(err error) bool {
 	return IsHTTPStatus(err, http.StatusNotFound)
 }
 
+// OffSiteRedirectError is the verdict for a request whose redirects ended on
+// another site. Whatever came back is not the page or payload that was asked
+// for, so it is refused rather than parsed: a site that is down or has moved
+// often 302s everything elsewhere (FlameComics sends every path to its Discord
+// invite during an outage), and parsing that page used to surface as "no
+// chapters listed", which reads like a markup change. Naming the destination
+// tells an outage from a domain move at a glance.
+type OffSiteRedirectError struct {
+	// From is the host that was asked; To is the host the redirects ended on.
+	From string
+	To   string
+}
+
+func (e *OffSiteRedirectError) Error() string {
+	return fmt.Sprintf("redirected off-site from %s to %s", e.From, e.To)
+}
+
 // ErrNoChaptersListed is the verdict for a series page that loaded but parsed
 // to no chapter at all. That means the site changed its markup or the page is
 // not the series we think it is (a redirect to the home page), not that

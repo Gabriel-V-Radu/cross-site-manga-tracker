@@ -1,6 +1,9 @@
 package connectors
 
-import "strings"
+import (
+	"net"
+	"strings"
+)
 
 // HostAllowed reports whether host is one of allowed or a subdomain of one
 // ("www.mangafire.to" belongs to "mangafire.to"). It is the shared
@@ -20,6 +23,34 @@ func HostAllowed(host string, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// SameSite reports whether two hosts belong to the same site: equal, or
+// sharing their last two DNS labels, so "www.webtoons.com" and
+// "m.webtoons.com" match while "flamecomics.xyz" and "discord.com" do not.
+// IP addresses only match themselves. Two labels is not the public-suffix
+// rule (two "*.co.uk" hosts would match); that errs toward calling hosts the
+// same site, never toward refusing one, and every site this app reads sits
+// directly under a one-label suffix.
+func SameSite(a, b string) bool {
+	a = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(a)), ".")
+	b = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(b)), ".")
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" || net.ParseIP(a) != nil || net.ParseIP(b) != nil {
+		return false
+	}
+	return siteDomain(a) == siteDomain(b)
+}
+
+// siteDomain is a host's last two DNS labels ("www.mgeko.cc" → "mgeko.cc").
+func siteDomain(host string) string {
+	labels := strings.Split(host, ".")
+	if len(labels) <= 2 {
+		return host
+	}
+	return strings.Join(labels[len(labels)-2:], ".")
 }
 
 // Reader ranks order a tracker's linked sources for chapter-link resolution
