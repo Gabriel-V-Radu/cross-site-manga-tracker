@@ -2,6 +2,7 @@ package freewebnovel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net"
@@ -56,6 +57,20 @@ var (
 	latestChapterURLPatt = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:lastest_chapter_url["'][^>]*content="([^"]*)"`)
 	titleHeadingPattern  = regexp.MustCompile(`(?is)<h1[^>]*class=["'][^"']*\btit\b[^"']*["'][^>]*>(.*?)</h1>`)
 	alternativeNamesPatt = regexp.MustCompile(`(?is)title=["']Alternative names["'][^>]*>.*?<div[^>]*class=["'][^"']*\bright\b[^"']*["'][^>]*>\s*<span[^>]*class=["'][^"']*\bs1\b[^"']*["'][^>]*>(.*?)</span>`)
+
+	// The series metadata a novel page carries (verified live 2026-11-08). The
+	// og:novel:* values are as clean as the title's; the synopsis is whole only
+	// in the page body, under the SUMMARY heading — og:description and the
+	// JSON-LD description are both cut off mid-word.
+	novelGenrePattern    = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:genre["'][^>]*content="([^"]*)"`)
+	novelStatusPattern   = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:status["'][^>]*content="([^"]*)"`)
+	novelAuthorPattern   = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:novel:author["'][^>]*content="([^"]*)"`)
+	ogDescriptionPattern = regexp.MustCompile(`(?is)<meta[^>]+property=["']og:description["'][^>]*content="([^"]*)"`)
+	summaryPattern       = regexp.MustCompile(`(?is)<h4[^>]*class=["'][^"']*\babstract\b[^"']*["'][^>]*>.*?</h4>\s*<div[^>]*class=["'][^"']*\btxt\b[^"']*["'][^>]*>\s*<div[^>]*class=["'][^"']*\binner\b[^"']*["'][^>]*>(.*?)</div>`)
+	jsonLDPattern        = regexp.MustCompile(`(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
+	// descriptionLeadPattern is the boilerplate og:description opens with:
+	// "Read {title} by {author} online for free. {synopsis…}".
+	descriptionLeadPattern = regexp.MustCompile(`(?is)^\s*Read\s.+?\sonline for free\.\s*`)
 )
 
 // Connector reads freewebnovel.com by scraping its pages. The embedded Site
@@ -313,7 +328,78 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
+		Metadata:      novelMetadata(body),
 	}, nil
+}
+
+// novelMetadata reads what a novel page says about the work. Everything on
+// this site is a novel, so the type is fixed and the result is never empty;
+// every other field is optional and a page missing it simply leaves it zero.
+func novelMetadata(body string) *connectors.SeriesMetadata {
+	metadata := &connectors.SeriesMetadata{
+		Type:        connectors.SeriesTypeNovel,
+		Status:      connectors.NormalizeSeriesStatus(html.UnescapeString(connectors.FirstSubmatch(novelStatusPattern, body))),
+		Genres:      connectors.SplitLabels(connectors.FirstSubmatch(novelGenrePattern, body)),
+		Authors:     connectors.SplitLabels(connectors.FirstSubmatch(novelAuthorPattern, body)),
+		Description: novelDescription(body),
+	}
+	metadata.Rating, metadata.RatingVotes = novelRating(body)
+	return metadata
+}
+
+// novelDescription prefers the whole synopsis from the page body. The
+// og:description fallback is cut off ("…where...") and opens with a stock
+// sentence naming the title and author, which is stripped; one that does not
+// open that way is some other text and is not used.
+func novelDescription(body string) string {
+	if summary := connectors.PlainDescription(connectors.FirstSubmatch(summaryPattern, body)); summary != "" {
+		return summary
+	}
+	raw := connectors.FirstSubmatch(ogDescriptionPattern, body)
+	lead := descriptionLeadPattern.FindStringIndex(raw)
+	if lead == nil {
+		return ""
+	}
+	return connectors.PlainDescription(raw[lead[1]:])
+}
+
+// jsonLDBook is the part of the page's schema.org Book block the connector
+// reads. The numbers are json.Number because schema.org allows them as text
+// as well ("4.7"), and json.Number decodes either.
+type jsonLDBook struct {
+	AggregateRating *struct {
+		RatingValue json.Number `json:"ratingValue"`
+		BestRating  json.Number `json:"bestRating"`
+		RatingCount json.Number `json:"ratingCount"`
+	} `json:"aggregateRating"`
+}
+
+// novelRating reads the readers' score from the page's JSON-LD (4.7 out of 5
+// becomes 9.4) and how many votes it averages. A block that does not decode,
+// or a novel nobody has rated (ratingValue 0), is no rating.
+func novelRating(body string) (*float64, int) {
+	for _, match := range jsonLDPattern.FindAllStringSubmatch(body, -1) {
+		var book jsonLDBook
+		if err := json.Unmarshal([]byte(strings.TrimSpace(match[1])), &book); err != nil || book.AggregateRating == nil {
+			continue
+		}
+		aggregate := book.AggregateRating
+		// schema.org's default scale is 1 to 5, the one the site uses.
+		outOf := 5.0
+		if best, err := aggregate.BestRating.Float64(); err == nil && best > 0 {
+			outOf = best
+		}
+		rating := connectors.ParseRating(aggregate.RatingValue.String(), outOf)
+		if rating == nil {
+			return nil, 0
+		}
+		votes := 0
+		if count, err := aggregate.RatingCount.Float64(); err == nil && count > 0 {
+			votes = int(count)
+		}
+		return rating, votes
+	}
+	return nil, 0
 }
 
 func parseSearchEntries(body string) []searchEntry {

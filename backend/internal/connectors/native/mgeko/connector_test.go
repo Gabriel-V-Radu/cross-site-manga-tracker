@@ -13,19 +13,6 @@ import (
 
 func TestMgekoConnectorResolveSearchAndChapterURL(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/browse-comics/", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`
-<!DOCTYPE html>
-<html>
-<body>
-  <ul class="novel-list grid col col2">
-    <li class="novel-item">
-      <a href="/manga/another-series/" title="Another Series"><h4 class="novel-title text2row">Another Series</h4></a>
-    </li>
-  </ul>
-</body>
-</html>`))
-	})
 	mux.HandleFunc("/search/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`
 <!DOCTYPE html>
@@ -220,13 +207,129 @@ func TestMgekoConnectorResolveChapterURLSupportsDecimalChapter(t *testing.T) {
 	}
 }
 
-// TestMgekoHealthCheckRequiresAParsedSeries pins that a browse page which
-// loads without a single novel-item row (the markup search parses) fails the
-// health check instead of reporting the connector healthy.
-func TestMgekoHealthCheckRequiresAParsedSeries(t *testing.T) {
+// mgekoBrowserPage is the script-rendered browse page the site serves at
+// /browse-comics/ since its rebuild, cut from the live page (2026-11-08): an
+// empty shell whose series arrive later from /browse-comics/data/, with no
+// novel-item row in the HTML.
+const mgekoBrowserPage = `<!DOCTYPE html>
+<html lang="en">
+<head><title>Mgeko Browser</title></head>
+<body>
+<article x-data="search_results" class="container" id="search-section" style="display: none;">
+<form id="novelSearchForm" method="get" action="/search/">
+<input x-model.debounce.1000ms="key" id="inputContent" name="inputContent" type="search" class="form-control" placeholder="Search By Manga Name" aria-label="Manga Search">
+</form>
+<section x-ref="searchres" id="novelListBase"></section>
+</article>
+<article id="explore" class="container">
+<span id="total-comics">0 Comics</span>
+<form class="browse-filters" method="GET" action="" id="browse-filters-form"></form>
+<div id="comics-grid"></div>
+</article>
+</body>
+</html>`
+
+// mgekoSearchPage is the search page as the site still renders it, cut from
+// the live page for "the" (2026-11-08); the relative times carry the site's
+// non-breaking spaces.
+const mgekoSearchPage = `<!DOCTYPE html>
+<html lang="en">
+<head><title>MangaRaw Browser</title></head>
+<body>
+<header id="Result">
+<h1>Search Manga.</h1>
+<p class="description">
+Showing Results for the.
+</p>
+<nav class="paging">
+<a href="?search=the&results=2">Next &#8594;</a>
+</nav>
+</header>
+<section>
+<ul class="novel-list grid col col2">
+
+<li class="novel-item">
+<a href="/manga/xkmv-blade-of-the-discarded/" title="Blade of the Discarded">
+<div class="cover-wrap">
+<figure class="novel-cover">
+
+<img class="lazy" src="/static/img/loading.gif" data-src='/media/manga_covers/xkmv-blade-of-the-discarded.jpg' alt="Blade of the Discarded" />
+
+</figure>
+</div>
+<h4 class="novel-title text2row">
+Blade of the Discarded
+</h4>
+<h6 class="text1row">Author(S): updating</h6>
+<div class="novel-stats">
+<strong> Chapters 7-eng-li</strong>
+<span><i class="fas fa-clock"></i> 3` + " " + `days, 7` + " " + `hours Ago</span>
+</div>
+</a>
+</li>
+
+<li class="novel-item">
+<a href="/manga/solo-leveling-mg1/" title="Solo Leveling">
+<div class="cover-wrap">
+<figure class="novel-cover">
+
+<img class="lazy" src="/static/img/loading.gif" data-src='/media/manga_covers/k722631932_2.jpg' alt="Solo Leveling" />
+
+</figure>
+</div>
+<h4 class="novel-title text2row">
+Solo Leveling
+</h4>
+<h6 class="text1row">Author(S): Sung-Lak Jang</h6>
+<div class="novel-stats">
+<strong> Chapters 200.5-eng-li</strong>
+<span><i class="fas fa-clock"></i> 2` + " " + `years, 3` + " " + `months Ago</span>
+</div>
+</a>
+</li>
+
+</ul>
+</section>
+</body>
+</html>`
+
+// TestMgekoHealthCheckReadsTheSearchPage pins the health check on the page
+// search reads: with the browse page now a script-rendered shell, a check that
+// still read it reported a working connector broken.
+func TestMgekoHealthCheckReadsTheSearchPage(t *testing.T) {
+	var searched []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/browse-comics/", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body><div class="comic-card">Another Series</div></body></html>`))
+		_, _ = w.Write([]byte(mgekoBrowserPage))
+	})
+	mux.HandleFunc("/search/", func(w http.ResponseWriter, r *http.Request) {
+		searched = append(searched, r.URL.Query().Get("search"))
+		_, _ = w.Write([]byte(mgekoSearchPage))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
+	if err := conn.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("health check failed: %v", err)
+	}
+	if len(searched) != 1 || searched[0] != healthCheckQuery {
+		t.Fatalf("expected one search for %q, got %q", healthCheckQuery, searched)
+	}
+	if entries := parseSearchEntries(mgekoBrowserPage, time.Now().UTC()); len(entries) != 0 {
+		t.Fatalf("the browse shell should hold no series, parsed %d", len(entries))
+	}
+}
+
+// TestMgekoHealthCheckRequiresAParsedSeries pins that a search page which
+// loads without a single series row search can parse — the browse shell's
+// fate, should search be rebuilt the same way — fails the health check
+// instead of reporting the connector healthy.
+func TestMgekoHealthCheckRequiresAParsedSeries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(mgekoBrowserPage))
 	})
 
 	server := httptest.NewServer(mux)
@@ -234,7 +337,48 @@ func TestMgekoHealthCheckRequiresAParsedSeries(t *testing.T) {
 
 	conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
 	if err := conn.HealthCheck(context.Background()); err == nil {
-		t.Fatal("expected a browse page with no novel-item row to fail the health check")
+		t.Fatal("expected a search page with no series row to fail the health check")
+	}
+}
+
+// TestMgekoSearchReadsAHalfChapter pins the search row's dotted half chapter
+// ("Chapters 200.5-eng-li"), which used to come back as 200, alongside the
+// whole-numbered rows and the relative times with non-breaking spaces.
+func TestMgekoSearchReadsAHalfChapter(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(mgekoSearchPage))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	conn := NewConnectorWithOptions(server.URL, []string{"mgeko.cc"}, &http.Client{Timeout: 5 * time.Second})
+	results, err := conn.SearchByTitle(context.Background(), "solo leveling", 8)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 search result, got %d", len(results))
+	}
+	got := results[0]
+	if got.SourceItemID != "solo-leveling-mg1" || got.URL != "https://www.mgeko.cc/manga/solo-leveling-mg1/" {
+		t.Fatalf("unexpected hit %q at %s", got.SourceItemID, got.URL)
+	}
+	if got.LatestChapter == nil || *got.LatestChapter != 200.5 {
+		t.Fatalf("expected latest chapter 200.5, got %v", got.LatestChapter)
+	}
+	if got.CoverImageURL != "https://www.mgeko.cc/media/manga_covers/k722631932_2.jpg" {
+		t.Fatalf("unexpected cover %s", got.CoverImageURL)
+	}
+	if got.LastUpdatedAt == nil || time.Since(*got.LastUpdatedAt) < 365*24*time.Hour {
+		t.Fatalf("expected a release about two years back, got %v", got.LastUpdatedAt)
+	}
+
+	for raw, want := range map[string]float64{"200.5-eng-li": 200.5, "240-2-eng-li": 240.2, "7-eng-li": 7} {
+		if parsed := parseMgekoChapterToken(raw); parsed == nil || *parsed != want {
+			t.Errorf("parseMgekoChapterToken(%q) = %v, want %v", raw, parsed, want)
+		}
 	}
 }
 

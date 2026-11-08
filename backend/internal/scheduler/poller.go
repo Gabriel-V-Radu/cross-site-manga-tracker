@@ -38,9 +38,18 @@ type pollRepository interface {
 	MarkPollCheckedAt(ctx context.Context, trackerID int64, checkedAt time.Time, polls []repository.SourcePoll) error
 }
 
+// MetadataRecorder takes the series metadata a resolve carried
+// (metadata.Service). It decides itself whether to store it — at most about
+// once a week per site and series — so the poller hands over every answer and
+// spends nothing on it beyond the call.
+type MetadataRecorder interface {
+	Record(ctx context.Context, sourceID int64, sourceURL string, meta *connectors.SeriesMetadata)
+}
+
 type Poller struct {
 	repo                   pollRepository
 	registry               *connectors.Registry
+	metadata               MetadataRecorder
 	interval               time.Duration
 	idleInterval           time.Duration
 	lowerConfirmationDelay time.Duration
@@ -69,6 +78,9 @@ type PollerConfig struct {
 	// backwards, while a genuinely wrong stored number still gets corrected
 	// instead of staying frozen forever.
 	LowerConfirmationDelay time.Duration
+	// Metadata receives the series metadata each answered resolve carried;
+	// nil drops it (the operational tools build pollers without one).
+	Metadata MetadataRecorder
 }
 
 func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
@@ -91,6 +103,7 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 	return &Poller{
 		repo:                   repo,
 		registry:               registry,
+		metadata:               cfg.Metadata,
 		interval:               cfg.Interval,
 		idleInterval:           cfg.IdleInterval,
 		lowerConfirmationDelay: cfg.LowerConfirmationDelay,
@@ -381,6 +394,16 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// there is — the same call the fallback has always made when the
 		// primary was dark.
 		answer = held
+	}
+
+	// The metadata came in the same payloads as the chapter numbers; the
+	// recorder keeps a site's copy at most about weekly and drops the rest.
+	if p.metadata != nil {
+		for _, reply := range answered {
+			if reply.result.Metadata != nil {
+				p.metadata.Record(ctx, reply.candidate.ref.SourceID, reply.candidate.ref.SourceURL, reply.result.Metadata)
+			}
+		}
 	}
 
 	series := seriesOf(tracker)
@@ -778,16 +801,15 @@ func readingOf(result *connectors.MangaResult) sourcepick.Reading {
 	return sourcepick.Reading{Chapter: result.LatestChapter, ReleaseAt: result.LastUpdatedAt}
 }
 
-// shouldSkipIdle reports whether a non-reading tracker was checked recently
-// enough that this cycle can skip it.
+// shouldSkipIdle reports whether the tracker was checked recently enough for
+// its cadence (pollEvery) that this cycle can skip it.
 func (p *Poller) shouldSkipIdle(tracker repository.PollingTracker) bool {
-	if strings.EqualFold(strings.TrimSpace(tracker.Status), "reading") {
+	now := p.now()
+	interval := pollEvery(tracker, p.idleInterval, now)
+	if interval <= 0 || tracker.LastCheckedAt == nil {
 		return false
 	}
-	if tracker.LastCheckedAt == nil {
-		return false
-	}
-	return time.Since(*tracker.LastCheckedAt) < p.idleInterval
+	return now.Sub(*tracker.LastCheckedAt) < interval
 }
 
 // sameChapterNumber compares two chapter numbers with a tolerance. The pending

@@ -378,6 +378,7 @@ func parseDashboardTemplates(glob string, assetURL func(string) string) (*templa
 		"coverSrc":          coverSrc,
 		"statusLabel":       statusLabel,
 		"sortLabel":         sortLabel,
+		"lower":             strings.ToLower,
 		"assetURL":          assetURL,
 	}).ParseGlob(glob)
 }
@@ -447,6 +448,8 @@ func sortLabel(value string) string {
 		return "Rating"
 	case "latest_known_chapter":
 		return "Latest chapter"
+	case "unread":
+		return "Most chapters to read"
 	default:
 		return humanizeValueLabel(value)
 	}

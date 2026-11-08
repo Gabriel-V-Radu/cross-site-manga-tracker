@@ -17,7 +17,14 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
-const canonicalBaseURL = "https://www.mgeko.cc"
+const (
+	canonicalBaseURL = "https://www.mgeko.cc"
+	// healthCheckQuery is the search the health check runs. A word nearly
+	// every catalogue has titles with keeps it independent of any one series:
+	// it brought back a full page of 30 live (2026-11-08), where a specific
+	// title can be renamed or pulled.
+	healthCheckQuery = "the"
+)
 
 // site is the connector's identity. Mgeko is a readable aggregator in the
 // default tier.
@@ -36,7 +43,7 @@ var (
 	anchorTitleAttrPattern   = regexp.MustCompile(`(?is)<a[^>]+title=["']([^"']+)["'][^>]*>`)
 	imgDataSrcPattern        = regexp.MustCompile(`(?is)<img[^>]+data-src=["']([^"']+)["'][^>]*>`)
 	imgSrcPattern            = regexp.MustCompile(`(?is)<img[^>]+src=["']([^"']+)["'][^>]*>`)
-	searchChapterPattern     = regexp.MustCompile(`(?is)<strong[^>]*>\s*Chapters?\s*([0-9]+(?:-[0-9]+)?)`)
+	searchChapterPattern     = regexp.MustCompile(`(?is)<strong[^>]*>\s*Chapters?\s*([0-9]+(?:[.-][0-9]+)?)`)
 	searchUpdatedPattern     = regexp.MustCompile(`(?is)<span[^>]*>\s*<i[^>]*fa-clock[^>]*>.*?</i>\s*([^<]+?)(?:\s+Ago)?\s*</span>`)
 	titleHeadingPattern      = regexp.MustCompile(`(?is)<h1[^>]*class=["'][^"']*novel-title[^"']*["'][^>]*>(.*?)</h1>`)
 	altTitleHeadingPattern   = regexp.MustCompile(`(?is)<h2[^>]*class=["'][^"']*alternative-title[^"']*["'][^>]*>(.*?)</h2>`)
@@ -46,7 +53,7 @@ var (
 	chapterAnchorPattern     = regexp.MustCompile(`(?is)<a[^>]+href=["'](/reader/en/[^"']+-chapter-([0-9]+(?:-[0-9]+)?)[^"']*)["'][^>]*>(.*?)</a>`)
 	chapterDatetimePattern   = regexp.MustCompile(`(?is)\bdatetime=["']([^"']+)["']`)
 	chapterStatsPattern      = regexp.MustCompile(`(?is)<span[^>]*class=["'][^"']*chapter-stats[^"']*["'][^>]*>(.*?)</span>`)
-	chapterTokenPattern      = regexp.MustCompile(`\d+(?:-\d+)?`)
+	chapterTokenPattern      = regexp.MustCompile(`\d+(?:[.-]\d+)?`)
 	relativeUnitPattern      = regexp.MustCompile(`(?i)(\d+)\s*(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)`)
 	allChaptersSuffixPattern = regexp.MustCompile(`(?i)\s*\[all\s+chapters?\]\s*$`)
 )
@@ -103,15 +110,18 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 }
 
 func (c *Connector) HealthCheck(ctx context.Context) error {
-	body, err := c.fetchPage(ctx, c.baseURL+"/browse-comics/")
+	body, err := c.fetchPage(ctx, c.searchPageURL(healthCheckQuery))
 	if err != nil {
 		return err
 	}
-	// A 200 only proves the host answers. The browse page lists its series in
-	// the same novel-item rows search parses, so a page without one means the
-	// markup moved and search is coming back empty.
-	if !novelItemPattern.MatchString(body) {
-		return fmt.Errorf("mgeko browse page parsed no series")
+	// A 200 only proves the host answers. The check reads the search page
+	// SearchByTitle reads, through the same parser, so a page that yields no
+	// series means the markup moved and search is coming back empty. It used
+	// to read /browse-comics/, which the site rebuilt (by 2026-11-08) as a
+	// script-rendered "Mgeko Browser" with no series in its HTML at all, so
+	// a working connector was reported broken.
+	if len(parseSearchEntries(body, time.Now().UTC())) == 0 {
+		return fmt.Errorf("mgeko search page parsed no series")
 	}
 	return nil
 }
@@ -130,7 +140,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return nil, err
 	}
 
-	body, err := c.fetchPage(ctx, c.baseURL+"/search/?search="+url.QueryEscape(query.Raw))
+	body, err := c.fetchPage(ctx, c.searchPageURL(query.Raw))
 	if err != nil {
 		return nil, fmt.Errorf("fetch mgeko search page: %w", err)
 	}
@@ -255,6 +265,7 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
+		Metadata:      extractMetadata(body),
 	}, nil
 }
 
@@ -325,6 +336,9 @@ func parseSearchEntries(body string, now time.Time) []searchEntry {
 			coverImageURL = ""
 		}
 
+		// The row spells a half chapter with a dot ("Chapters 200.5-eng-li",
+		// live 2026-11-08) where chapter links use a dash (-chapter-200-5-);
+		// reading only the dash form cut 200.5 down to 200.
 		var latestChapter *float64
 		if chapterRaw := strings.TrimSpace(connectors.FirstSubmatch(searchChapterPattern, block)); chapterRaw != "" {
 			latestChapter = parseMgekoChapterToken(chapterRaw)
@@ -464,6 +478,12 @@ func extractRelatedTitles(body string, primaryTitle string) []string {
 	return searchutil.RelatedTitles(primaryTitle, candidates)
 }
 
+// searchPageURL is the site's title search, which still renders its results
+// as novel-item rows in the HTML (verified live 2026-11-08).
+func (c *Connector) searchPageURL(query string) string {
+	return c.baseURL + "/search/?search=" + url.QueryEscape(query)
+}
+
 func (c *Connector) fetchPage(ctx context.Context, endpoint string) (string, error) {
 	return connectors.FetchHTML(ctx, c.httpClient, endpoint)
 }
@@ -474,7 +494,9 @@ func parseMgekoChapterToken(raw string) *float64 {
 		return nil
 	}
 
-	parts := strings.Split(token, "-")
+	// "200.5" (a search row) and "200-5" (a chapter link) are the same half
+	// chapter.
+	parts := strings.Split(strings.Replace(token, ".", "-", 1), "-")
 	if len(parts) == 1 {
 		value, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
 		if err != nil || !connectors.ValidChapter(value) {

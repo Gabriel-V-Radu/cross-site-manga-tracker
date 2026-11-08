@@ -27,6 +27,12 @@ type MangaResult struct {
 	CoverImageURL string     `json:"coverImageUrl,omitempty"`
 	LatestChapter *float64   `json:"latestChapter,omitempty"`
 	LastUpdatedAt *time.Time `json:"lastUpdatedAt,omitempty"`
+	// Metadata is what the resolve learned about the series besides its
+	// chapters (type, genres, synopsis…), nil when the site's payload carries
+	// none. Only ResolveByURL fills it; search results leave it nil, because a
+	// search row is a slimmer record on most sites and the poller is what
+	// stores it.
+	Metadata *SeriesMetadata `json:"metadata,omitempty"`
 }
 
 type Connector interface {

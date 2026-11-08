@@ -138,6 +138,7 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	app.Get("/dashboard/trackers/new", dashboard.NewTrackerModal)
 	app.Get("/dashboard/trackers/:id/edit", dashboard.EditTrackerModal)
 	app.Get("/dashboard/trackers/:id/card-fragment", dashboard.CardFragment)
+	app.Get("/dashboard/trackers/:id/info", dashboard.TrackerInfo)
 	app.Post("/dashboard/trackers", dashboard.CreateFromForm)
 	app.Post("/dashboard/trackers/:id", dashboard.UpdateFromForm)
 	app.Post("/dashboard/trackers/:id/set-last-read", dashboard.SetLastReadFromCard)

@@ -26,7 +26,26 @@ func (r *TrackerRepository) List(ctx context.Context, options TrackerListOptions
 		// by every poll, which ranked a tracker whose source reports no release
 		// date by when it was last polled: those trackers were pinned to the top of
 		// the library and could never move down, however old the series was.
-		"latest_known_chapter": "CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE COALESCE(latest_release_at, latest_chapter_seen_at, created_at) END",
+		//
+		// When a poll found the chapter well after it came out — a finished
+		// series polled every few days that got an extra, a site that indexed
+		// it late — the find time ranks it instead, so the reader sees it on
+		// top rather than days down the list. latest_chapter_found_at is only
+		// ever set by a poll that moved the number up, so trackers whose number
+		// came from creation or an edit keep ranking by release date exactly as
+		// before. SQLite's two-argument MAX is NULL if either side is, hence
+		// the fallback inside the second COALESCE.
+		// How many chapters are left to read, most first. Trackers with
+		// nothing pending — caught up, never started, or with no chapter
+		// known — rank NULL, which a descending sort puts last.
+		"unread": `CASE
+			WHEN latest_known_chapter IS NULL OR last_read_chapter IS NULL OR latest_known_chapter <= last_read_chapter THEN NULL
+			ELSE latest_known_chapter - last_read_chapter
+		END`,
+		"latest_known_chapter": `CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE MAX(
+			COALESCE(latest_release_at, latest_chapter_seen_at, created_at),
+			COALESCE(latest_chapter_found_at, latest_release_at, latest_chapter_seen_at, created_at)
+		) END`,
 	}
 	sortField, ok := validSortFields[options.SortBy]
 	if !ok {
@@ -38,14 +57,7 @@ func (r *TrackerRepository) List(ctx context.Context, options TrackerListOptions
 		order = "DESC"
 	}
 
-	query := `
-		SELECT
-			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
-			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
-			latest_chapter_seen_at, latest_chapter_source_id, last_checked_at, reading_source_id,
-			created_at, updated_at
-		FROM trackers
-	`
+	query := `SELECT ` + trackerColumns + ` FROM trackers`
 
 	whereClauses, args := buildTrackerListFilters(options)
 
@@ -185,9 +197,42 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 			}
 		}
 
-		if hasReading {
+		// Reading on its own is the reading queue, so it leaves out what has
+		// been read up to the latest chapter. With any other filter on, the
+		// reader is looking for a particular title among the ones they read,
+		// and a title they are caught up on is as much one of those as any.
+		if hasReading && !options.Narrowed() {
 			whereClauses = append(whereClauses, `(status <> 'reading' OR latest_known_chapter IS NULL OR last_read_chapter IS NULL OR last_read_chapter < latest_known_chapter)`)
 		}
+	}
+
+	// Type and publication status: any of the values asked for. Genres: all
+	// of them, each its own clause — someone asking for Action and Romance
+	// wants the titles that are both.
+	if seriesTypes := distinctTrimmed(options.SeriesTypes); len(seriesTypes) > 0 {
+		whereClauses = append(whereClauses, `EXISTS (
+			SELECT 1 FROM tracker_metadata tm
+			WHERE tm.tracker_id = trackers.id AND tm.series_type IN (`+sqlPlaceholders(len(seriesTypes))+`)
+		)`)
+		for _, value := range seriesTypes {
+			args = append(args, value)
+		}
+	}
+	if seriesStatuses := distinctTrimmed(options.SeriesStatuses); len(seriesStatuses) > 0 {
+		whereClauses = append(whereClauses, `EXISTS (
+			SELECT 1 FROM tracker_metadata tm
+			WHERE tm.tracker_id = trackers.id AND tm.series_status IN (`+sqlPlaceholders(len(seriesStatuses))+`)
+		)`)
+		for _, value := range seriesStatuses {
+			args = append(args, value)
+		}
+	}
+	for _, genre := range distinctTrimmed(options.Genres) {
+		whereClauses = append(whereClauses, `EXISTS (
+			SELECT 1 FROM tracker_metadata tm, json_each(tm.genres) genre
+			WHERE tm.tracker_id = trackers.id AND genre.value = ?
+		)`)
+		args = append(args, genre)
 	}
 
 	if len(options.SourceIDs) > 0 {
@@ -286,9 +331,11 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 			t.id, t.profile_id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
 			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
 			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id,
-			mirror.last_polled_at
+			mirror.last_polled_at, t.latest_chapter_seen_at, t.latest_chapter_found_at,
+			COALESCE(tm.series_status, '')
 		FROM trackers t
 		INNER JOIN sources s ON s.id = t.source_id
+		LEFT JOIN tracker_metadata tm ON tm.tracker_id = t.id
 		LEFT JOIN tracker_sources mirror ON mirror.id = (
 			SELECT m.id FROM tracker_sources m
 			WHERE m.tracker_id = t.id AND m.source_id = t.source_id
@@ -314,13 +361,23 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 		var pendingLowerSeenAt sql.NullTime
 		var latestChapterSourceID sql.NullInt64
 		var primaryPolledAt sql.NullTime
+		var seenAt sql.NullTime
+		var foundAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID, &item.ProfileID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
 			&latest, &lastRead, &latestReleaseAt, &item.SourceKey, &lastCheckedAt,
 			&pendingLower, &pendingLowerSeenAt, &latestChapterSourceID,
-			&primaryPolledAt,
+			&primaryPolledAt, &seenAt, &foundAt, &item.SeriesStatus,
 		); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
+		}
+		if seenAt.Valid {
+			value := seenAt.Time.UTC()
+			item.LatestChapterSeenAt = &value
+		}
+		if foundAt.Valid {
+			value := foundAt.Time.UTC()
+			item.LatestChapterFoundAt = &value
 		}
 		if sourceItemID.Valid {
 			item.SourceItemID = &sourceItemID.String
@@ -557,6 +614,15 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 				WHEN latest_known_chapter IS NOT ? THEN ?
 				ELSE COALESCE(latest_chapter_seen_at, ?)
 			END,
+			-- Found: a poll moved the number up. A first fill is not a
+			-- find (the tracker knew no number to move from), and a
+			-- correction down leaves no find standing.
+			latest_chapter_found_at = CASE
+				WHEN ? IS NULL OR latest_known_chapter IS NULL THEN latest_chapter_found_at
+				WHEN ? > latest_known_chapter THEN ?
+				WHEN ? < latest_known_chapter THEN NULL
+				ELSE latest_chapter_found_at
+			END,
 			latest_known_chapter = ?,
 			latest_chapter_source_id = COALESCE(?, latest_chapter_source_id),
 			pending_lower_first_seen_at = CASE
@@ -574,6 +640,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		WHERE id = ? AND source_id = ? AND source_url = ? AND latest_known_chapter IS ?
 	`, sourceItemIDValue, sourceURLValue,
 		latestKnownChapter, latestKnownChapter, checkedAt, checkedAt,
+		latestKnownChapter, latestKnownChapter, checkedAt, latestKnownChapter,
 		latestKnownChapter,
 		latestChapterSourceValue,
 		pendingLower, pendingLower, checkedAt, checkedAt,

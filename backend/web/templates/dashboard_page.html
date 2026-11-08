@@ -15,6 +15,7 @@
     <script src="{{assetURL "dashboard-trackers.js"}}" defer></script>
     <script src="{{assetURL "dashboard-linked-sources.js"}}" defer></script>
     <script src="{{assetURL "dashboard-tags.js"}}" defer></script>
+    <script src="{{assetURL "dashboard-info.js"}}" defer></script>
 </head>
 
 {{/*
@@ -27,17 +28,15 @@ two tabs on different profiles kept acting on each other's library.
 <body hx-headers='{"X-Profile-Key": "{{.ActiveProfile.Key}}"}'>
     <div class="grain"></div>
     <main class="shell">
-        <header class="masthead">
-            <div class="masthead__copy">
-                <p class="kicker">Cross-Site Tracker</p>
-                <h1>Editorial Control Room</h1>
-                <p class="subtitle">Track updates across sources with sharp filters, fast edits, and a focused reading queue.</p>
-            </div>
+        {{/* One slim bar: which profile this is and the page's own controls.
+             The title and strapline it used to carry took a third of the first
+             screen and said nothing the reader needs. */}}
+        <header class="masthead masthead--compact">
+            <h1 class="masthead__profile" title="Active profile">
+                <span class="masthead__profile-label">Profile</span>
+                <span class="masthead__profile-name">{{.ActiveProfile.Name}}</span>
+            </h1>
             <div class="profile-toolbar" id="profile-rename-form">
-                <label class="profile-toolbar__label profile-toolbar__label--profile">
-                    Active Profile
-                    <input type="text" value="{{.ActiveProfile.Name}}" readonly>
-                </label>
                 {{/* A plain navigation sends no X-Profile-Key, so without ?profile=
                      the links page fell back to the cookie, which whichever tab
                      made the last request owns. */}}
@@ -65,7 +64,9 @@ two tabs on different profiles kept acting on each other's library.
                  selects and ticks it remembered, but only after the "load"
                  trigger had already asked for the list with the defaults, so
                  the controls showed one filter and the cards another. The
-                 filters start from their defaults, matching the list. */}}
+                 filters start from what the page URL carries instead (the
+                 server sets them; dashboard-trackers.js writes the reader's
+                 filters into the URL), so a reload or a Back keeps them. */}}
             <form id="tracker-filters"
                   hx-get="/dashboard/trackers"
                   hx-target="#trackers-zone"
@@ -78,7 +79,7 @@ two tabs on different profiles kept acting on each other's library.
                 <label for="dashboard-search-input">
                     Search
                     <span class="search-input-wrap">
-                        <input type="text" id="dashboard-search-input" name="q" placeholder="Title">
+                        <input type="text" id="dashboard-search-input" name="q" placeholder="Title" value="{{.Selected.Query}}">
                         <button type="button"
                                 id="dashboard-search-clear"
                                 class="search-clear-btn"
@@ -90,7 +91,7 @@ two tabs on different profiles kept acting on each other's library.
                     Status
                     <select name="status">
                         {{range .Statuses}}
-                        <option value="{{.}}" title="{{statusLabel .}}" {{if eq . "reading"}}selected{{end}}>{{statusLabel .}}</option>
+                        <option value="{{.}}" title="{{statusLabel .}}" {{if eq . $.Selected.Status}}selected{{end}}>{{statusLabel .}}</option>
                         {{end}}
                     </select>
                 </label>
@@ -98,20 +99,76 @@ two tabs on different profiles kept acting on each other's library.
                     Sort
                     <select name="sort">
                         {{range .Sorts}}
-                        <option value="{{.}}" title="{{sortLabel .}}">{{sortLabel .}}</option>
+                        <option value="{{.}}" title="{{sortLabel .}}" {{if eq . $.Selected.Sort}}selected{{end}}>{{sortLabel .}}</option>
                         {{end}}
                     </select>
                 </label>
                 {{/*
-                Sites and Tags are captioned groups, not labels: a <label> with no
-                "for" labels its first checkbox, so a click on the caption ticked
-                the first site or tag inside the closed dropdown and filtered the
-                list by it.
+                The multi-select filters are captioned groups, not labels: a <label>
+                with no "for" labels its first checkbox, so a click on the caption
+                ticked the first option inside the closed dropdown and filtered the
+                list by it. Each summary says what is picked (dashboard-trackers.js).
                 */}}
                 <div class="field-group">
+                    Publication
+                    <details id="filter-publication-dropdown" class="filter-multi-select" data-filter-name="publication">
+                        <summary>Any</summary>
+                        <div class="filter-multi-select__menu">
+                            {{range .PublicationOptions}}
+                            <label class="filter-multi-select__option">
+                                <input type="checkbox" name="publication" value="{{.Value}}" {{if .Selected}}checked{{end}}>
+                                <span>{{.Label}}</span>
+                                {{if .Count}}<span class="filter-multi-select__count">{{.Count}}</span>{{end}}
+                            </label>
+                            {{else}}
+                            <p class="filter-multi-select__empty">No series info yet.</p>
+                            {{end}}
+                        </div>
+                    </details>
+                </div>
+                <div class="field-group">
+                    Type
+                    <details id="filter-types-dropdown" class="filter-multi-select" data-filter-name="types">
+                        <summary>Any</summary>
+                        <div class="filter-multi-select__menu">
+                            {{range .TypeOptions}}
+                            <label class="filter-multi-select__option">
+                                <input type="checkbox" name="types" value="{{.Value}}" {{if .Selected}}checked{{end}}>
+                                <span>{{.Label}}</span>
+                                {{if .Count}}<span class="filter-multi-select__count">{{.Count}}</span>{{end}}
+                            </label>
+                            {{else}}
+                            <p class="filter-multi-select__empty">No series info yet.</p>
+                            {{end}}
+                        </div>
+                    </details>
+                </div>
+                {{/* Genres combine with AND: every genre ticked must be on the
+                     title. The box at the top only narrows the menu. */}}
+                <div class="field-group">
+                    Genres
+                    <details id="filter-genres-dropdown" class="filter-multi-select" data-filter-name="genres">
+                        <summary>Any</summary>
+                        <div class="filter-multi-select__menu filter-multi-select__menu--genres">
+                            {{if .GenreOptions}}
+                            <input type="search" class="filter-multi-select__search" placeholder="Find a genre" aria-label="Find a genre" data-option-search>
+                            {{end}}
+                            {{range .GenreOptions}}
+                            <label class="filter-multi-select__option">
+                                <input type="checkbox" name="genres" value="{{.Value}}" {{if .Selected}}checked{{end}}>
+                                <span>{{.Label}}</span>
+                                {{if .Count}}<span class="filter-multi-select__count">{{.Count}}</span>{{end}}
+                            </label>
+                            {{else}}
+                            <p class="filter-multi-select__empty">No series info yet.</p>
+                            {{end}}
+                        </div>
+                    </details>
+                </div>
+                <div class="field-group">
                     Sites
-                    <details id="filter-sites-dropdown" class="filter-multi-select">
-                        <summary id="filter-sites-summary">0</summary>
+                    <details id="filter-sites-dropdown" class="filter-multi-select" data-filter-name="sites">
+                        <summary id="filter-sites-summary">Any</summary>
                         {{/*
                         Rendered once, with the page: the site list is global and
                         nothing changes it without a reload. The menu used to
@@ -135,8 +192,8 @@ two tabs on different profiles kept acting on each other's library.
                 </div>
                 <div class="field-group filters-grid__tags-row">
                     Tags
-                    <details id="filter-tags-dropdown" class="filter-multi-select">
-                        <summary id="filter-tags-summary">0</summary>
+                    <details id="filter-tags-dropdown" class="filter-multi-select" data-filter-name="tags">
+                        <summary id="filter-tags-summary">Any</summary>
                         <div class="filter-multi-select__menu"
                              hx-get="/dashboard/profile/filter-tags"
                              hx-trigger="load, profileTagsChanged from:body"
@@ -147,7 +204,7 @@ two tabs on different profiles kept acting on each other's library.
                             {{range .ProfileTags}}
                             <label class="filter-multi-select__option">
                                 {{/* data-tag-id carries a tick across a rename (dashboard-trackers.js). */}}
-                                <input type="checkbox" name="tags" value="{{.Name}}" data-tag-id="{{.ID}}">
+                                <input type="checkbox" name="tags" value="{{.Name}}" data-tag-id="{{.ID}}" {{if index $.Selected.Tags (lower .Name)}}checked{{end}}>
                                 <span>{{.Name}}</span>
                             </label>
                             {{end}}
@@ -158,8 +215,7 @@ two tabs on different profiles kept acting on each other's library.
                     </details>
                 </div>
                 <input type="hidden" name="profile" id="profile-filter" value="{{.ActiveProfile.Key}}">
-                <input type="hidden" name="view" id="view-input" value="grid">
-                <input type="hidden" name="page" id="page-input" value="1">
+                <input type="hidden" name="page" id="page-input" value="{{.Selected.Page}}">
             </form>
             {{/* Sends the silent refreshes of the list (covers still arriving,
                  the count after a delete) with the form's values. A request of
@@ -174,24 +230,13 @@ two tabs on different profiles kept acting on each other's library.
                   hx-trigger="trackersQuietRefresh"></span>
 
             <div class="panel-actions">
-                <div class="view-toggle" role="group" aria-label="Tracker view mode">
-                    <button type="button"
-                            class="view-toggle__option"
-                            data-view-mode="grid"
-                            aria-pressed="true">
-                        Grid
-                    </button>
-                    <button type="button"
-                            class="view-toggle__option"
-                            data-view-mode="list"
-                            aria-pressed="false">
-                        List
-                    </button>
-                </div>
+                {{/* Shown while any filter besides Status and Sort is on:
+                     with eight of them, finding the one left ticked inside a
+                     closed dropdown is the slow part (dashboard-trackers.js). */}}
+                <button type="button" class="action-btn" id="filters-reset" hidden>Clear filters</button>
                 <button type="button"
                         class="action-btn action-btn--accent"
                         hx-get="/dashboard/trackers/new"
-                        hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                         hx-target="#modal-zone"
                         hx-swap="innerHTML">
                     + Add Tracker
@@ -203,6 +248,10 @@ two tabs on different profiles kept acting on each other's library.
     </main>
 
     <div id="modal-zone"></div>
+    {{/* The series info panel the card covers open; dashboard-info.js fills it
+         and places it beside the card. Outside .shell so the modal's inert
+         page does not swallow it, and so it can overflow the grid. */}}
+    <div id="tracker-info-popover" class="tracker-info-popover" role="dialog" aria-label="Series info" hidden></div>
 </body>
 
 </html>

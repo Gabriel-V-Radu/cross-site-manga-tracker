@@ -20,6 +20,7 @@ type DashboardHandler struct {
 	sourceRepo         *repository.SourceRepository
 	profileRepo        *repository.ProfileRepository
 	linkSuggestionRepo *repository.LinkSuggestionRepository
+	metadataRepo       *repository.MetadataRepository
 	linkScanner        *linkscan.Scanner
 	profileResolver    *profileContextResolver
 	registry           *connectors.Registry
@@ -103,13 +104,41 @@ type dashboardPageData struct {
 	ProfileTags           []models.CustomTag
 	LinkedSites           []models.Source
 	SelectedLinkedSiteIDs map[int64]bool
+	// The metadata filters' options: only what the profile's library has,
+	// each with how many titles carry it.
+	TypeOptions        []filterOptionView
+	PublicationOptions []filterOptionView
+	GenreOptions       []filterOptionView
+	// Selected is the filter state the page URL asked for.
+	Selected pageFilters
+}
+
+// filterOptionView is one checkbox in a metadata filter menu.
+type filterOptionView struct {
+	Value    string
+	Label    string
+	Count    int
+	Selected bool
+}
+
+// pageFilters is the list filter state read off the dashboard page's URL, to
+// render the filters form already set (see pageFilterSelection).
+type pageFilters struct {
+	Query       string
+	Status      string
+	Sort        string
+	Page        int
+	Types       []string
+	Publication []string
+	Genres      []string
+	// Tags holds lowercased names: tags are matched case-insensitively.
+	Tags map[string]bool
 }
 
 type trackersPartialData struct {
 	Trackers      []trackerCardView
 	SiteLinks     []trackerSiteLinkView
 	MoreSiteLinks []trackerSiteLinkView
-	ViewMode      string
 	Page          int
 	PrevPage      int
 	NextPage      int
@@ -123,7 +152,6 @@ type trackersPartialData struct {
 }
 
 type trackerOOBResponseData struct {
-	ViewMode    string
 	ReplaceCard *trackerCardView
 	// RefreshCard marks a ReplaceCard rendered while one of its lookups was
 	// still running; the response then fetches the card again shortly.
@@ -161,18 +189,26 @@ type trackerCardView struct {
 	// the card is showing when this app first saw the chapter instead, so it says
 	// so rather than passing a detection time off as a release time.
 	LatestReleaseApproximate bool
-	LatestReleaseTitle       string
-	LastCheckedAgo           string
-	LastReadChapter          string
-	LastReadAgo              string
-	RatingLabel              string
-	LatestReleaseFormatted   string
-	UpdatedAtFormatted       string
-	LastCheckedFormatted     string
-	SourceItemID             *string
-	Rating                   *float64
-	LatestKnownChapterRaw    *float64
-	LastReadChapterRaw       *float64
+	// UnreadLabel is how many chapters are left to read ("+3"), empty when the
+	// reader is caught up or has not started; UnreadTitle words it in full.
+	UnreadLabel string
+	UnreadTitle string
+	// LatestReleaseFound marks a chapter a poll found well after its release
+	// date: the card then says when it was found (that is what put it on top
+	// of the list) and keeps the release date in the hover text.
+	LatestReleaseFound     bool
+	LatestReleaseTitle     string
+	LastCheckedAgo         string
+	LastReadChapter        string
+	LastReadAgo            string
+	RatingLabel            string
+	LatestReleaseFormatted string
+	UpdatedAtFormatted     string
+	LastCheckedFormatted   string
+	SourceItemID           *string
+	Rating                 *float64
+	LatestKnownChapterRaw  *float64
+	LastReadChapterRaw     *float64
 }
 
 type trackerSiteLinkView struct {
@@ -198,7 +234,6 @@ type trackerTagIconView struct {
 
 type trackerFormData struct {
 	Mode          string
-	ViewMode      string
 	Tracker       *models.Tracker
 	Sources       []models.Source
 	LinkedSources []models.TrackerSource
@@ -250,6 +285,7 @@ func NewDashboardHandler(db *sql.DB, registry *connectors.Registry, paths Dashbo
 		sourceRepo:         repository.NewSourceRepository(db),
 		profileRepo:        repository.NewProfileRepository(db),
 		linkSuggestionRepo: linkSuggestionRepo,
+		metadataRepo:       repository.NewMetadataRepository(db),
 		linkScanner:        linkscan.NewScanner(linkSuggestionRepo, registry, mangabaka.NewClient(), nil),
 		profileResolver:    newProfileContextResolver(db),
 		registry:           registry,

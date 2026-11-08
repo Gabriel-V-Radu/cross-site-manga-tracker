@@ -33,23 +33,32 @@ var fetchTrackerCardFragment = function (requestURL) {
         });
 };
 
-var currentViewMode = function () {
-    var viewInput = document.getElementById('view-input');
-    return viewInput && viewInput.value === 'list' ? 'list' : 'grid';
-};
-
 var currentCardsContainer = function () {
-    return document.getElementById('cards-container-list') || document.getElementById('cards-container-grid');
+    return document.getElementById('cards-container-grid');
 };
 
-var trackerCardFragmentURL = function (trackerID, viewMode) {
+var trackerCardFragmentURL = function (trackerID) {
     var profileInput = document.getElementById('profile-filter');
     var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
-    var requestURL = '/dashboard/trackers/' + encodeURIComponent(String(trackerID)) + '/card-fragment?view=' + encodeURIComponent(viewMode);
+    var requestURL = '/dashboard/trackers/' + encodeURIComponent(String(trackerID)) + '/card-fragment';
     if (profileKey) {
-        requestURL += '&profile=' + encodeURIComponent(profileKey);
+        requestURL += '?profile=' + encodeURIComponent(profileKey);
     }
     return requestURL;
+};
+
+// The filters besides Status and Sort. Each narrows the list by something the
+// card does not carry, so only the server can tell whether a card matches one;
+// and with any of them on, Reading stops leaving out caught-up trackers
+// (repository.TrackerListOptions.Narrowed).
+var narrowingFilterNames = ['q', 'sites', 'tags', 'types', 'publication', 'genres'];
+
+var listIsNarrowed = function (params) {
+    return narrowingFilterNames.some(function (name) {
+        return params.getAll(name).some(function (value) {
+            return String(value || '').trim() !== '';
+        });
+    });
 };
 
 // What the list on screen was asked for, as the trackers partial records it in
@@ -92,16 +101,14 @@ var cardIsCaughtUp = function (card) {
 
 // Whether a card, as just rendered, belongs in the list on screen. Status is
 // on the card (with Reading's rule that a caught-up tracker is not on it); a
-// search, a tag or a site filter depends on what the card does not carry, so
-// with one of those active only the server can tell and the answer is no.
+// search, a tag, a site, a type, a publication status or a genre depends on
+// what the card does not carry, so with one of those active only the server
+// can tell and the answer is no.
 var cardMatchesShownList = function (card, list) {
     if (!card || !list) {
         return false;
     }
-    var hasValue = function (value) {
-        return String(value || '').trim() !== '';
-    };
-    if (hasValue(list.params.get('q')) || list.params.getAll('tags').some(hasValue) || list.params.getAll('sites').some(hasValue)) {
+    if (listIsNarrowed(list.params)) {
         return false;
     }
     var status = listStatusFilter(list);
@@ -157,7 +164,7 @@ window.replaceTrackerCard = function (node, fresh) {
 // for itself again until the server stops saying so (X-Card-Lookups-Pending),
 // a bounded number of times. An open rating popover in it is waited for: the
 // swap would close it.
-var keepTrackerCardFresh = function (cardID, viewMode, requestURL) {
+var keepTrackerCardFresh = function (cardID, requestURL) {
     var attempts = 0;
     var maxAttempts = 8;
     var refresh;
@@ -170,7 +177,7 @@ var keepTrackerCardFresh = function (cardID, viewMode, requestURL) {
     refresh = function () {
         attempts += 1;
         var node = document.getElementById(cardID);
-        if (!node || currentViewMode() !== viewMode) {
+        if (!node) {
             return;
         }
         if (node.querySelector('details[open]')) {
@@ -247,20 +254,18 @@ document.body.addEventListener('trackerCreated', function (event) {
         return;
     }
 
-    var viewMode = currentViewMode();
-    var requestURL = trackerCardFragmentURL(trackerID, viewMode);
+    var requestURL = trackerCardFragmentURL(trackerID);
 
     fetchTrackerCardFragment(requestURL)
         .then(function (result) {
             var card = result.card;
             var container = currentCardsContainer();
             var list = shownTrackersList();
-            var sameView = !!container && (container.id === 'cards-container-list') === (viewMode === 'list') && currentViewMode() === viewMode;
-            if (sameView && list && list.page === 1 && cardMatchesShownList(card, list)) {
+            if (container && list && list.page === 1 && cardMatchesShownList(card, list)) {
                 placeTrackerCardAtTop(container, card);
                 pinTrackerCard(card);
                 if (result.pending) {
-                    keepTrackerCardFresh(card.id, viewMode, requestURL);
+                    keepTrackerCardFresh(card.id, requestURL);
                 }
             }
             window.dispatchTrackersChanged('silent');
@@ -296,8 +301,7 @@ var restorePinnedCardAfterSwap = function () {
         return;
     }
     var card = document.getElementById(window.__pinnedTrackerID);
-    if (!card && pinnedTrackerNode && cardMatchesShownList(pinnedTrackerNode, list) &&
-        pinnedTrackerNode.classList.contains('tracker-row') === (container.id === 'cards-container-list')) {
+    if (!card && pinnedTrackerNode && cardMatchesShownList(pinnedTrackerNode, list)) {
         // htmx cleaned up the old node's handlers as it removed it, so a copy
         // goes back in and is processed afresh.
         card = pinnedTrackerNode.cloneNode(true);
@@ -335,10 +339,7 @@ var cancelSearchDebounce = function () {
 };
 
 document.addEventListener('DOMContentLoaded', function () {
-    var initialViewInput = document.getElementById('view-input');
-    window.setDashboardViewMode(initialViewInput && initialViewInput.value ? initialViewInput.value : 'grid', false);
-    window.updateFilterTagsSummary();
-    window.updateFilterSitesSummary();
+    window.updateFilterSummaries();
 
     var filtersForm = document.getElementById('tracker-filters');
     if (filtersForm) {
@@ -379,7 +380,7 @@ document.addEventListener('DOMContentLoaded', function () {
             var shouldRefresh = false;
             if (target.tagName === 'SELECT') {
                 shouldRefresh = true;
-            } else if (target.name === 'tags' || target.name === 'sites') {
+            } else if (multiSelectFilterNames.indexOf(target.name) !== -1) {
                 shouldRefresh = true;
             }
 
@@ -440,70 +441,173 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 });
 
-window.updateFilterTagsSummary = function () {
-    var dropdown = document.getElementById('filter-tags-dropdown');
-    var summary = document.getElementById('filter-tags-summary');
-    if (!dropdown || !summary) {
+// The checkbox dropdowns of the filters form, by the name their boxes submit.
+var multiSelectFilterNames = ['publication', 'types', 'genres', 'sites', 'tags'];
+
+// A dropdown's summary says what is picked: "Any" for nothing, the names of
+// one or two picks, a count past that. It used to show a bare count ("0"),
+// which with eight filters left the reader opening each one to find what was
+// still narrowing the list.
+var summarizeFilterDropdown = function (dropdown) {
+    var summary = dropdown ? dropdown.querySelector(':scope > summary') : null;
+    var name = dropdown ? dropdown.getAttribute('data-filter-name') : '';
+    if (!summary || !name) {
         return;
     }
-
-    var checks = dropdown.querySelectorAll('input[name="tags"]:checked');
-    summary.textContent = String(checks ? checks.length : 0);
+    var labels = Array.prototype.map.call(dropdown.querySelectorAll('input[name="' + name + '"]:checked'), function (box) {
+        var option = box.closest('.filter-multi-select__option');
+        var label = option ? option.querySelector('span') : null;
+        return label ? label.textContent.trim() : String(box.value);
+    });
+    if (labels.length === 0) {
+        summary.textContent = 'Any';
+    } else if (labels.length <= 2) {
+        summary.textContent = labels.join(', ');
+    } else {
+        summary.textContent = labels.length + ' selected';
+    }
+    summary.title = labels.join(', ');
+    dropdown.classList.toggle('filter-multi-select--active', labels.length > 0);
 };
 
-window.updateFilterSitesSummary = function () {
-    var dropdown = document.getElementById('filter-sites-dropdown');
-    var summary = document.getElementById('filter-sites-summary');
-    if (!dropdown || !summary) {
+// Whether anything besides Status and Sort narrows the list, which is when
+// the Clear filters button shows.
+var syncFiltersResetButton = function () {
+    var button = document.getElementById('filters-reset');
+    var form = document.getElementById('tracker-filters');
+    if (!button || !form || typeof window.FormData !== 'function') {
         return;
     }
+    button.hidden = !listIsNarrowed(new window.URLSearchParams(new window.FormData(form)));
+};
 
-    var checks = dropdown.querySelectorAll('input[name="sites"]:checked');
-    summary.textContent = String(checks ? checks.length : 0);
+window.updateFilterSummaries = function () {
+    Array.prototype.forEach.call(document.querySelectorAll('#tracker-filters details.filter-multi-select'), summarizeFilterDropdown);
+    syncFiltersResetButton();
+};
+
+// Kept for the callers that only know about one menu (dashboard-tags.js).
+window.updateFilterTagsSummary = window.updateFilterSummaries;
+window.updateFilterSitesSummary = window.updateFilterSummaries;
+
+// Ticks one option of a filter dropdown and asks for the list, the way a
+// click in the menu would. Used by the info panel's genre and type chips; an
+// option the menu does not carry yet (a genre that appeared since the page
+// loaded) is added to it.
+window.applyTrackerFilter = function (name, value, label) {
+    var form = document.getElementById('tracker-filters');
+    var dropdown = form ? form.querySelector('details.filter-multi-select[data-filter-name="' + name + '"]') : null;
+    if (!dropdown || !value) {
+        return false;
+    }
+    var box = Array.prototype.filter.call(dropdown.querySelectorAll('input[name="' + name + '"]'), function (candidate) {
+        return candidate.value === value;
+    })[0];
+    if (!box) {
+        var menu = dropdown.querySelector('.filter-multi-select__menu');
+        if (!menu) {
+            return false;
+        }
+        var empty = menu.querySelector('.filter-multi-select__empty');
+        if (empty) {
+            empty.remove();
+        }
+        var option = document.createElement('label');
+        option.className = 'filter-multi-select__option';
+        box = document.createElement('input');
+        box.type = 'checkbox';
+        box.name = name;
+        box.value = value;
+        var text = document.createElement('span');
+        text.textContent = label || value;
+        option.appendChild(box);
+        option.appendChild(text);
+        menu.appendChild(option);
+    }
+    if (box.checked) {
+        return true;
+    }
+    box.checked = true;
+    window.updateFilterSummaries();
+    var pageInput = document.getElementById('page-input');
+    if (pageInput) {
+        pageInput.value = '1';
+    }
+    cancelSearchDebounce();
+    window.dispatchTrackersChanged('user');
+    return true;
 };
 
 document.addEventListener('change', function (event) {
     var target = event.target;
-    if (!target) {
+    if (!target || multiSelectFilterNames.indexOf(target.name) === -1) {
         return;
     }
-    if (target.name === 'tags') {
-        window.updateFilterTagsSummary();
+    window.updateFilterSummaries();
+});
+
+document.addEventListener('input', function (event) {
+    var target = event.target;
+    if (target && target.name === 'q') {
+        syncFiltersResetButton();
+    }
+    // The box at the top of the genre menu narrows the options shown; it has
+    // no name, so it never reaches the request.
+    if (!target || !target.matches || !target.matches('[data-option-search]')) {
         return;
     }
-    if (target.name === 'sites') {
-        window.updateFilterSitesSummary();
+    var needle = String(target.value || '').trim().toLowerCase();
+    var menu = target.closest('.filter-multi-select__menu');
+    Array.prototype.forEach.call(menu ? menu.querySelectorAll('.filter-multi-select__option') : [], function (option) {
+        option.hidden = needle !== '' && option.textContent.toLowerCase().indexOf(needle) === -1;
+    });
+});
+
+// Enter in the genre finder would submit the filters form; it does nothing
+// here instead, the ticks being what filters.
+document.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && event.target && event.target.matches && event.target.matches('[data-option-search]')) {
+        event.preventDefault();
     }
 });
 
 document.addEventListener('click', function (event) {
-    var option = event.target && event.target.closest ? event.target.closest('[data-view-mode]') : null;
-    if (!option) {
+    var button = event.target && event.target.closest ? event.target.closest('#filters-reset') : null;
+    if (!button) {
         return;
     }
-    var nextMode = option.getAttribute('data-view-mode') || 'grid';
-    var viewInput = document.getElementById('view-input');
-    var currentMode = viewInput && viewInput.value ? viewInput.value : 'grid';
-    if (currentMode === nextMode) {
+    var form = document.getElementById('tracker-filters');
+    if (!form) {
         return;
     }
-    window.setDashboardViewMode(nextMode, true);
+    Array.prototype.forEach.call(form.querySelectorAll('details.filter-multi-select input[type="checkbox"]:checked'), function (box) {
+        box.checked = false;
+    });
+    var search = form.querySelector('input[name="q"]');
+    if (search) {
+        search.value = '';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    cancelSearchDebounce();
+    window.updateFilterSummaries();
+    var pageInput = document.getElementById('page-input');
+    if (pageInput) {
+        pageInput.value = '1';
+    }
+    var clearButton = document.getElementById('dashboard-search-clear');
+    if (clearButton) {
+        clearButton.hidden = true;
+    }
+    window.dispatchTrackersChanged('user');
 });
 
 document.addEventListener('click', function (event) {
-    var closeDropdownIfOutside = function (dropdownID) {
-        var dropdown = document.getElementById(dropdownID);
-        if (!dropdown || !dropdown.hasAttribute('open')) {
-            return;
+    // Every filter dropdown closes on a click outside it.
+    Array.prototype.forEach.call(document.querySelectorAll('details.filter-multi-select[open]'), function (dropdown) {
+        if (!dropdown.contains(event.target)) {
+            dropdown.removeAttribute('open');
         }
-        if (dropdown.contains(event.target)) {
-            return;
-        }
-        dropdown.removeAttribute('open');
-    };
-
-    closeDropdownIfOutside('filter-tags-dropdown');
-    closeDropdownIfOutside('filter-sites-dropdown');
+    });
 
     // The connector strip's "+N" menu is a <details> too, and nothing closed
     // it: it stayed open over the cards, and while open it held off every
@@ -999,29 +1103,16 @@ document.addEventListener('click', function (event) {
     window.dispatchTrackersChanged('user');
 });
 
-window.renderTrackersSkeleton = function (viewMode) {
+window.renderTrackersSkeleton = function () {
     var trackersZone = document.getElementById('trackers-zone');
     if (!trackersZone) {
         return;
     }
 
-    var mode = (viewMode === 'list') ? 'list' : 'grid';
     var itemCount = 6;
     var items = [];
 
     for (var i = 0; i < itemCount; i += 1) {
-        if (mode === 'list') {
-            items.push('' +
-                '<article class="tracker-row tracker-card tracker-row--skeleton">' +
-                    '<div class="tracker-row__title-wrap"><div class="skeleton skeleton--title skeleton--title-wide"></div></div>' +
-                    '<div class="tracker-row__status"><div class="skeleton skeleton--badge"></div></div>' +
-                    '<div class="tracker-row__metric"><div class="skeleton skeleton--chip"></div><div class="skeleton skeleton--line skeleton--line-short"></div></div>' +
-                    '<div class="tracker-row__metric"><div class="skeleton skeleton--chip"></div><div class="skeleton skeleton--line skeleton--line-short"></div></div>' +
-                    '<div class="tracker-row__actions"><div class="skeleton skeleton--btn"></div><div class="skeleton skeleton--btn"></div><div class="skeleton skeleton--btn"></div></div>' +
-                '</article>');
-            continue;
-        }
-
         items.push('' +
             '<article class="tracker-card tracker-card--skeleton">' +
                 '<div class="skeleton skeleton--title"></div>' +
@@ -1033,7 +1124,7 @@ window.renderTrackersSkeleton = function (viewMode) {
 
     trackersZone.innerHTML = '' +
         '<p class="trackers-loading__label">Loading trackers…</p>' +
-        '<div class="' + (mode === 'list' ? 'cards-list' : 'cards-grid') + '">' + items.join('') + '</div>';
+        '<div class="cards-grid">' + items.join('') + '</div>';
 };
 
 // A silent cover refresh replaces the whole trackers region. A hovered link
@@ -1241,6 +1332,8 @@ document.body.addEventListener('htmx:beforeRequest', function (event) {
         return;
     }
 
+    rememberFiltersInURL();
+
     var trackersZone = detail.target;
 
     // A page button below the list takes the reader to the top of the list
@@ -1264,9 +1357,7 @@ document.body.addEventListener('htmx:beforeRequest', function (event) {
     // response is in (htmx:afterSwap, or htmx:afterRequest when it fails).
     trackersZone.style.minHeight = trackersZone.offsetHeight + 'px';
 
-    var viewInput = document.getElementById('view-input');
-    var mode = viewInput && viewInput.value ? viewInput.value : 'grid';
-    window.renderTrackersSkeleton(mode);
+    window.renderTrackersSkeleton();
 });
 
 document.body.addEventListener('htmx:afterRequest', function (event) {
@@ -1304,7 +1395,7 @@ document.body.addEventListener('htmx:afterRequest', function (event) {
     // belonged to the list that failed to come back, so it is not applied to
     // whichever list loads later.
     var failedZone = detail.target;
-    Array.prototype.forEach.call(failedZone.querySelectorAll('.trackers-loading__label, .tracker-card--skeleton, .tracker-row--skeleton'), function (node) {
+    Array.prototype.forEach.call(failedZone.querySelectorAll('.trackers-loading__label, .tracker-card--skeleton'), function (node) {
         node.remove();
     });
     failedZone.style.minHeight = '';
@@ -1320,8 +1411,46 @@ document.body.addEventListener('htmx:afterRequest', function (event) {
 // list has arrived — and only when it is the same list (the filters reset on a
 // reload, so a reader who was on page 3 or searching starts at the top) and
 // the reader has not already scrolled.
-var dashboardScrollKey = 'dashboard-scroll:' + window.location.pathname + window.location.search;
+// Keyed by page and profile, not by the full URL: the URL now changes with the
+// filters (rememberFiltersInURL), and the saved offset carries the filters it
+// was taken under anyway, which restoreDashboardScroll compares.
+var dashboardScrollKey = (function () {
+    var profileInput = document.getElementById('profile-filter');
+    var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
+    return 'dashboard-scroll:' + window.location.pathname + ':' + profileKey;
+})();
 var pendingDashboardScroll = null;
+
+// The filters a reader picks are written into the page's own URL (replacing
+// the history entry, never adding one), and the server renders the form from
+// it: a reload, a phone bringing a discarded tab back, or a Back from the Link
+// review page all open on the same list instead of the defaults. Defaults are
+// left out so the plain dashboard keeps its plain URL.
+var filterURLDefaults = { status: 'reading', sort: 'latest_known_chapter', page: '1', q: '' };
+
+var rememberFiltersInURL = function () {
+    var form = document.getElementById('tracker-filters');
+    if (!form || typeof window.FormData !== 'function' || !window.history || typeof window.history.replaceState !== 'function') {
+        return;
+    }
+    var params = new window.URLSearchParams();
+    new window.FormData(form).forEach(function (value, name) {
+        var text = String(value || '').trim();
+        if (text === '' || filterURLDefaults[name] === text) {
+            return;
+        }
+        params.append(name, text);
+    });
+    var query = params.toString();
+    var url = window.location.pathname + (query ? '?' + query : '');
+    if (url !== window.location.pathname + window.location.search) {
+        try {
+            window.history.replaceState(window.history.state, '', url);
+        } catch (_) {
+            // A sandboxed page may refuse; the filters just are not remembered.
+        }
+    }
+};
 
 var trackerFiltersState = function () {
     var form = document.getElementById('tracker-filters');
@@ -1451,14 +1580,15 @@ var reopenHeldMenus = function (zone) {
 
 // "No trackers found — add your first source entry" was all a profile whose
 // trackers are all caught up saw on opening: Reading, the default, leaves out
-// the trackers whose latest chapter has been read. On Reading the empty state
-// says so instead.
+// the trackers whose latest chapter has been read. On Reading alone the empty
+// state says so instead; with another filter on, Reading keeps them, so the
+// plain hint is the right one.
 var explainEmptyList = function (zone, list) {
     var empty = zone.querySelector('.empty-state');
     if (!empty || !list) {
         return;
     }
-    var onReading = listStatusFilter(list) === 'reading';
+    var onReading = listStatusFilter(list) === 'reading' && !listIsNarrowed(list.params);
     Array.prototype.forEach.call(empty.querySelectorAll('[data-empty-hint]'), function (hint) {
         hint.hidden = (hint.getAttribute('data-empty-hint') === 'reading') !== onReading;
     });
@@ -1509,10 +1639,7 @@ document.body.addEventListener('htmx:afterSwap', function (event) {
 
     if (target.closest && target.closest('#filter-tags-dropdown')) {
         restoreTickedFilterTags(target);
-        window.updateFilterTagsSummary();
-    }
-    if (target.closest && target.closest('#filter-sites-dropdown')) {
-        window.updateFilterSitesSummary();
+        window.updateFilterSummaries();
     }
 
     if (target.id !== 'trackers-zone') {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,11 @@ const (
 	// in any other shape is no date rather than a guess, because a wrong date
 	// would defeat the staleness guard below.
 	releaseDateLayout = "2006-01-02"
+
+	// maxCategoryTags bounds the categories kept as tags. A popular series
+	// carries a hundred or more user-submitted categories; the few with the most
+	// votes describe it, the long tail is one reader's opinion each.
+	maxCategoryTags = 10
 )
 
 // site is the connector's identity. The API host (api.mangaupdates.com), the
@@ -68,6 +74,12 @@ var (
 	// seriesIDPattern is the zero-padded base36 id a site URL carries.
 	seriesIDPattern = regexp.MustCompile(`(?i)^[0-9a-z]+$`)
 	numberPattern   = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)?`)
+	// yearPattern reads the start year off the front of the record's year,
+	// which is a string ("2026") and occasionally a range ("2019-2021").
+	yearPattern = regexp.MustCompile(`^\s*"?\s*([0-9]{4})(?:[^0-9]|$)`)
+	// statusNotePattern finds the parenthesised states in the free-text
+	// status ("75 Chapters (Ongoing)").
+	statusNotePattern = regexp.MustCompile(`\(([^()]*)\)`)
 )
 
 // Connector reads MangaUpdates through its JSON API. The embedded Site supplies
@@ -124,6 +136,40 @@ type apiSeriesRecord struct {
 	} `json:"associated"`
 }
 
+// apiSeriesMetadata is the descriptive half of the same /series/{id} record:
+// what kind of work it is, who made it, what it is about. It is decoded on its
+// own, from the body the resolve already holds, so that a field arriving in an
+// unexpected shape costs only that field — the series record above is what the
+// tracker cannot do without, and a stray type here must never fail it.
+//
+// Completed is MangaUpdates' "completely scanlated" flag, not the state in the
+// country of origin; but a series can only be completely scanlated once it has
+// ended, so true is a reliable "completed" while false says nothing.
+type apiSeriesMetadata struct {
+	Type      string          `json:"type"`
+	Year      json.RawMessage `json:"year"`
+	Status    string          `json:"status"`
+	Completed bool            `json:"completed"`
+	Genres    []struct {
+		Genre string `json:"genre"`
+	} `json:"genres"`
+	Categories  []apiCategory `json:"categories"`
+	Description string        `json:"description"`
+	Authors     []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	} `json:"authors"`
+	BayesianRating float64 `json:"bayesian_rating"`
+	RatingVotes    int     `json:"rating_votes"`
+}
+
+// apiCategory is one of a series' user-submitted categories ("Mind Reading",
+// "Virgin Male Lead") with the net votes it has gathered.
+type apiCategory struct {
+	Category string `json:"category"`
+	Votes    int    `json:"votes"`
+}
+
 // apiSearchResponse is a series search answer. HitTitle is the name the query
 // matched, which is often not the record's title: the primary title is
 // commonly the romanized original ("Shingeki no Kyojin") while an English
@@ -156,9 +202,15 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
-	var record apiSeriesRecord
-	if err := c.getJSON(ctx, "/series/"+strconv.FormatInt(seriesID, 10), &record); err != nil {
+	// The body is kept raw so the metadata can be read from it separately (see
+	// apiSeriesMetadata); decoding into RawMessage still rejects malformed JSON.
+	var body json.RawMessage
+	if err := c.getJSON(ctx, "/series/"+strconv.FormatInt(seriesID, 10), &body); err != nil {
 		return nil, fmt.Errorf("fetch mangaupdates series: %w", err)
+	}
+	var record apiSeriesRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return nil, fmt.Errorf("fetch mangaupdates series: decode response: %w", err)
 	}
 
 	latestChapter, releaseAt, err := c.latestRelease(ctx, seriesID, record.LatestChapter)
@@ -181,7 +233,138 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		CoverImageURL: strings.TrimSpace(record.Image.URL.Original),
 		LatestChapter: latestChapter,
 		LastUpdatedAt: releaseAt,
+		Metadata:      seriesMetadata(body),
 	}, nil
+}
+
+// seriesMetadata reads the descriptive fields out of a series record body, nil
+// when it carries none. A field of the wrong type is skipped by the decoder,
+// which still fills every other one, so the decode error is deliberately
+// ignored: whatever could be read is kept.
+func seriesMetadata(body []byte) *connectors.SeriesMetadata {
+	var raw apiSeriesMetadata
+	_ = json.Unmarshal(body, &raw)
+
+	metadata := &connectors.SeriesMetadata{
+		Type:        connectors.NormalizeSeriesType(raw.Type),
+		Status:      seriesStatus(raw.Status, raw.Completed),
+		Year:        parseYear(raw.Year),
+		Description: connectors.PlainDescription(raw.Description),
+	}
+
+	genres := make([]string, 0, len(raw.Genres))
+	for _, entry := range raw.Genres {
+		genres = append(genres, entry.Genre)
+	}
+	metadata.Genres = connectors.CleanLabels(genres)
+	metadata.Tags = topCategories(raw.Categories)
+
+	var authors, artists []string
+	for _, person := range raw.Authors {
+		// The record lists a creator once per role, so a mangaka who both
+		// writes and draws appears under both names lists.
+		if strings.EqualFold(strings.TrimSpace(person.Type), "artist") {
+			artists = append(artists, person.Name)
+		} else {
+			authors = append(authors, person.Name)
+		}
+	}
+	metadata.Authors = connectors.CleanLabels(authors)
+	metadata.Artists = connectors.CleanLabels(artists)
+
+	// The Bayesian average is the score the site itself displays; a series
+	// nobody has rated reports 0, which is no score rather than a bad one.
+	if raw.BayesianRating > 0 {
+		metadata.Rating = connectors.ParseRating(strconv.FormatFloat(raw.BayesianRating, 'f', -1, 64), 10)
+		if metadata.Rating != nil && raw.RatingVotes > 0 {
+			metadata.RatingVotes = raw.RatingVotes
+		}
+	}
+
+	if metadata.Empty() {
+		return nil
+	}
+	return metadata
+}
+
+// topCategories keeps the categories readers voted for, most votes first and
+// at most maxCategoryTags of them. A category nobody voted up is one user's
+// submission (often a spoiler or a joke), so it is left out.
+func topCategories(categories []apiCategory) []string {
+	voted := make([]int, 0, len(categories))
+	for index, entry := range categories {
+		if entry.Votes > 0 {
+			voted = append(voted, index)
+		}
+	}
+	// Stable, so categories with equal votes keep the site's order.
+	sort.SliceStable(voted, func(a, b int) bool {
+		return categories[voted[a]].Votes > categories[voted[b]].Votes
+	})
+	labels := make([]string, 0, len(voted))
+	for _, index := range voted {
+		labels = append(labels, categories[index].Category)
+	}
+	labels = connectors.CleanLabels(labels)
+	if len(labels) > maxCategoryTags {
+		labels = labels[:maxCategoryTags]
+	}
+	return labels
+}
+
+// seriesStatus maps the record's free-text "status in country of origin" onto
+// a SeriesStatus. The text is often more than one state: a manhwa with seasons
+// reads "75 Chapters (Ongoing)\n\nS1: 50 Chapters (Complete)\nS2: 25 Chapters
+// (Ongoing)", and handing that whole to the normalizer would answer
+// "completed", because a finished first season is mentioned. Each
+// parenthesised state (or, without any, each line) is therefore read on its
+// own, and a work is only finished when no part of it is still running: a
+// hiatus beats ongoing (it is the news about a running series), and either
+// beats cancelled, which beats completed.
+func seriesStatus(raw string, completed bool) string {
+	if completed {
+		return connectors.SeriesStatusCompleted
+	}
+
+	parts := make([]string, 0, 4)
+	for _, match := range statusNotePattern.FindAllStringSubmatch(raw, -1) {
+		parts = append(parts, match[1])
+	}
+	if len(parts) == 0 {
+		parts = strings.Split(raw, "\n")
+	}
+
+	seen := make(map[string]bool, 4)
+	for _, part := range parts {
+		if status := connectors.NormalizeSeriesStatus(part); status != "" {
+			seen[status] = true
+		}
+	}
+	for _, status := range []string{
+		connectors.SeriesStatusHiatus,
+		connectors.SeriesStatusOngoing,
+		connectors.SeriesStatusCancelled,
+		connectors.SeriesStatusCompleted,
+	} {
+		if seen[status] {
+			return status
+		}
+	}
+	return ""
+}
+
+// parseYear reads the year the series started, 0 when the record has none or
+// one no publication could have (the API keeps the field as free text).
+func parseYear(raw json.RawMessage) int {
+	match := yearPattern.FindSubmatch(raw)
+	if match == nil {
+		return 0
+	}
+	year, err := strconv.Atoi(string(match[1]))
+	if err != nil || year < 1800 || year > time.Now().Year()+1 {
+		return 0
+	}
+	return year
 }
 
 // latestRelease reads the newest releases and reduces them to one chapter

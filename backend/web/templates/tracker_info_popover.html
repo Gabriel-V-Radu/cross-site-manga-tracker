@@ -1,0 +1,75 @@
+{{/*
+The info panel a card's cover opens (dashboard-info.js fetches it on hover or
+click and places it beside the card). Everything here is stored data: the
+series metadata consolidated across the tracker's sites (internal/metadata)
+and its links. The genre and type chips are buttons that filter the list by
+that value.
+*/}}
+<div class="tracker-info" data-tracker-id="{{.ID}}">
+    <header class="tracker-info__header">
+        <h3 class="tracker-info__title">{{.Title}}</h3>
+        {{if .AltTitles}}
+        <p class="tracker-info__alt" title="Other titles">
+            {{range $index, $alt := .AltTitles}}{{if $index}} · {{end}}{{$alt}}{{end}}{{if gt .MoreAltTitles 0}} · +{{.MoreAltTitles}}{{end}}
+        </p>
+        {{end}}
+    </header>
+
+    {{if .HasMetadata}}
+    <div class="tracker-info__badges">
+        {{if .TypeLabel}}<button type="button" class="tracker-info__badge tracker-info__badge--type" data-filter-name="types" data-filter-value="{{.Type}}" data-filter-label="{{.TypeLabel}}" title="Show only {{.TypeLabel}}">{{.TypeLabel}}</button>{{end}}
+        {{if .StatusLabel}}<button type="button" class="tracker-info__badge tracker-info__badge--status tracker-info__badge--{{.Status}}" data-filter-name="publication" data-filter-value="{{.Status}}" data-filter-label="{{.StatusLabel}}" title="Show only {{.StatusLabel}} series">{{.StatusLabel}}</button>{{end}}
+        {{if .Year}}<span class="tracker-info__badge">{{.Year}}</span>{{end}}
+        {{if .Demographic}}<span class="tracker-info__badge">{{.Demographic}}</span>{{end}}
+        {{if .ContentRating}}<span class="tracker-info__badge tracker-info__badge--warn">{{.ContentRating}}</span>{{end}}
+    </div>
+
+    {{if .Ratings}}
+    <p class="tracker-info__ratings">
+        {{range $index, $rating := .Ratings}}{{if $index}}<span class="tracker-info__sep" aria-hidden="true">·</span>{{end}}<span class="tracker-info__rating" title="{{$rating.Source}} community score{{if $rating.Votes}}, {{$rating.Votes}} votes{{end}}"><strong>★ {{$rating.Value}}</strong> {{$rating.Source}}</span>{{end}}
+    </p>
+    {{end}}
+
+    {{if .Genres}}
+    <div class="tracker-info__genres" aria-label="Genres">
+        {{range .Genres}}<button type="button" class="tracker-info__genre" data-filter-name="genres" data-filter-value="{{.}}" data-filter-label="{{.}}" title="Filter by {{.}}">{{.}}</button>{{end}}
+    </div>
+    {{end}}
+
+    {{if or .Authors .Artists}}
+    <p class="tracker-info__people">
+        {{if .Authors}}<span>Story <strong>{{range $index, $name := .Authors}}{{if $index}}, {{end}}{{$name}}{{end}}</strong></span>{{end}}
+        {{if .Artists}}<span>Art <strong>{{range $index, $name := .Artists}}{{if $index}}, {{end}}{{$name}}{{end}}</strong></span>{{end}}
+    </p>
+    {{end}}
+
+    {{if .DescriptionParagraphs}}
+    <div class="tracker-info__description" data-collapsed="true">
+        {{range .DescriptionParagraphs}}<p>{{.}}</p>{{end}}
+    </div>
+    <button type="button" class="tracker-info__more" data-toggle-description hidden>Read more</button>
+    {{end}}
+
+    {{if .Tags}}
+    <div class="tracker-info__tags" aria-label="Tags">
+        {{range .Tags}}<span class="tracker-info__tag">{{.}}</span>{{end}}
+    </div>
+    {{end}}
+    {{else}}
+    <p class="tracker-info__empty">No series info yet. It is collected the next time the poller checks this title.</p>
+    {{end}}
+
+    {{if .Sites}}
+    <nav class="tracker-info__sites" aria-label="Open on">
+        {{range .Sites}}
+        <a class="tracker-info__site{{if not .LogoURL}} tracker-info__site--text{{end}}" href="{{.URL}}" target="_blank" rel="noopener noreferrer" title="Open on {{.Name}}">
+            {{if .LogoURL}}<img src="{{.LogoURL}}" alt="" loading="lazy">{{end}}<span>{{.Name}}</span>
+        </a>
+        {{end}}
+    </nav>
+    {{end}}
+
+    {{if .Sources}}
+    <p class="tracker-info__footer">Info from {{.Sources}}{{if .DescriptionSource}} · synopsis from {{.DescriptionSource}}{{end}}{{if .UpdatedAgo}} · updated {{.UpdatedAgo}}{{end}}</p>
+    {{end}}
+</div>

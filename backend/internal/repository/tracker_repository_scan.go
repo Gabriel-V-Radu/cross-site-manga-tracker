@@ -13,6 +13,18 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// trackerColumns is the select list scanTracker reads, in its order. It used to
+// be spelled out at each query, and a column added to one copy and not the
+// other was a scan error waiting for the first request.
+const trackerColumns = `
+	trackers.id, trackers.profile_id, trackers.title, trackers.related_titles, trackers.source_id,
+	trackers.source_item_id, trackers.source_url, trackers.status, trackers.last_read_chapter,
+	trackers.rating, trackers.last_read_at, trackers.latest_known_chapter, trackers.latest_release_at,
+	trackers.latest_chapter_seen_at, trackers.latest_chapter_source_id, trackers.last_checked_at,
+	trackers.reading_source_id, trackers.created_at, trackers.updated_at,
+	trackers.latest_chapter_found_at
+`
+
 func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var tracker models.Tracker
 	var relatedTitlesRaw sql.NullString
@@ -26,7 +38,9 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 	var latestChapterSourceID sql.NullInt64
 	var lastCheckedAt sql.NullTime
 	var readingSourceID sql.NullInt64
+	var latestChapterFoundAt sql.NullTime
 
+	// trackerColumns lists these columns in this order.
 	err := scanner.Scan(
 		&tracker.ID,
 		&tracker.ProfileID,
@@ -47,9 +61,13 @@ func scanTracker(scanner rowScanner) (*models.Tracker, error) {
 		&readingSourceID,
 		&tracker.CreatedAt,
 		&tracker.UpdatedAt,
+		&latestChapterFoundAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if latestChapterFoundAt.Valid {
+		tracker.LatestChapterFoundAt = &latestChapterFoundAt.Time
 	}
 
 	if sourceItemID.Valid {

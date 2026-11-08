@@ -3,8 +3,9 @@
 //
 // Endpoints used:
 //   - GET /ping                                → liveness, answers plain text
-//   - GET /manga/{id}?includes[]=cover_art     → titles, alt titles, cover,
-//     and attributes.lastChapter
+//   - GET /manga/{id}?includes[]=cover_art&includes[]=author&includes[]=artist
+//     → titles, alt titles, cover, attributes.lastChapter, and the series
+//     metadata (type, status, tags, synopsis, author and artist names)
 //   - GET /manga?title=&limit=                 → search
 //   - GET /manga/{id}/feed?translatedLanguage[]=en&order[chapter]=desc
 //     → the English chapters, the only place release dates come from, and the
@@ -124,8 +125,13 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
+	// The author and artist relationships are expanded on the same request so
+	// their names arrive with the record; without the includes they are bare
+	// ids that would each cost a request of their own.
 	values := url.Values{}
 	values.Add("includes[]", "cover_art")
+	values.Add("includes[]", "author")
+	values.Add("includes[]", "artist")
 
 	var payload mangaByIDResponse
 	if err := connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+"/manga/"+titleID+"?"+values.Encode(), &payload); err != nil {
@@ -173,6 +179,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		CoverImageURL: pickCoverImageURL(payload.Data.ID, payload.Data.Relationships),
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestReleaseAt,
+		Metadata:      seriesMetadata(payload.Data.Attributes.mangaMetadataAttributes, payload.Data.Relationships),
 	}, nil
 }
 
@@ -463,6 +470,7 @@ type mangaByIDResponse struct {
 			Title       map[string]string   `json:"title"`
 			AltTitles   []map[string]string `json:"altTitles"`
 			LastChapter string              `json:"lastChapter"`
+			mangaMetadataAttributes
 		} `json:"attributes"`
 		Relationships []mangaRelationship `json:"relationships"`
 	} `json:"data"`
@@ -480,10 +488,14 @@ type mangaSearchResponse struct {
 	} `json:"data"`
 }
 
+// mangaRelationship is one expanded relationship: a cover_art carries its
+// fileName, an author or artist (on the by-id request, which asks for them) its
+// name.
 type mangaRelationship struct {
 	Type       string `json:"type"`
 	Attributes struct {
-		FileName string `json:"fileName"`
+		FileName string      `json:"fileName"`
+		Name     looseString `json:"name"`
 	} `json:"attributes"`
 }
 

@@ -83,7 +83,12 @@ type comicRecord struct {
 	title         string
 	coverURL      string
 	relatedTitles []string
-	fetchedAt     time.Time
+	// metadata is set only on a record built from the /comic/{slug} response.
+	// A record seeded from search results stays without it — the search row is
+	// slimmer — and a resolve served from such a record reports no metadata
+	// rather than spending the request the seeding exists to save.
+	metadata  *connectors.SeriesMetadata
+	fetchedAt time.Time
 }
 
 // Connector reads ComicK through its JSON API. The embedded Site supplies Key,
@@ -157,8 +162,13 @@ type apiComic struct {
 	MDCovers []apiCover `json:"md_covers"`
 }
 
+// apiComicResponse is the /comic/{slug} answer. The people and the demographic
+// label sit beside the comic object, not inside it.
 type apiComicResponse struct {
-	Comic apiComic `json:"comic"`
+	Comic       apiComicDetail `json:"comic"`
+	Authors     looseLabels    `json:"authors"`
+	Artists     looseLabels    `json:"artists"`
+	Demographic looseString    `json:"demographic"`
 }
 
 type apiChapter struct {
@@ -206,6 +216,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 
 	result := c.resultFromRecord(slug, record)
+	result.Metadata = cloneMetadata(record.metadata)
 	if latest != nil {
 		result.LatestChapter = latest
 		result.LastUpdatedAt = publishedAt
@@ -230,7 +241,7 @@ func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecor
 	if err := c.fetchJSON(ctx, endpoint, &comicResponse); err != nil {
 		return comicRecord{}, fmt.Errorf("fetch comick comic: %w", err)
 	}
-	comic := comicResponse.Comic
+	comic := comicResponse.Comic.apiComic
 	if strings.TrimSpace(comic.HID) == "" {
 		// A record without a hid is the API's way of saying the slug names no
 		// comic; typed as a 404 so callers classify it with IsNotFound.
@@ -238,6 +249,7 @@ func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecor
 	}
 
 	record = recordFromComic(comic)
+	record.metadata = comicResponse.metadata()
 	c.storeComic(slug, record)
 	return record, nil
 }
@@ -246,6 +258,21 @@ func (c *Connector) storeComic(slug string, record comicRecord) {
 	c.mu.Lock()
 	c.comics[slug] = record
 	c.mu.Unlock()
+}
+
+// seedComic caches a record built from a search row, unless the cache already
+// holds a fresh record from the comic endpoint for the same comic. The search
+// row is the slimmer of the two, so replacing the full record would cost every
+// resolve until the TTL lapses the metadata it had — and searches routinely
+// cover slugs that were just resolved (the link scan searches by tracker
+// title).
+func (c *Connector) seedComic(slug string, record comicRecord) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.comics[slug]; ok && existing.metadata != nil && existing.hid == record.hid && time.Since(existing.fetchedAt) < comicCacheTTL {
+		return
+	}
+	c.comics[slug] = record
 }
 
 func (c *Connector) forgetComic(slug string) {
@@ -275,10 +302,12 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if slug == "" || strings.TrimSpace(comic.HID) == "" {
 			continue
 		}
-		// The search payload carries the whole comic record, so it seeds the
-		// cache: a resolve right after a search costs one request.
+		// The search payload carries the comic record's identity (hid, title,
+		// cover), so it seeds the cache: a resolve right after a search costs
+		// one request. It does not carry the metadata in the form the comic
+		// endpoint does, so a resolve served from a seeded record reports none.
 		record := recordFromComic(comic)
-		c.storeComic(slug, record)
+		c.seedComic(slug, record)
 		if !query.Matches(append([]string{record.title, slug}, record.relatedTitles...)...) {
 			continue
 		}

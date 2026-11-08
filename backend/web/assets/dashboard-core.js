@@ -163,37 +163,6 @@ window.isQuietListRequest = function (detail) {
     return !!(source && source.id === 'trackers-quiet-refresh');
 };
 
-window.setDashboardViewMode = function (mode, shouldRefresh) {
-    var nextMode = (mode === 'list') ? 'list' : 'grid';
-    var viewInput = document.getElementById('view-input');
-    var currentMode = viewInput && viewInput.value ? viewInput.value : 'grid';
-
-    if (shouldRefresh && currentMode === nextMode) {
-        return;
-    }
-
-    if (viewInput) {
-        viewInput.value = nextMode;
-    }
-
-    var options = document.querySelectorAll('[data-view-mode]');
-    Array.prototype.forEach.call(options, function (option) {
-        var isActive = option.getAttribute('data-view-mode') === nextMode;
-        option.classList.toggle('view-toggle__option--active', isActive);
-        option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-    });
-
-    if (!shouldRefresh) {
-        return;
-    }
-
-    var pageInput = document.getElementById('page-input');
-    if (pageInput) {
-        pageInput.value = '1';
-    }
-    window.dispatchTrackersChanged('user');
-};
-
 // A mutation that fails leaves htmx doing nothing: 4xx and 5xx responses are
 // not swapped, so without this the modal stayed open with its "Saving…"
 // indicator gone and no word of what went wrong — a tracker half-saved by a bad
@@ -254,7 +223,7 @@ var requestErrorPlacement = function (elt, target) {
         if (popover) {
             return { host: popover, before: popover.querySelector(':scope > .tracker-rating__actions') };
         }
-        var actions = elt.closest('.card-actions, .tracker-row__actions');
+        var actions = elt.closest('.card-actions');
         if (actions && actions.parentNode === card) {
             return { host: card, before: actions.nextSibling };
         }

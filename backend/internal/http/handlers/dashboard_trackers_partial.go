@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
@@ -27,18 +28,20 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		statuses = append(statuses, status)
 	}
 
-	viewMode := normalizeViewMode(c.Query("view", "grid"))
 	page := parsePositiveInt(c.Query("page", "1"), 1)
 	const pageSize = 24
 
 	listOptions := repository.TrackerListOptions{
-		ProfileID: activeProfile.ID,
-		Statuses:  statuses,
-		TagNames:  parseTagNamesFromQuery(c),
-		SourceIDs: parseSourceIDsFromQuery(c),
-		SortBy:    strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
-		Order:     strings.TrimSpace(c.Query("order", "desc")),
-		Query:     strings.TrimSpace(c.Query("q")),
+		ProfileID:      activeProfile.ID,
+		Statuses:       statuses,
+		TagNames:       parseTagNamesFromQuery(c),
+		SourceIDs:      parseSourceIDsFromQuery(c),
+		SeriesTypes:    queryValues(c, "types"),
+		SeriesStatuses: queryValues(c, "publication"),
+		Genres:         queryValues(c, "genres"),
+		SortBy:         strings.TrimSpace(c.Query("sort", "latest_known_chapter")),
+		Order:          strings.TrimSpace(c.Query("order", "desc")),
+		Query:          strings.TrimSpace(c.Query("q")),
 	}
 
 	totalTrackers, err := h.trackerRepo.Count(c.Context(), listOptions)
@@ -115,7 +118,6 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		Trackers:      cards,
 		SiteLinks:     topSiteLinks,
 		MoreSiteLinks: moreSiteLinks,
-		ViewMode:      viewMode,
 		Page:          page,
 		PrevPage:      max(1, page-1),
 		NextPage:      min(totalPages, page+1),
@@ -129,13 +131,44 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 	})
 }
 
-func normalizeViewMode(raw string) string {
-	viewMode := strings.TrimSpace(raw)
-	if viewMode != "grid" && viewMode != "list" {
-		return "grid"
+// queryValues reads every value of a repeated query parameter (?genres=a&
+// genres=b), trimmed, blanks dropped. Values are matched against stored
+// vocabulary as they are, so anything unexpected simply matches nothing.
+func queryValues(c *fiber.Ctx, key string) []string {
+	values := make([]string, 0)
+	for _, raw := range c.Context().QueryArgs().PeekMulti(key) {
+		if value := strings.TrimSpace(string(raw)); value != "" {
+			values = append(values, value)
+		}
 	}
-	return viewMode
+	return values
 }
+
+// unreadLabels words how far the reader is behind the latest chapter: "+3"
+// for the cover badge and "3 chapters to read" for its tooltip. Nothing when
+// the reader is caught up, has not started (a plan-to-read badge of "+250"
+// says nothing), or no chapter is known. The count is the difference between
+// the numbers, so a run with half-chapters reads as e.g. "+1.5".
+func unreadLabels(lastRead, latest *float64) (string, string) {
+	if lastRead == nil || latest == nil {
+		return "", ""
+	}
+	pending := math.Round((*latest-*lastRead)*10) / 10
+	if pending <= 0 {
+		return "", ""
+	}
+	count := strconv.FormatFloat(pending, 'f', -1, 64)
+	noun := "chapters"
+	if pending == 1 {
+		noun = "chapter"
+	}
+	return "+" + count, count + " " + noun + " to read"
+}
+
+// lateFindGap is how much later than its release date a chapter must have been
+// found for the card to show the find instead: within it the two are the same
+// day for anyone reading the card, and the release date is the truer one.
+const lateFindGap = 48 * time.Hour
 
 func parsePositiveInt(raw string, fallback int) int {
 	value, err := strconv.Atoi(strings.TrimSpace(raw))
@@ -254,7 +287,18 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 	// left the user no way to tell a finished series from one that updated
 	// today. When no date was ever reported, the card falls back to when this
 	// app first saw the chapter and marks the value as approximate.
-	if item.LatestReleaseAt != nil {
+	if item.LatestReleaseAt != nil && item.LatestChapterFoundAt != nil &&
+		item.LatestChapterFoundAt.Sub(*item.LatestReleaseAt) > lateFindGap {
+		// Found by a poll long after its release (a slowly polled finished
+		// series, a site that indexed it late). The list ranks it by the find,
+		// so the card says that; the release date stays in the hover text.
+		card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
+		card.LatestReleaseAgo = "found " + relativeTime(*item.LatestChapterFoundAt)
+		card.LatestReleaseFound = true
+		card.LatestReleaseTitle = "Released " + card.LatestReleaseFormatted + " UTC (" +
+			relativeTime(*item.LatestReleaseAt) + "); this app found it on " +
+			item.LatestChapterFoundAt.Format("2006-01-02 15:04") + " UTC."
+	} else if item.LatestReleaseAt != nil {
 		card.LatestReleaseFormatted = item.LatestReleaseAt.Format("2006-01-02 15:04")
 		card.LatestReleaseAgo = relativeTime(*item.LatestReleaseAt)
 	} else if item.LatestChapterSeenAt != nil {
@@ -280,6 +324,8 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 	if item.Rating != nil {
 		card.RatingLabel = formatRatingLabel(*item.Rating)
 	}
+
+	card.UnreadLabel, card.UnreadTitle = unreadLabels(item.LastReadChapter, item.LatestKnownChapter)
 
 	source := sourceByID[item.SourceID]
 	sourceKey := strings.TrimSpace(source.Key)

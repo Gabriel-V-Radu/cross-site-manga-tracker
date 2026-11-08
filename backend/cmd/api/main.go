@@ -11,6 +11,7 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/app"
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
 	apihttp "github.com/gabriel/cross-site-tracker/backend/internal/http"
+	"github.com/gabriel/cross-site-tracker/backend/internal/metadata"
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 	"github.com/gabriel/cross-site-tracker/backend/internal/scheduler"
 )
@@ -46,12 +47,23 @@ func run() int {
 	}
 
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	// The series metadata the poller's resolves carry is stored and merged
+	// per tracker by this service. Its backfill asks sites directly, so it
+	// only runs where polling is on; the views are kept current either way.
+	metadataService := metadata.NewService(
+		repository.NewMetadataRepository(db),
+		connectorRegistry,
+		metadata.Config{Backfill: cfg.PollingEnabled},
+		slog.Default(),
+	)
+	metadataService.Start(pollerCtx)
 	poller := scheduler.NewPoller(
 		repository.NewTrackerRepository(db),
 		connectorRegistry,
 		scheduler.PollerConfig{
 			Interval:     time.Duration(cfg.PollingMinutes) * time.Minute,
 			IdleInterval: time.Duration(cfg.PollingIdleMinutes) * time.Minute,
+			Metadata:     metadataService,
 		},
 		slog.Default(),
 	)
@@ -93,6 +105,7 @@ func run() int {
 	}
 	pollerCancel()
 	poller.StopWait(2 * time.Second)
+	metadataService.StopWait(2 * time.Second)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := app.ShutdownWithContext(shutdownCtx); err != nil {

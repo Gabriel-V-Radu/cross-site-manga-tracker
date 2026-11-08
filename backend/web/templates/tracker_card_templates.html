@@ -10,77 +10,14 @@ data-last-read, data-latest): dashboard-trackers.js reads them to tell whether
 a new or edited card belongs on the list on screen — Reading leaves out a
 tracker whose last read chapter has reached the latest.
 
-The title is repeated in a title attribute: the card clamps it to two lines
-and the row to one, and the hover text is the only way to read it whole.
+The title is repeated in a title attribute: the card clamps it to two lines,
+and the hover text is the only way to read it whole.
+
+The cover is a button that opens the series info panel (dashboard-info.js):
+on hover after a short pause with a mouse, on click or tap, and from the
+keyboard. The source badge and the rating toggle sit above it, so neither
+opens the panel.
 */}}
-{{define "tracker_card_list"}}
-<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}">
-{{template "tracker_card_list_body" .}}
-</article>
-{{end}}
-
-{{define "tracker_card_list_body"}}
-    <div class="tracker-row__title-wrap">
-        <h3 title="{{.Title}}">{{.Title}}</h3>
-    </div>
-
-    <div class="tracker-row__status">
-        <span class="badge badge--status badge--status-{{.Status}}" title="{{.StatusLabel}}">{{.StatusLabel}}</span>
-    </div>
-
-    <div class="tracker-row__metric">
-        {{if .LastReadChapterRaw}}
-        <a class="tracker-row__chapter tracker-row__chapter-link"
-                href="{{.LastReadChapterURL}}"
-           target="_blank"
-           {{if .LastReadChapterSite}}title="Opens on {{.LastReadChapterSite}}"{{end}}
-           rel="noopener noreferrer">{{.LastReadChapter}}</a>
-        {{else}}
-        <span class="tracker-row__chapter">{{.LastReadChapter}}</span>
-        {{end}}
-        <span class="tracker-row__time">Read {{.LastReadAgo}}</span>
-    </div>
-
-    <div class="tracker-row__metric">
-        {{if .LatestKnownChapterRaw}}
-        <a class="tracker-row__chapter tracker-row__chapter--accent tracker-row__chapter-link"
-                href="{{.LatestKnownChapterURL}}"
-           target="_blank"
-           {{if .LatestKnownChapterSite}}title="Opens on {{.LatestKnownChapterSite}}"{{end}}
-           rel="noopener noreferrer">{{.LatestKnownChapter}}</a>
-        {{else}}
-        <span class="tracker-row__chapter tracker-row__chapter--accent">{{.LatestKnownChapter}}</span>
-        {{end}}
-        <span class="tracker-row__time{{if .LatestReleaseApproximate}} stat-value--approx{{end}}"
-              {{if .LatestReleaseTitle}}title="{{.LatestReleaseTitle}}"{{end}}>Released {{.LatestReleaseAgo}}</span>
-    </div>
-
-    <div class="tracker-row__actions">
-        <button type="button"
-                class="mini-btn"
-                hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
-            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
-                hx-target="#modal-zone"
-                hx-swap="innerHTML">Set last read</button>
-        <a class="mini-btn mini-btn--highlight"
-           href="{{if .HighlightURL}}{{.HighlightURL}}{{else}}{{.SourceURL}}{{end}}"
-           target="_blank"
-           rel="noopener noreferrer">Open</a>
-        <button type="button"
-                class="mini-btn"
-                hx-get="/dashboard/trackers/{{.ID}}/edit"
-                hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
-                hx-target="#modal-zone"
-                hx-swap="innerHTML">Edit</button>
-        <button type="button"
-                class="mini-btn mini-btn--danger"
-                hx-post="/dashboard/trackers/{{.ID}}/delete"
-                hx-target="#modal-zone"
-                hx-swap="innerHTML"
-                hx-confirm="Delete this tracker?">Delete</button>
-    </div>
-{{end}}
-
 {{define "tracker_rating_popover"}}
 <details class="tracker-rating">
     <summary class="tracker-rating__toggle" title="Set rating">
@@ -93,8 +30,7 @@ and the row to one, and the hover text is the only way to read it whole.
           data-saved-rating="{{if .Rating}}{{.RatingLabel}}{{else}}0.0{{end}}"
           hx-post="/dashboard/trackers/{{.ID}}/rating"
           hx-target="this"
-          hx-swap="none"
-          hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'>
+          hx-swap="none">
         <p class="tracker-rating__label">Rating</p>
         <input type="hidden"
                class="js-rating-input"
@@ -131,11 +67,20 @@ and the row to one, and the hover text is the only way to read it whole.
     </header>
 
     <div class="tracker-card__cover">
-        {{if .CoverURL}}
-        <img src="{{coverSrc .CoverURL}}" alt="{{.Title}} cover" loading="lazy" referrerpolicy="no-referrer">
-        {{else}}
-        <div class="tracker-card__cover-title">{{.Title}}</div>
-        {{end}}
+        <button type="button"
+                class="tracker-card__info-trigger"
+                data-info-url="/dashboard/trackers/{{.ID}}/info"
+                aria-haspopup="dialog"
+                aria-label="Series info: {{.Title}}">
+            {{if .CoverURL}}
+            <img src="{{coverSrc .CoverURL}}" alt="" loading="lazy" referrerpolicy="no-referrer">
+            {{else}}
+            <span class="tracker-card__cover-title">{{.Title}}</span>
+            {{end}}
+            {{if .UnreadLabel}}
+            <span class="tracker-card__unread" title="{{.UnreadTitle}}">{{.UnreadLabel}}</span>
+            {{end}}
+        </button>
         {{if .SourceLogoLabel}}
         <span class="tracker-card__source-logo{{if not .SourceLogoURL}} tracker-card__source-logo--text{{end}}" title="{{.SourceLogoLabel}}">
             {{if .SourceLogoURL}}
@@ -177,7 +122,7 @@ and the row to one, and the hover text is the only way to read it whole.
         </div>
         <div class="stat-row">
             <span class="stat-label">Release Date:</span>
-            <span class="stat-value{{if .LatestReleaseApproximate}} stat-value--approx{{end}}"
+            <span class="stat-value{{if .LatestReleaseApproximate}} stat-value--approx{{end}}{{if .LatestReleaseFound}} stat-value--found{{end}}"
                   {{if .LatestReleaseTitle}}title="{{.LatestReleaseTitle}}"{{end}}>{{.LatestReleaseAgo}}</span>
         </div>
         <div class="stat-row">
@@ -202,7 +147,6 @@ and the row to one, and the hover text is the only way to read it whole.
         <button type="button"
                 class="mini-btn"
                 hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
-            hx-vals='js:{view_mode: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Set last read</button>
         <a class="mini-btn mini-btn--highlight"
@@ -215,7 +159,6 @@ and the row to one, and the hover text is the only way to read it whole.
         <button type="button"
                 class="mini-btn"
                 hx-get="/dashboard/trackers/{{.ID}}/edit"
-                hx-vals='js:{view: (document.getElementById("view-input") && document.getElementById("view-input").value) ? document.getElementById("view-input").value : "grid"}'
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Edit</button>
         <button type="button"

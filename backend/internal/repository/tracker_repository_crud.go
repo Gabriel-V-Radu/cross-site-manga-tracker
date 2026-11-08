@@ -26,12 +26,7 @@ func (r *TrackerRepository) Create(ctx context.Context, tracker *models.Tracker)
 }
 
 func (r *TrackerRepository) GetByID(ctx context.Context, profileID int64, id int64) (*models.Tracker, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT
-			id, profile_id, title, related_titles, source_id, source_item_id, source_url, status,
-			last_read_chapter, rating, last_read_at, latest_known_chapter, latest_release_at,
-			latest_chapter_seen_at, latest_chapter_source_id, last_checked_at, reading_source_id,
-			created_at, updated_at
+	row := r.db.QueryRowContext(ctx, `SELECT `+trackerColumns+`
 		FROM trackers
 		WHERE id = ? AND profile_id = ?
 	`, id, profileID)

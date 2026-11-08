@@ -177,6 +177,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if resolveErr != nil && !errors.Is(resolveErr, connectors.ErrNoChaptersListed) {
 			continue
 		}
+		// The series page read for the match carries the metadata too, but a
+		// search row is not where it is stored: only a resolve reports it.
+		resolved.Metadata = nil
 
 		results = append(results, *resolved)
 	}
@@ -315,6 +318,7 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
+		Metadata:      extractMetadata(body),
 	}
 	// A series page that loads but yields no chapter is a failed resolve, not
 	// "nothing new": Asura has redesigned before, and once its chapter links

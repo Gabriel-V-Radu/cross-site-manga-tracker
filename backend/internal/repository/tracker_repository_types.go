@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -10,11 +11,58 @@ type TrackerListOptions struct {
 	Statuses  []string
 	TagNames  []string
 	SourceIDs []int64
-	SortBy    string
-	Order     string
-	Query     string
-	Limit     int
-	Offset    int
+	// SeriesTypes and SeriesStatuses match a tracker whose consolidated
+	// metadata has any of the values (connectors.SeriesType*/SeriesStatus*);
+	// Genres one that has every genre listed.
+	SeriesTypes    []string
+	SeriesStatuses []string
+	Genres         []string
+	SortBy         string
+	Order          string
+	Query          string
+	Limit          int
+	Offset         int
+}
+
+// Narrowed reports whether the list is filtered by anything besides status:
+// a search, a site, a tag, a type, a publication status or a genre. Reading
+// stops leaving out caught-up trackers then (buildTrackerListFilters).
+func (o TrackerListOptions) Narrowed() bool {
+	if strings.TrimSpace(o.Query) != "" {
+		return true
+	}
+	for _, id := range o.SourceIDs {
+		if id > 0 {
+			return true
+		}
+	}
+	for _, values := range [][]string{o.TagNames, o.SeriesTypes, o.SeriesStatuses, o.Genres} {
+		if len(distinctTrimmed(values)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// distinctTrimmed drops blanks and exact duplicates, keeping order.
+func distinctTrimmed(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 type TrackerRepository struct {
@@ -44,6 +92,15 @@ type PollingTracker struct {
 	// number, nil until some poll confirms it. The poller reads it to know
 	// whether a confirming poll should backfill it.
 	LatestChapterSourceID *int64
+	// LatestChapterSeenAt and LatestChapterFoundAt are the trackers columns of
+	// the same names; with LatestReleaseAt they tell the poller how long the
+	// series has been quiet.
+	LatestChapterSeenAt  *time.Time
+	LatestChapterFoundAt *time.Time
+	// SeriesStatus is the consolidated publication status
+	// (connectors.SeriesStatus*), "" when no site has said. A finished or
+	// paused series that has also gone quiet is polled less often.
+	SeriesStatus string
 	// PrimaryLastPolledAt is the primary's last_polled_at, read from the
 	// mirror row UpdatePollingState keeps for it in tracker_sources; nil when
 	// the poller has not asked the primary since the column exists.

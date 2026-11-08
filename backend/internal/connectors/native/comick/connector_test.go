@@ -30,6 +30,8 @@ func kagurabachiHandler(t *testing.T) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
 			{"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi",
+			 "status":1,"country":"jp","demographic":1,"year":2023,"bayesian_rating":"8.54","genres":[244,245,246],
+			 "desc":"Young Chihiro spends his days training under his famous swordsmith father.",
 			 "md_titles":[{"title":"Kagurabachi"},{"title":"Kagura Bowl"},{"title":"カグラバチ"}],
 			 "md_covers":[{"b2key":"KrNwor.jpg"}]},
 			{"hid":"","slug":"broken","title":"Missing HID"}
@@ -37,9 +39,29 @@ func kagurabachiHandler(t *testing.T) http.Handler {
 	})
 	mux.HandleFunc("/comic/kagura-bachi", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"comic":{"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi",
+		// The metadata fields mirror the live response's shape (verified on
+		// /comic/kagura-bachi in 2026-11): people and the demographic label
+		// beside the comic object, a numeric status and demographic inside it,
+		// bayesian_rating as a string, tags in MangaDex-style groups.
+		_, _ = w.Write([]byte(`{"comic":{"id":122017,"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi",
+			"country":"jp","status":1,"last_chapter":128,"demographic":1,"year":2023,
+			"desc":"Young Chihiro spends his days training under his famous swordsmith father. The goofy father and the serious son--they thought these days would last forever.\n\nBut suddenly, tragedy strikes.",
+			"bayesian_rating":"8.54","rating_count":1733,"content_rating":"safe","translation_status":"ongoing",
+			"statistics":[{"score_count":1733,"weighted_score":"8.54","score":"8.6"}],
+			"md_comic_md_genres":[
+				{"md_genres":{"name":"Action","type":"main","slug":"action","group":"Genre"}},
+				{"md_genres":{"name":"Award Winning","type":null,"slug":"award-winning","group":"Format"}},
+				{"md_genres":{"name":"Comedy","type":"main","slug":"comedy","group":"Genre"}},
+				{"md_genres":{"name":"Supernatural","type":"main","slug":"supernatural","group":"Theme"}},
+				{"md_genres":{"name":"Gore","type":null,"slug":"gore","group":"Content"}},
+				{"md_genres":{"name":"Ninja","type":null,"slug":"ninja","group":"Theme"}}
+			],
 			"md_titles":[{"title":"Kagura Bowl"},{"title":"カグラバチ"}],
-			"md_covers":[{"b2key":"KrNwor.jpg"}]}}`))
+			"md_covers":[{"b2key":"KrNwor.jpg"}]},
+			"firstChap":{"chap":"1","hid":"first","lang":"en"},
+			"artists":[{"name":"Hokazono Takeru","slug":"hokazono-takeru"}],
+			"authors":[{"name":"Hokazono Takeru","slug":"hokazono-takeru"}],
+			"langList":["en","fr"],"demographic":"Shounen","englishLink":null,"matureContent":false}`))
 	})
 	mux.HandleFunc("/comic/10ZRNmsG/chapters", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

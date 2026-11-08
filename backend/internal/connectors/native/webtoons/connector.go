@@ -27,6 +27,14 @@ const (
 	// away from its estimated episode-list page; each step is one more paced
 	// request, and a gap wider than this is rare enough to give up on.
 	maxEpisodePageSteps = 2
+	// previewRegistrationLead is how much later than the newest listed episode
+	// a finished title's own last-registered stamp must fall for the list to
+	// count as a free preview (see freePreviewOnly). On every whole list
+	// checked live (2026-11-08) the two agreed within about a day — the row
+	// shows the site's display day, the stamp the UTC instant — while a
+	// preview's rows are the series' opening episodes, years older than its
+	// finale. A week sits far from both.
+	previewRegistrationLead = 7 * 24 * time.Hour
 )
 
 // site is the connector's identity. The regional, mobile and www sites are all
@@ -49,7 +57,35 @@ var (
 	episodeItemPattern  = regexp.MustCompile(`(?is)<li[^>]*class=["'][^"']*_episodeItem[^"']*["'][^>]*data-episode-no=["'](\d+)["'][^>]*>(.*?)</li>`)
 	episodeHrefPattern  = regexp.MustCompile(`(?is)href=["']([^"']*episode_no=\d+[^"']*)["']`)
 	episodeDatePattern  = regexp.MustCompile(`(?is)<span[^>]*class=["'][^"']*date[^"']*["'][^>]*>([^<]+)</span>`)
+
+	// The series metadata the episode-list page carries (verified live
+	// 2026-11-08). Like the title, the meta values are read from double quotes
+	// only, so an apostrophe inside one does not end it.
+	metaDescriptionPattern = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']og:description["'][^>]*content="([^"]*)"`)
+	metaAuthorPattern      = regexp.MustCompile(`(?is)<meta\s+[^>]*property=["']com-linewebtoon:webtoon:author["'][^>]*content="([^"]*)"`)
+	summaryPattern         = regexp.MustCompile(`(?is)<p[^>]*class=["'][^"']*\bsummary\b[^"']*["'][^>]*>(.*?)</p>`)
+	genreHeadingPattern    = regexp.MustCompile(`(?is)<h2[^>]*class=["'][^"']*\bgenre\b[^"']*["'][^>]*>(.*?)</h2>`)
+	representGenrePattern  = regexp.MustCompile(`representGenre\s*:\s*['"]([A-Za-z_ ]+)['"]`)
+	dayInfoPattern         = regexp.MustCompile(`(?is)<p[^>]*class=["'][^"']*\bday_info\b[^"']*["'][^>]*>(.*?)</p>`)
+
+	// lastEpisodeRegisteredPattern reads when the title's newest episode went
+	// up, in epoch milliseconds. The desktop page carries it only as the share
+	// script's fbRefresh value; the mobile page names the same number
+	// lastEpisodeRegisterYmdt, and on every whole list checked live
+	// (2026-11-08) it matched the newest row's release.
+	lastEpisodeRegisteredPattern = regexp.MustCompile(`\bfbRefresh\s*:\s*["']?(\d{12,13})["']?`)
+	// appOnlyNoticePattern finds the "Read more episodes on the app!" box the
+	// page shows above a list the website does not carry in full. Ongoing
+	// titles with app-only Fast Pass episodes show it too, so on its own it
+	// says nothing about the newest row.
+	appOnlyNoticePattern = regexp.MustCompile(`(?i)class=["'][^"']*\bdetail_install_app\b`)
 )
+
+// genreCodeLabels spells out the representGenre codes whose label is not the
+// code itself title-cased; the page's genre heading reads "Sci-fi" for "SF".
+var genreCodeLabels = map[string]string{
+	"SF": "Sci-fi",
+}
 
 // Connector reads webtoons.com through its immediate-search API and its
 // episode-list pages. The embedded Site supplies Key, Name, Kind, the SiteInfo
@@ -178,6 +214,8 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 			}
 			result.LatestChapter = resolved.LatestChapter
 			result.LastUpdatedAt = resolved.LastUpdatedAt
+			// resolved.Metadata is deliberately not copied: search results
+			// carry none (see connectors.MangaResult).
 		}
 
 		results = append(results, result)
@@ -202,10 +240,11 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return "", err
 	}
 
-	pageOneEntries, err := c.fetchEpisodeListEntries(ctx, titleNo, 1)
+	pageOneBody, pageOneURL, err := c.fetchPage(ctx, c.episodeListURL(titleNo, 1))
 	if err != nil {
 		return "", err
 	}
+	pageOneEntries := c.extractEpisodeEntries(pageOneBody)
 	if len(pageOneEntries) == 0 {
 		return "", fmt.Errorf("webtoons episode list is empty")
 	}
@@ -214,6 +253,10 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 		return strings.TrimSpace(entry.URL), nil
 	}
 
+	// Above the newest row is not carried, and that holds for a finished
+	// series showing only its free preview too (freePreviewOnly): the episodes
+	// the site sells in its app have no page on the website, and their viewer
+	// URLs answer 404, so a link built for one would open nothing.
 	latestEpisode := findLatestEpisodeNumber(pageOneEntries)
 	if episodeNo > latestEpisode {
 		return "", fmt.Errorf("episode %d not found: %w", episodeNo, connectors.ErrChapterNotFound)
@@ -227,7 +270,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// landed on and steps toward it, a couple of pages at most.
 	page := ((latestEpisode - episodeNo) / 10) + 1
 	for step := 0; step <= maxEpisodePageSteps && page > 1; step++ {
-		pageEntries, fetchErr := c.fetchEpisodeListEntries(ctx, titleNo, page)
+		pageEntries, fetchErr := c.fetchEpisodeListEntries(ctx, c.listPageURL(pageOneURL, titleNo, page))
 		if fetchErr != nil {
 			// A page that could not be read says nothing about whether the
 			// site carries the episode, so it is not reported as not carried.
@@ -336,6 +379,19 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 	if latestChapter == nil {
 		return nil, fmt.Errorf("webtoons title %d: %w", titleNo, connectors.ErrNoChaptersListed)
 	}
+	// A finished series the site now sells in its app lists only its free
+	// opening episodes, so the newest row is episode 9 of a 280-episode run.
+	// That number is not reported: on a WEBTOON-primary tracker the poller
+	// takes its primary's lower number at once (decideChapter), and the
+	// preview walked real trackers back by hundreds of episodes. No page the
+	// site serves carries the true number — the mobile list, its episodes API
+	// and the RSS feed all stop at the same preview, and the sold episodes'
+	// viewer pages answer 404 — so the answer is no chapter at all. That
+	// leaves the stored chapter alone, hands the turn to the tracker's other
+	// sites, and still delivers the title, link and metadata.
+	if freePreviewOnly(body, latestUpdatedAt) {
+		latestChapter, latestUpdatedAt = nil, nil
+	}
 
 	sourceItemID := strconv.Itoa(titleNo)
 	return &connectors.MangaResult{
@@ -346,7 +402,112 @@ func (c *Connector) resolveByTitleNo(ctx context.Context, titleNo int) (*connect
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestUpdatedAt,
+		Metadata:      pageMetadata(body),
 	}, nil
+}
+
+// freePreviewOnly reports whether the episode list is only the free opening of
+// a finished series, newestReleaseAt being the newest listed episode's date.
+// Only a completed title qualifies: a running one keeps today's reading, its
+// newest free episode, even when the site sells the next few in its app. The
+// evidence is the page's own stamp of when its last episode went up, falling
+// well after the newest row; a page without the stamp, or with an undated
+// newest row, falls back to the app-only notice. Holding back the number of a
+// finished series costs little, since nothing new is coming, while reporting
+// the preview's newest episode walks a tracker backwards.
+func freePreviewOnly(body string, newestReleaseAt *time.Time) bool {
+	if seriesStatus(connectors.FirstSubmatch(dayInfoPattern, body)) != connectors.SeriesStatusCompleted {
+		return false
+	}
+	if registered := lastEpisodeRegisteredAt(body); registered != nil && newestReleaseAt != nil {
+		return registered.Sub(*newestReleaseAt) > previewRegistrationLead
+	}
+	return appOnlyNoticePattern.MatchString(body)
+}
+
+// lastEpisodeRegisteredAt reads the page's stamp of when the title's newest
+// episode went up, nil when the page carries none.
+func lastEpisodeRegisteredAt(body string) *time.Time {
+	millis, err := strconv.ParseInt(connectors.FirstSubmatch(lastEpisodeRegisteredPattern, body), 10, 64)
+	if err != nil || millis <= 0 {
+		return nil
+	}
+	registered := time.UnixMilli(millis).UTC()
+	return &registered
+}
+
+// pageMetadata reads what the episode-list page says about the series, nil
+// when it says nothing. No type is reported: WEBTOON is a format, and its
+// originals come from Korea, the US, Japan and elsewhere, so the site's own
+// classification says nothing about whether a title is a manhwa or a comic.
+func pageMetadata(body string) *connectors.SeriesMetadata {
+	// Left escaped: PlainDescription unescapes after stripping tags, so an
+	// escaped "&lt;3" in the synopsis stays text instead of opening a tag.
+	description := connectors.FirstSubmatch(metaDescriptionPattern, body)
+	if strings.TrimSpace(description) == "" {
+		description = connectors.FirstSubmatch(summaryPattern, body)
+	}
+
+	// The genre heading is the site's display label ("Sci-fi"); the script's
+	// representGenre code ("SF") is the fallback when the heading is missing.
+	var genres []string
+	if heading := connectors.CleanText(connectors.FirstSubmatch(genreHeadingPattern, body)); heading != "" {
+		genres = []string{heading}
+	} else if code := connectors.FirstSubmatch(representGenrePattern, body); code != "" {
+		genres = []string{genreLabelFromCode(code)}
+	}
+
+	// The writer and the artist share one value ("honeyskein / damcho") with
+	// no role attached, so all of them are reported as authors.
+	authors := connectors.CleanLabels(strings.FieldsFunc(connectors.FirstSubmatch(metaAuthorPattern, body), func(r rune) bool {
+		return r == '/' || r == ','
+	}))
+
+	metadata := &connectors.SeriesMetadata{
+		Status:      seriesStatus(connectors.FirstSubmatch(dayInfoPattern, body)),
+		Genres:      connectors.CleanLabels(genres),
+		Description: connectors.PlainDescription(description),
+		Authors:     authors,
+	}
+	if metadata.Empty() {
+		return nil
+	}
+	return metadata
+}
+
+// seriesStatus reads the page's schedule line. A running series shows its
+// update day behind an "UP" badge ("UP EVERY THURSDAY"), a finished one a
+// completed badge and "COMPLETED". Either is taken only when the other is
+// absent; a line showing both, or neither, is left to the generic wording
+// match (a hiatus notice) or reported as unknown.
+func seriesStatus(dayInfo string) string {
+	text := connectors.CleanText(dayInfo)
+	finished := strings.Contains(dayInfo, "txt_ico_completed") ||
+		connectors.NormalizeSeriesStatus(text) == connectors.SeriesStatusCompleted
+	scheduled := strings.Contains(dayInfo, "txt_ico_up") || strings.Contains(strings.ToUpper(text), "EVERY")
+	switch {
+	case finished && scheduled:
+		return ""
+	case finished:
+		return connectors.SeriesStatusCompleted
+	case scheduled:
+		return connectors.SeriesStatusOngoing
+	}
+	return connectors.NormalizeSeriesStatus(text)
+}
+
+// genreLabelFromCode turns a representGenre code ("ROMANCE", "SLICE_OF_LIFE")
+// into a display label ("Romance", "Slice of life").
+func genreLabelFromCode(code string) string {
+	key := strings.ToUpper(strings.TrimSpace(code))
+	if label, ok := genreCodeLabels[key]; ok {
+		return label
+	}
+	label := strings.ToLower(strings.Join(strings.Fields(strings.ReplaceAll(key, "_", " ")), " "))
+	if label == "" {
+		return ""
+	}
+	return strings.ToUpper(label[:1]) + label[1:]
 }
 
 // titleURLOrEmpty returns raw, trimmed, when it is a URL on this site that
@@ -366,12 +527,40 @@ func (c *Connector) titleURLOrEmpty(raw string, titleNo int) string {
 	return trimmed
 }
 
-func (c *Connector) fetchEpisodeListEntries(ctx context.Context, titleNo int, page int) ([]episodeEntry, error) {
-	body, _, err := c.fetchPage(ctx, c.episodeListURL(titleNo, page))
+func (c *Connector) fetchEpisodeListEntries(ctx context.Context, endpoint string) ([]episodeEntry, error) {
+	body, _, err := c.fetchPage(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	return c.extractEpisodeEntries(body), nil
+}
+
+// listPageURL is where page of the episode list is asked for: the address
+// page one finished on, with the page number set. The bare episodeList form
+// cannot be paged — the site redirects it to the slugged list and drops the
+// page number on the way (verified live 2026-11-08), so every later page
+// came back as page one and an episode past it read as not carried. Only an
+// address on the host asked, or one the site claims, that still names the
+// title is built on; anything else falls back to the bare form.
+func (c *Connector) listPageURL(pageOneURL string, titleNo int, page int) string {
+	landed, err := url.Parse(strings.TrimSpace(pageOneURL))
+	if err != nil || landed.Host == "" {
+		return c.episodeListURL(titleNo, page)
+	}
+	requested, err := url.Parse(c.baseURL)
+	if err != nil || (!strings.EqualFold(landed.Host, requested.Host) && !c.AllowsHost(landed.Hostname())) {
+		return c.episodeListURL(titleNo, page)
+	}
+	if named, err := extractTitleNo(landed); err != nil || named != titleNo {
+		return c.episodeListURL(titleNo, page)
+	}
+
+	paged := *landed
+	values := paged.Query()
+	values.Set("page", strconv.Itoa(page))
+	paged.RawQuery = values.Encode()
+	paged.Fragment = ""
+	return paged.String()
 }
 
 // episodeListPath is the series page this connector asks for and, when a page

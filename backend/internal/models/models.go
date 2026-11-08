@@ -42,6 +42,12 @@ type Tracker struct {
 	// report a chapter number without one, which is what keeps such a tracker
 	// from being ranked by when it was last polled.
 	LatestChapterSeenAt *time.Time `json:"latestChapterSeenAt,omitempty"`
+	// LatestChapterFoundAt is when a poll moved the chapter number up to the one
+	// stored, nil when the number came from anywhere else (creation, an edit).
+	// It differs from the release date when a site was asked long after the
+	// chapter came out, which is what lets the "Latest chapter" sort put a
+	// late find on top instead of weeks down the list.
+	LatestChapterFoundAt *time.Time `json:"latestChapterFoundAt,omitempty"`
 	// LatestChapterSourceID names the source that reported the stored latest
 	// chapter number, nil until a poll confirms it. When no reading site can
 	// resolve a chapter link, the card attributes the number to this source

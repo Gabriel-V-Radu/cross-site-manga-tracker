@@ -8,8 +8,27 @@ import (
 	"testing"
 )
 
-// baselineFile is the one embedded migration since the 2026-11 squash.
+// baselineFile is the first embedded migration since the 2026-11 squash.
 const baselineFile = "0001_baseline_2026-11.sql"
+
+// laterFiles are the migrations added after the squash, in order.
+var laterFiles = []string{
+	"0002_series_metadata.sql",
+}
+
+// expectCurrentLedger fails unless the ledger names exactly the baseline and
+// every later migration.
+func expectCurrentLedger(t *testing.T, applied map[string]bool) {
+	t.Helper()
+	if !applied[baselineFile] || len(applied) != 1+len(laterFiles) {
+		t.Fatalf("expected the baseline and %v in the ledger, got %v", laterFiles, applied)
+	}
+	for _, name := range laterFiles {
+		if !applied[name] {
+			t.Fatalf("expected %s in the ledger, got %v", name, applied)
+		}
+	}
+}
 
 // squashedFiles are the ledger names the baseline replaced, as a database
 // deployed before the squash lists them.
@@ -113,8 +132,9 @@ func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	applied := ledger(t, db)
-	if !applied[baselineFile] || len(applied) != 1 {
-		t.Fatalf("expected exactly the baseline in the ledger, got %v", applied)
+	expectCurrentLedger(t, applied)
+	if !tableExists(t, db, "source_metadata") || !tableExists(t, db, "tracker_metadata") || !columnExists(t, db, "trackers", "latest_chapter_found_at") {
+		t.Fatal("expected the series metadata tables and trackers.latest_chapter_found_at")
 	}
 	if tableExists(t, db, "profile_source_logos") || !tableExists(t, db, "source_logos") {
 		t.Fatal("expected the shared logo table and not the per-profile one")
@@ -174,10 +194,11 @@ func TestApplyMigrationsAdoptsADatabaseFromBeforeTheSquash(t *testing.T) {
 	}
 	before := schemaSignature(t, db)
 
-	if err := ApplyMigrations(db); err != nil {
+	// The baseline alone first: it must leave a deployed schema as it found
+	// it. The migrations after it change the schema on purpose.
+	if err := applyMigration(db, baselineFile); err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
-
 	applied := ledger(t, db)
 	if !applied[baselineFile] || len(applied) != 1 {
 		t.Fatalf("expected the squashed files' rows replaced by the baseline's, got %v", applied)
@@ -185,6 +206,10 @@ func TestApplyMigrationsAdoptsADatabaseFromBeforeTheSquash(t *testing.T) {
 	if after := schemaSignature(t, db); after != before {
 		t.Fatalf("the baseline altered a deployed schema:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("apply the later migrations: %v", err)
+	}
+	expectCurrentLedger(t, ledger(t, db))
 	var links, logos, inStep int
 	if err := db.QueryRow(`SELECT (SELECT COUNT(1) FROM tracker_sources), (SELECT COUNT(1) FROM source_logos), (SELECT in_step FROM tracker_sources)`).Scan(&links, &logos, &inStep); err != nil {
 		t.Fatal(err)

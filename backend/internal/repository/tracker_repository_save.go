@@ -178,6 +178,12 @@ func updateTrackerRowTx(ctx context.Context, tx *sql.Tx, profileID int64, id int
 				WHEN latest_known_chapter IS NOT ? THEN CURRENT_TIMESTAMP
 				ELSE COALESCE(latest_chapter_seen_at, CURRENT_TIMESTAMP)
 			END,
+			-- A hand-set number was not found by a poll: the find time
+			-- belonged to the number it replaces.
+			latest_chapter_found_at = CASE
+				WHEN latest_known_chapter IS NOT ? THEN NULL
+				ELSE latest_chapter_found_at
+			END,
 			latest_known_chapter = ?,
 			latest_release_at = ?,
 			last_checked_at = ?,
@@ -207,6 +213,7 @@ func updateTrackerRowTx(ctx context.Context, tx *sql.Tx, profileID int64, id int
 		tracker.LastReadChapter,
 		tracker.Rating,
 		tracker.LastReadChapter,
+		tracker.LatestKnownChapter,
 		tracker.LatestKnownChapter,
 		tracker.LatestKnownChapter,
 		tracker.LatestKnownChapter,

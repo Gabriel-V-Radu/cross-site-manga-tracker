@@ -134,7 +134,7 @@ type apiTitlesResponse struct {
 }
 
 type apiTitleDetailResponse struct {
-	Data apiTitle `json:"data"`
+	Data apiTitleDetail `json:"data"`
 }
 
 type apiChapter struct {
@@ -205,7 +205,10 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, fmt.Errorf("fetch manga detail: %w", err)
 	}
 
-	result := c.resultFromAPITitle(*detail)
+	result := c.resultFromAPITitle(detail.apiTitle)
+	// The detail record already carries the series' type, genres and synopsis,
+	// so collecting them costs no request.
+	result.Metadata = detail.metadata()
 
 	// The title payload's own chapter number and date span every language, so
 	// they are replaced wholesale by the English listing rather than used as a
@@ -347,7 +350,7 @@ func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err e
 	}
 }
 
-func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitle, error) {
+func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitleDetail, error) {
 	path := "/api/titles/" + hid
 	var response apiTitleDetailResponse
 	if err := c.fetchAPI(ctx, path, nil, &response); err != nil {

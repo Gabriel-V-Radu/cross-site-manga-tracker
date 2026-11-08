@@ -21,7 +21,6 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 	if err != nil {
 		return h.failProfile(c, err)
 	}
-	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
 	sources, err := h.sourceRepo.ListEnabled(c.Context())
 	if err != nil {
@@ -35,7 +34,6 @@ func (h *DashboardHandler) NewTrackerModal(c *fiber.Ctx) error {
 
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:          "create",
-		ViewMode:      viewMode,
 		Sources:       sources,
 		LinkedSources: []models.TrackerSource{},
 		ProfileTags:   profileTags,
@@ -52,7 +50,6 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 	if err != nil {
 		return h.failProfile(c, err)
 	}
-	viewMode := normalizeViewMode(c.Query("view", "grid"))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -114,7 +111,6 @@ func (h *DashboardHandler) EditTrackerModal(c *fiber.Ctx) error {
 
 	return h.render(c, "tracker_form_modal.html", trackerFormData{
 		Mode:            "edit",
-		ViewMode:        viewMode,
 		Tracker:         tracker,
 		Sources:         sources,
 		LinkedSources:   linkedSources,
@@ -207,8 +203,7 @@ func (h *DashboardHandler) parsePastedLink(c *fiber.Ctx) (*models.TrackerSource,
 }
 
 type trackerCardFragmentData struct {
-	ViewMode string
-	Card     trackerCardView
+	Card trackerCardView
 }
 
 // cardLookupsPendingHeader marks a card fragment rendered while one of its
@@ -228,8 +223,6 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
 	}
 
-	viewMode := normalizeViewMode(c.Query("view", "grid"))
-
 	// Unlike the mutation handlers, this one must keep failing loudly: the
 	// pinned-card script fetches it and retries on a non-OK response, so a
 	// degraded 200 would end that retry loop with an empty card.
@@ -245,8 +238,7 @@ func (h *DashboardHandler) CardFragment(c *fiber.Ctx) error {
 	}
 
 	return h.render(c, "tracker_card_fragment.html", trackerCardFragmentData{
-		ViewMode: viewMode,
-		Card:     *card,
+		Card: *card,
 	})
 }
 
@@ -325,8 +317,6 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	if err != nil {
 		return h.failProfile(c, err)
 	}
-
-	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -489,7 +479,7 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 		h.invalidateLinkLookups()
 	}
 
-	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
+	return h.renderSingleCardOOB(c, activeProfile.ID, id)
 }
 
 // chapterUnlessEdited keeps the stored chapter number when the form submitted
@@ -549,8 +539,6 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		return h.failProfile(c, err)
 	}
 
-	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
-
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
 		return h.fail(c, fiber.StatusBadRequest, "Invalid tracker id", err)
@@ -571,7 +559,7 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 		}
 	}
 
-	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
+	return h.renderSingleCardOOB(c, activeProfile.ID, id)
 }
 
 func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
@@ -579,8 +567,6 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 	if err != nil {
 		return h.failProfile(c, err)
 	}
-
-	viewMode := normalizeViewMode(c.FormValue("view_mode", c.Query("view", "grid")))
 
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -617,7 +603,7 @@ func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to update rating", err)
 	}
 
-	return h.renderSingleCardOOB(c, activeProfile.ID, id, viewMode)
+	return h.renderSingleCardOOB(c, activeProfile.ID, id)
 }
 
 // loadTrackerCardView rebuilds one tracker's card the way the list builds it,
@@ -670,7 +656,7 @@ func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID in
 // is, and the response asks for it again shortly. Nothing else re-renders a
 // single swapped card, so it used to keep its series-page links until the list
 // happened to reload for some other reason.
-func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, trackerID int64, viewMode string) error {
+func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, trackerID int64) error {
 	card, waiting, err := h.loadTrackerCardView(c.Context(), profileID, trackerID)
 	if err != nil || card == nil {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
@@ -678,7 +664,6 @@ func (h *DashboardHandler) renderSingleCardOOB(c *fiber.Ctx, profileID int64, tr
 	}
 
 	return h.render(c, "tracker_oob_response.html", trackerOOBResponseData{
-		ViewMode:    viewMode,
 		ReplaceCard: card,
 		RefreshCard: waiting,
 	})

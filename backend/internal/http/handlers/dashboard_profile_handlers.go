@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/metadata"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gofiber/fiber/v2"
 )
@@ -55,18 +56,35 @@ func (h *DashboardHandler) Page(c *fiber.Ctx) error {
 	}
 	selectedLinkedSiteIDs := sourceIDFilterMap(parseSourceIDsFromQuery(c))
 
+	typeOptions, publicationOptions, genreOptions, err := h.metadataFilterOptions(c.Context(), activeProfile.ID)
+	if err != nil {
+		return h.fail(c, fiber.StatusInternalServerError, "Failed to load filter options", err)
+	}
+
+	// The filters the page URL carries: dashboard-trackers.js writes the
+	// reader's filters into it after each list they ask for, so a reload or a
+	// Back to the dashboard opens on the same list instead of the defaults.
+	selected := pageFilterSelection(c)
+	genreOptions = withSelectedOptions(genreOptions, selected.Genres, func(value string) string { return value })
+	typeOptions = withSelectedOptions(typeOptions, selected.Types, metadata.TypeLabel)
+	publicationOptions = withSelectedOptions(publicationOptions, selected.Publication, metadata.StatusLabel)
+
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
 	data := dashboardPageData{
 		Statuses:              []string{"all", "reading", "completed", "on_hold", "dropped", "plan_to_read"},
-		Sorts:                 []string{"latest_known_chapter", "last_read_at", "rating"},
+		Sorts:                 []string{"latest_known_chapter", "unread", "last_read_at", "rating"},
 		Profiles:              profiles,
 		ActiveProfile:         *activeProfile,
 		RenameValue:           activeProfile.Name,
 		ProfileTags:           profileTags,
 		LinkedSites:           linkedSites,
 		SelectedLinkedSiteIDs: selectedLinkedSiteIDs,
+		TypeOptions:           typeOptions,
+		PublicationOptions:    publicationOptions,
+		GenreOptions:          genreOptions,
+		Selected:              selected,
 	}
 	return h.render(c, "dashboard_page.html", data)
 }

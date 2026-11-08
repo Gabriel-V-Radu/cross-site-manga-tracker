@@ -26,8 +26,18 @@ func TestMangaDexConnector(t *testing.T) {
 			"data": map[string]any{
 				"id": "123e4567-e89b-12d3-a456-426614174000",
 				"attributes": map[string]any{
-					"title":       map[string]string{"en": "Test Title"},
-					"lastChapter": "42",
+					"title":                  map[string]string{"en": "Test Title"},
+					"lastChapter":            "42",
+					"originalLanguage":       "ko",
+					"status":                 "completed",
+					"year":                   2018,
+					"contentRating":          "safe",
+					"publicationDemographic": nil,
+					"description":            map[string]string{"en": "A hunter rises.", "es": "Un cazador."},
+					"tags": []map[string]any{
+						{"type": "tag", "attributes": map[string]any{"name": map[string]string{"en": "Action"}, "group": "genre"}},
+						{"type": "tag", "attributes": map[string]any{"name": map[string]string{"en": "Long Strip"}, "group": "format"}},
+					},
 				},
 				"relationships": []map[string]any{
 					{
@@ -35,6 +45,10 @@ func TestMangaDexConnector(t *testing.T) {
 						"attributes": map[string]any{
 							"fileName": "test-cover.jpg",
 						},
+					},
+					{
+						"type":       "author",
+						"attributes": map[string]any{"name": "Chugong"},
 					},
 				},
 			},
@@ -101,6 +115,10 @@ func TestMangaDexConnector(t *testing.T) {
 	if len(resolved.RelatedTitles) != 0 {
 		t.Fatalf("expected no related titles when only primary title exists, got %v", resolved.RelatedTitles)
 	}
+	if resolved.Metadata == nil || resolved.Metadata.Type != connectors.SeriesTypeManhwa || resolved.Metadata.Status != connectors.SeriesStatusCompleted ||
+		len(resolved.Metadata.Authors) != 1 || resolved.Metadata.Authors[0] != "Chugong" {
+		t.Fatalf("expected the record's metadata on the resolve, got %+v", resolved.Metadata)
+	}
 
 	results, err := connector.SearchByTitle(context.Background(), "leveling solo", 10)
 	if err != nil {
@@ -114,6 +132,9 @@ func TestMangaDexConnector(t *testing.T) {
 	}
 	if results[0].LatestChapter == nil || *results[0].LatestChapter != 7.5 {
 		t.Fatalf("expected fallback latest chapter 7.5 for abc, got %v", results[0].LatestChapter)
+	}
+	if results[0].Metadata != nil {
+		t.Fatalf("search results must not carry metadata, got %+v", results[0].Metadata)
 	}
 	contains := func(values []string, expected string) bool {
 		for _, value := range values {

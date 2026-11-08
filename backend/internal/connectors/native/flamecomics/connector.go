@@ -188,6 +188,9 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if !query.Matches(append([]string{resolved.Title, entry.Title, resolved.SourceItemID}, resolved.RelatedTitles...)...) {
 			continue
 		}
+		// The series page read for the match carries the metadata too, but a
+		// search row is not where it is stored: only a resolve reports it.
+		resolved.Metadata = nil
 
 		results = append(results, *resolved)
 	}
@@ -342,6 +345,7 @@ func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*co
 		CoverImageURL: coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: latestReleaseAt,
+		Metadata:      extractMetadata(body),
 	}
 	// A series page that loads but yields no chapter is a failed resolve, not
 	// "nothing new": after a markup change every Flame tracker would otherwise

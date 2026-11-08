@@ -17,7 +17,8 @@
 //
 // Queries used (x:m01 selects the mangahub.io catalog variant):
 //   - {search(x:m01,q:"...",limit:N){rows{...}}}   → title search
-//   - {manga(x:m01,slug:"..."){...}}               → resolve, one request
+//   - {manga(x:m01,slug:"..."){...}}               → resolve, one request (a
+//     second, without the metadata fields, only if the schema refuses them)
 package mangahub
 
 import (
@@ -80,10 +81,17 @@ var site = connectors.Site{
 
 // Search rows are MangaListItem, a slimmer type than Manga: querying
 // alternativeTitle on them is a schema error, so only the manga query asks
-// for it.
+// for it. The same holds for metadataFields, which only the resolve asks for
+// (see ResolveByURL). Verified live 2026-11-08: status is "ongoing" or
+// "completed", author and artist are plain strings that may hold several
+// comma-separated names, genres is one comma-separated string that mixes
+// genres with format and rating words ("Action, Martial Arts, Long Strip, Web
+// Comic, Full Color, Safe"), and the type has no field for the kind of work —
+// mangaType and type are both schema errors.
 const (
-	searchFields = "id title slug image latestChapter updatedDate"
-	mangaFields  = searchFields + " alternativeTitle"
+	searchFields   = "id title slug image latestChapter updatedDate"
+	mangaFields    = searchFields + " alternativeTitle"
+	metadataFields = "status author artist genres description"
 )
 
 // Connector reads MangaHub through its GraphQL API. The embedded Site supplies
@@ -143,6 +151,13 @@ type apiManga struct {
 	LatestChapter    *float64    `json:"latestChapter"`
 	UpdatedDate      string      `json:"updatedDate"`
 	AlternativeTitle string      `json:"alternativeTitle"`
+
+	// Only the resolve's query asks for these (metadataFields).
+	Status      string `json:"status"`
+	Author      string `json:"author"`
+	Artist      string `json:"artist"`
+	Genres      string `json:"genres"`
+	Description string `json:"description"`
 }
 
 type apiSearch struct {
@@ -174,18 +189,53 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
-	query := fmt.Sprintf("{manga(x:%s,slug:%s){%s}}", variantCode, strconv.Quote(slug), mangaFields)
-	response, err := c.queryGraphQL(ctx, query)
+	manga, err := c.fetchManga(ctx, slug, mangaFields+" "+metadataFields)
+	if connectors.IsHTTPStatus(err, http.StatusBadRequest) {
+		// The API answers a field it does not know with a 400 for the whole
+		// query ("Cannot query field ... on type MangaFull"), so a metadata
+		// field the site drops one day would otherwise take the chapter check
+		// down with it. The metadata is the optional half: ask again without it.
+		manga, err = c.fetchManga(ctx, slug, mangaFields)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch mangahub manga: %w", err)
 	}
-	manga := response.Data.Manga
 	if manga == nil || strings.TrimSpace(manga.Slug) == "" {
 		return nil, c.notFound(slug)
 	}
 
 	result := c.resultFromManga(*manga)
+	result.Metadata = mangaMetadata(*manga)
 	return &result, nil
+}
+
+// fetchManga runs the manga query for slug asking for fields; a nil record
+// with no error is the API's clean "no such series".
+func (c *Connector) fetchManga(ctx context.Context, slug string, fields string) (*apiManga, error) {
+	query := fmt.Sprintf("{manga(x:%s,slug:%s){%s}}", variantCode, strconv.Quote(slug), fields)
+	response, err := c.queryGraphQL(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return response.Data.Manga, nil
+}
+
+// mangaMetadata reads the descriptive fields of a resolved record, nil when it
+// carries none. The genre labels are kept as the site gives them, format words
+// included: deciding that "Long Strip" is not a genre is the consumer's call.
+// No type is reported, because the record has none to give.
+func mangaMetadata(manga apiManga) *connectors.SeriesMetadata {
+	metadata := &connectors.SeriesMetadata{
+		Status:      connectors.NormalizeSeriesStatus(manga.Status),
+		Genres:      connectors.SplitLabels(manga.Genres),
+		Description: connectors.PlainDescription(manga.Description),
+		Authors:     connectors.SplitLabels(manga.Author),
+		Artists:     connectors.SplitLabels(manga.Artist),
+	}
+	if metadata.Empty() {
+		return nil
+	}
+	return metadata
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {

@@ -38,8 +38,9 @@ func TestNewTrackerModalRenders(t *testing.T) {
 	if !strings.Contains(html, "<form class=\"tracker-form\"") {
 		t.Fatalf("expected new tracker modal to include tracker form")
 	}
-	if !strings.Contains(html, "name=\"view_mode\"") {
-		t.Fatalf("expected new tracker modal to include view_mode hidden input")
+	// The list view is gone; nothing in the form carries a view any more.
+	if strings.Contains(html, "view_mode") || strings.Contains(html, "?view=") {
+		t.Fatalf("expected the new tracker modal to carry no view mode")
 	}
 }
 
@@ -52,7 +53,6 @@ func TestCreateTrackerFromFormPrependsWithoutImmediateRefresh(t *testing.T) {
 	form.Set("source_id", "1")
 	form.Set("source_url", "https://mangadex.org/title/prepended-tracker")
 	form.Set("status", "reading")
-	form.Set("view_mode", "grid")
 
 	req := httptest.NewRequest(http.MethodPost, "/dashboard/trackers", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -155,7 +155,6 @@ func TestSetRatingFromCardReplacesCard(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("rating", "9.5")
-	form.Set("view_mode", "grid")
 
 	req := httptest.NewRequest(http.MethodPost, "/dashboard/trackers/"+strconv.FormatInt(trackerID, 10)+"/rating", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

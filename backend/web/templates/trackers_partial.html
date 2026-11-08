@@ -52,12 +52,13 @@
      data-pending-covers="{{if .PendingCovers}}true{{else}}false{{end}}"></div>
 {{if eq (len .Trackers) 0}}
 {{/* Reading, the default status, leaves out the trackers whose latest chapter
-     has been read, so a library that is all caught up opens on an empty list;
-     the script shows the hint that matches the status asked for. */}}
+     has been read (unless another filter is on), so a library that is all
+     caught up opens on an empty list; the script shows the hint that matches
+     what was asked for. */}}
 <div class="empty-state">
     <h2>No trackers found</h2>
     <p data-empty-hint="other">Try a different filter, or add your first source entry.</p>
-    <p data-empty-hint="reading" hidden>Reading leaves out the trackers you are caught up on. Choose All in Status to see them, or try a different filter.</p>
+    <p data-empty-hint="reading" hidden>Reading on its own leaves out the trackers you are caught up on. Choose All in Status to see them, or add another filter (a search, a genre…), which brings them back.</p>
 </div>
 {{else}}
 {{/* The result count and the connector shortcuts belong to the list, not to
@@ -87,19 +88,11 @@
     </div>
 </div>
 
-{{if eq .ViewMode "list"}}
-<div id="cards-container-list" class="cards-list">
-    {{range .Trackers}}
-    {{template "tracker_card_list" .}}
-    {{end}}
-</div>
-{{else}}
 <div id="cards-container-grid" class="cards-grid">
     {{range .Trackers}}
     {{template "tracker_card_grid" .}}
     {{end}}
 </div>
-{{end}}
 
 {{if gt .TotalPages 1}}
 <div class="pagination pagination--bottom">

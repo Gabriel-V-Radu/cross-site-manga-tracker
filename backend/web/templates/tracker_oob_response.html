@@ -29,15 +29,9 @@
 {{end}}
 {{/* The data- attributes match tracker_card_templates.html's wrappers. */}}
 {{with .ReplaceCard}}
-{{if eq $.ViewMode "list"}}
-<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="outerHTML:#tracker-card-{{.ID}}">
-{{template "tracker_card_list_body" .}}
-</article>
-{{else}}
 <article id="tracker-card-{{.ID}}" class="tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="outerHTML:#tracker-card-{{.ID}}">
 {{template "tracker_card_grid_body" .}}
 </article>
-{{end}}
 {{end}}
 {{end}}
 
@@ -68,9 +62,9 @@
 
         var profileInput = document.getElementById('profile-filter');
         var profileKey = profileInput && profileInput.value ? String(profileInput.value).trim() : '';
-        var requestURL = '/dashboard/trackers/{{.ReplaceCard.ID}}/card-fragment?view=' + encodeURIComponent('{{.ViewMode}}');
+        var requestURL = '/dashboard/trackers/{{.ReplaceCard.ID}}/card-fragment';
         if (profileKey) {
-            requestURL += '&profile=' + encodeURIComponent(profileKey);
+            requestURL += '?profile=' + encodeURIComponent(profileKey);
         }
 
         var attempts = 0;
@@ -128,22 +122,15 @@
 </script>
 {{end}}
 {{with .PrependCard}}
-{{if eq $.ViewMode "list"}}
-<article id="tracker-card-{{.ID}}" class="tracker-row tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="afterbegin:#cards-container-list">
-{{template "tracker_card_list_body" .}}
-</article>
-{{else}}
 <article id="tracker-card-{{.ID}}" class="tracker-card" data-status="{{.Status}}" data-last-read="{{with .LastReadChapterRaw}}{{.}}{{end}}" data-latest="{{with .LatestKnownChapterRaw}}{{.}}{{end}}" hx-swap-oob="afterbegin:#cards-container-grid">
 {{template "tracker_card_grid_body" .}}
 </article>
 {{end}}
-{{end}}
 {{if .PrependCard}}
 <script>
     (function () {
-        var listContainer = document.getElementById('cards-container-list');
         var gridContainer = document.getElementById('cards-container-grid');
-        if (!listContainer && !gridContainer && document && document.body) {
+        if (!gridContainer && document && document.body) {
             document.body.dispatchEvent(new Event('trackersChanged'));
         }
     })();

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,12 +46,26 @@ const onePieceManga = `{"id":20,"title":"One Piece","slug":"one-piece_142","imag
 	"latestChapter":1191,"updatedDate":"2026-08-21T03:53:28.000Z",
 	"alternativeTitle":"ワンピース; One Piece; Vua Hải Tặc; One Piece Digital Colored"}`
 
+// onePieceMetadata is what the manga query adds when asked for the metadata
+// fields, in the live API's shapes: comma-separated names and labels, format
+// and rating words mixed into the genres, and a description with blank lines.
+const onePieceMetadata = `"status":"ongoing","author":"Oda Eiichiro","artist":"Oda Eiichiro",
+	"genres":"Action, Adventure, Comedy, Fantasy, Shounen, Long Strip, Full Color, Safe",
+	"description":"Gol D. Roger was known as the Pirate King.\n\nHis last words sent the world to sea.  "`
+
 func onePieceHandler(t *testing.T) http.Handler {
 	t.Helper()
 	return graphqlHandler(t, func(query string) string {
 		switch {
 		case strings.HasPrefix(query, "{search("):
+			// Search rows are MangaListItem, which has none of the metadata
+			// fields: the real API refuses the whole query if one is asked for.
+			if strings.Contains(query, "description") || strings.Contains(query, "genres") {
+				t.Errorf("search asked for metadata fields: %s", query)
+			}
 			return `{"data":{"search":{"rows":[` + onePieceManga + `,{"id":0,"title":"Broken","slug":""}]}}}`
+		case strings.Contains(query, `slug:"one-piece_142"`) && strings.Contains(query, "description"):
+			return `{"data":{"manga":` + strings.TrimSuffix(onePieceManga, "}") + `,` + onePieceMetadata + `}}}`
 		case strings.Contains(query, `slug:"one-piece_142"`):
 			return `{"data":{"manga":` + onePieceManga + `}}`
 		default:
@@ -90,6 +105,119 @@ func TestResolveByURLReadsChapterDateAndTitles(t *testing.T) {
 	// English alternate survives.
 	if len(result.RelatedTitles) != 1 || result.RelatedTitles[0] != "One Piece Digital Colored" {
 		t.Fatalf("unexpected related titles %v", result.RelatedTitles)
+	}
+}
+
+// The resolve's one manga query also asks for the descriptive fields, which are
+// mapped as the site gives them: no type (the schema has none), the genre
+// labels raw, format words included.
+func TestResolveByURLReadsSeriesMetadata(t *testing.T) {
+	connector := newTestConnector(t, onePieceHandler(t))
+
+	result, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/one-piece_142")
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	metadata := result.Metadata
+	if metadata == nil {
+		t.Fatal("expected metadata")
+	}
+	if metadata.Status != connectors.SeriesStatusOngoing {
+		t.Fatalf("unexpected status %q", metadata.Status)
+	}
+	if metadata.Type != "" {
+		t.Fatalf("expected no type, got %q", metadata.Type)
+	}
+	if got := strings.Join(metadata.Genres, "|"); got != "Action|Adventure|Comedy|Fantasy|Shounen|Long Strip|Full Color|Safe" {
+		t.Fatalf("unexpected genres %v", metadata.Genres)
+	}
+	if len(metadata.Authors) != 1 || metadata.Authors[0] != "Oda Eiichiro" {
+		t.Fatalf("unexpected authors %v", metadata.Authors)
+	}
+	if len(metadata.Artists) != 1 || metadata.Artists[0] != "Oda Eiichiro" {
+		t.Fatalf("unexpected artists %v", metadata.Artists)
+	}
+	if metadata.Description != "Gol D. Roger was known as the Pirate King.\n\nHis last words sent the world to sea." {
+		t.Fatalf("unexpected description %q", metadata.Description)
+	}
+
+	// Search rows never ask for the fields (the handler fails the test if they
+	// do) and so never carry metadata.
+	results, err := connector.SearchByTitle(context.Background(), "one piece", 5)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Metadata != nil {
+		t.Fatalf("expected one search row without metadata, got %+v", results)
+	}
+}
+
+// A metadata field the API stops knowing turns the whole query into a 400; the
+// resolve must then still report the chapter, from a second query without the
+// metadata fields, rather than fail.
+func TestResolveByURLFallsBackWhenTheSchemaRefusesMetadata(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		queries []string
+	)
+	connector := newTestConnector(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		queries = append(queries, payload.Query)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(payload.Query, "artist") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"Cannot query field \"artist\" on type \"MangaFull\"."}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"manga":` + onePieceManga + `}}`))
+	}))
+
+	result, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/one-piece_142")
+	if err != nil {
+		t.Fatalf("a refused metadata field failed the resolve: %v", err)
+	}
+	if result.LatestChapter == nil || *result.LatestChapter != 1191 {
+		t.Fatalf("expected latest chapter 1191, got %#v", result.LatestChapter)
+	}
+	if result.Metadata != nil {
+		t.Fatalf("expected no metadata from the plain query, got %+v", result.Metadata)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(queries) != 2 || strings.Contains(queries[1], "artist") {
+		t.Fatalf("expected one refused query and one plain retry, got %q", queries)
+	}
+}
+
+// Empty, null and placeholder metadata leaves the result as it was: no
+// metadata, the chapter untouched. Several names in one field are split.
+func TestResolveByURLSurvivesOddMetadata(t *testing.T) {
+	connector := newTestConnector(t, graphqlHandler(t, func(string) string {
+		return `{"data":{"manga":{"id":9,"title":"Sparse","slug":"sparse_1","latestChapter":12,
+			"updatedDate":"2026-08-01T00:00:00.000Z","status":"","author":null,"artist":"N/A",
+			"genres":" , ,","description":"   "}}}`
+	}))
+
+	result, err := connector.ResolveByURL(context.Background(), "https://mangahub.io/manga/sparse_1")
+	if err != nil {
+		t.Fatalf("odd metadata failed the resolve: %v", err)
+	}
+	if result.LatestChapter == nil || *result.LatestChapter != 12 {
+		t.Fatalf("expected latest chapter 12, got %#v", result.LatestChapter)
+	}
+	if result.Metadata != nil {
+		t.Fatalf("expected no metadata, got %+v", result.Metadata)
+	}
+
+	metadata := mangaMetadata(apiManga{Author: "Jang Sung-Rak, Redice Studio", Status: "completed"})
+	if metadata == nil || strings.Join(metadata.Authors, "|") != "Jang Sung-Rak|Redice Studio" ||
+		metadata.Status != connectors.SeriesStatusCompleted {
+		t.Fatalf("unexpected metadata %+v", metadata)
 	}
 }
 

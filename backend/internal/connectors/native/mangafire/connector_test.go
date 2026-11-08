@@ -22,7 +22,7 @@ func newFakeAPIServer(t *testing.T) *httptest.Server {
 		switch keyword {
 		case "", "one", "piece":
 			_, _ = w.Write([]byte(`{"items":[
-				{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece"},
+				{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","type":"manga","status":"releasing","year":1997,"rating":9.1,"genres":[{"id":1,"title":"Action"}],"poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece"},
 				{"id":2,"hid":"oo4","slug":"one-punch-man","title":"One-Punch Man","poster":{"medium":"https://cdn.example/opm@280.jpg"},"latestChapter":264,"chapterUpdatedAt":"1mo ago","url":"/title/oo4-one-punch-man"}
 			],"meta":{"total":2}}`))
 		default:
@@ -31,7 +31,10 @@ func newFakeAPIServer(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece","altTitles":["ワンピース","One Piece. Большой куш","Pirate Legacy"]}}`))
+		// The metadata fields mirror the live record's shape (verified on
+		// /api/titles/mv3r7 in 2026-11): id/title objects for every label list,
+		// HTML with <br> breaks in synopsisHtml, a 0-10 rating.
+		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","type":"manga","status":"releasing","contentRating":"safe","poster":{"small":"https://cdn.example/op@100.jpg","medium":"https://cdn.example/op@280.jpg","large":"https://cdn.example/op.jpg"},"latestChapter":1187,"year":1997,"rank":3,"chapterUpdatedAt":"2d ago","url":"/title/dkw-one-piece","synopsisHtml":"Gol D. Roger was known as the &quot;Pirate King&quot;. <br>\nHis last words sent the world to sea.<br>\n<br>\nThe Great Pirate Era begins.","altTitles":["ワンピース","One Piece. Большой куш","Pirate Legacy"],"rating":9.12,"ratingCount":4821,"follows":120000,"links":{"mal":"https://myanimelist.net/manga/13/"},"malId":"13","anilistId":"30013","genres":[{"id":1,"title":"Action"},{"id":2,"title":"Adventure"},{"id":5,"title":"Comedy"}],"themes":[{"id":31,"title":"Pirates"},{"id":32,"title":"Super Power"}],"demographics":[{"id":40,"title":"Shounen"}],"authors":[{"id":7,"title":"ODA Eiichiro"}],"artists":[{"id":8,"title":"Oda Eiichiro"}]}}`))
 	})
 	// Serves every language regardless of the `language` param, mirroring the
 	// API's habit of ignoring params it does not recognise: the connector's own
@@ -293,6 +296,11 @@ func TestMangaFireConnectorSearchByTitle(t *testing.T) {
 		}
 		if item.LastUpdatedAt != nil {
 			t.Fatalf("expected no cross-language release date in search results for %s, got %v", item.SourceItemID, item.LastUpdatedAt)
+		}
+		// Search rows carry some metadata fields too, but metadata is a
+		// resolve-only field: the poller stores it from ResolveByURL.
+		if item.Metadata != nil {
+			t.Fatalf("expected no metadata in search results for %s, got %+v", item.SourceItemID, item.Metadata)
 		}
 
 		switch item.SourceItemID {
