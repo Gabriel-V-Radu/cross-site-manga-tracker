@@ -73,11 +73,19 @@
     // Beside the cover: to its right when there is room, else to its left,
     // top-aligned with it and kept inside the viewport vertically. Page
     // coordinates, so the panel scrolls with the card it belongs to.
+    //
+    // A trigger no longer in the page is never measured: a detached element
+    // reports a zero rectangle, and the panel used to fly to the page's
+    // top-left corner when "Read more" re-placed it after a silent refresh had
+    // swapped the card for a new copy. The panel then stays where it is.
     var place = function (node, trigger) {
         node.classList.toggle('tracker-info-popover--sheet', narrowScreen());
         if (narrowScreen()) {
             node.style.left = '';
             node.style.top = '';
+            return;
+        }
+        if (!trigger || !document.body.contains(trigger)) {
             return;
         }
         var rect = trigger.getBoundingClientRect();
@@ -104,6 +112,25 @@
         node.style.top = Math.round(top + window.scrollY) + 'px';
     };
 
+    // The card the panel belongs to, as it stands now. A silent refresh of the
+    // list (covers arriving, a poll's new chapter) replaces every card with a
+    // new copy; the copy carries the same info URL, so the panel follows it
+    // instead of holding on to an element that has left the page.
+    var liveTrigger = function () {
+        if (current.trigger && document.body.contains(current.trigger)) {
+            return current.trigger;
+        }
+        if (!current.url) {
+            return null;
+        }
+        var fresh = document.querySelector('.tracker-card__info-trigger[data-info-url="' + current.url.replace(/["\\]/g, '\\$&') + '"]');
+        if (fresh) {
+            current.trigger = fresh;
+            fresh.setAttribute('aria-expanded', 'true');
+        }
+        return fresh;
+    };
+
     // The synopsis is clamped to a few lines; "Read more" appears only when
     // the clamp actually hid something.
     var setUpDescription = function (node) {
@@ -124,7 +151,8 @@
         clearTimers();
         current.request += 1;
         var request = current.request;
-        var sameCard = current.trigger === trigger && !node.hidden;
+        // By URL, not element: the card may be a silent refresh's new copy.
+        var sameCard = current.url === url && !node.hidden;
         current.trigger = trigger;
         current.url = url;
         current.pinned = pinned || (sameCard && current.pinned);
@@ -241,7 +269,8 @@
             return;
         }
         var into = event.relatedTarget;
-        if (into && (leaving.contains(into) || (node && node.contains(into)) || (current.trigger && current.trigger.contains(into)))) {
+        var anchor = liveTrigger();
+        if (into && (leaving.contains(into) || (node && node.contains(into)) || (anchor && anchor.contains(into)))) {
             return;
         }
         if (openTimer && leaving !== node) {
@@ -256,7 +285,7 @@
         var trigger = triggerFrom(event.target);
         if (trigger) {
             event.preventDefault();
-            if (current.trigger === trigger && current.pinned && node && !node.hidden) {
+            if (current.url === trigger.getAttribute('data-info-url') && current.pinned && node && !node.hidden) {
                 hide(false);
                 return;
             }
@@ -264,6 +293,11 @@
             return;
         }
         if (!node || node.hidden) {
+            return;
+        }
+        var close = event.target.closest ? event.target.closest('[data-info-close]') : null;
+        if (close && node.contains(close)) {
+            hide(true);
             return;
         }
         // A chip filters the list by its value and closes the panel.
@@ -282,7 +316,9 @@
                 var collapsed = description.getAttribute('data-collapsed') === 'true';
                 description.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
                 more.textContent = collapsed ? 'Show less' : 'Read more';
-                place(node, current.trigger || more);
+                // The panel stays put and grows downwards (it scrolls inside
+                // itself past its maximum height): moving it as the reader
+                // clicks inside it lost their place.
             }
             return;
         }
@@ -317,6 +353,23 @@
         hide(false);
     });
 
+    // After a silent refresh the panel moves to the new copy of its card. A
+    // card that left the list closes a hover panel; a pinned one stays where
+    // the reader put it until they close it.
+    document.body.addEventListener('htmx:afterSwap', function (event) {
+        var target = event && event.target;
+        var node = panel();
+        if (!target || target.id !== 'trackers-zone' || !node || node.hidden) {
+            return;
+        }
+        var anchor = liveTrigger();
+        if (anchor) {
+            place(node, anchor);
+        } else if (!current.pinned) {
+            hide(false);
+        }
+    });
+
     // A card saved or rated has its stored data changed; its panel is fetched
     // afresh next time.
     document.body.addEventListener('htmx:afterRequest', function (event) {
@@ -329,7 +382,7 @@
 
     window.addEventListener('resize', function () {
         var node = panel();
-        if (node && !node.hidden && current.trigger && document.body.contains(current.trigger)) {
+        if (node && !node.hidden && liveTrigger()) {
             place(node, current.trigger);
         }
     });

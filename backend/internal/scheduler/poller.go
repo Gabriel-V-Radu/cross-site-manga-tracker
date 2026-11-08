@@ -69,8 +69,10 @@ type Poller struct {
 type PollerConfig struct {
 	Interval time.Duration
 	// IdleInterval is the minimum time between polls for trackers that are
-	// not in "reading" status; they rarely change, so polling them every
-	// cycle just burns the sources' rate limits.
+	// neither reading nor planned to read; they rarely change, so polling them
+	// every cycle just burns the sources' rate limits. Plan-to-read trackers
+	// are checked more often (see pollEvery in cadence.go), never less often
+	// than this.
 	IdleInterval time.Duration
 	// LowerConfirmationDelay is how long a lower chapter number must keep being
 	// reported before it replaces the stored one. It guards the two failure modes

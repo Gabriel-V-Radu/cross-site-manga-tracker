@@ -2612,8 +2612,35 @@ input.is-loading::placeholder {
 
 .tracker-info__title {
     margin: 0;
+    padding-right: 28px;
     font-size: 1.05rem;
     line-height: 1.2;
+    color: #ffffff;
+}
+
+.tracker-info__header {
+    position: relative;
+}
+
+.tracker-info__close {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 28px;
+    height: 28px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-soft);
+    font: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.tracker-info__close:hover,
+.tracker-info__close:focus-visible {
+    border-color: var(--line-strong);
     color: #ffffff;
 }
 

@@ -75,6 +75,13 @@ type Connector struct {
 	connectors.Site
 	apiBaseURL string
 	httpClient *http.Client
+
+	// records keeps each title's manga record (by id) for a day: titles, cover,
+	// authors and metadata do not move between polls, while the English feed —
+	// read on every resolve — is what does. Caching it halves the requests per
+	// poll. lastChapter, the stand-in for an empty feed, is the original run's
+	// final number and changes once in a series' life.
+	records *connectors.RecordCache[mangaByIDResponse]
 }
 
 func NewConnector() *Connector {
@@ -82,6 +89,7 @@ func NewConnector() *Connector {
 		Site:       site,
 		apiBaseURL: canonicalAPIURL,
 		httpClient: connectors.NewThrottledClient(),
+		records:    connectors.NewRecordCache[mangaByIDResponse](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -100,6 +108,7 @@ func NewConnectorWithOptions(apiBaseURL string, allowedHost []string, client *ht
 		Site:       identity,
 		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
 		httpClient: client,
+		records:    connectors.NewRecordCache[mangaByIDResponse](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -125,16 +134,8 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
-	// The author and artist relationships are expanded on the same request so
-	// their names arrive with the record; without the includes they are bare
-	// ids that would each cost a request of their own.
-	values := url.Values{}
-	values.Add("includes[]", "cover_art")
-	values.Add("includes[]", "author")
-	values.Add("includes[]", "artist")
-
-	var payload mangaByIDResponse
-	if err := connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+"/manga/"+titleID+"?"+values.Encode(), &payload); err != nil {
+	payload, err := c.mangaRecord(ctx, titleID)
+	if err != nil {
 		return nil, fmt.Errorf("fetch mangadex manga: %w", err)
 	}
 
@@ -181,6 +182,30 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		LastUpdatedAt: latestReleaseAt,
 		Metadata:      seriesMetadata(payload.Data.Attributes.mangaMetadataAttributes, payload.Data.Relationships),
 	}, nil
+}
+
+// mangaRecord returns the title's manga record, from the day-long cache when it
+// holds one. A record that cannot be fetched is not cached, so a failure is
+// asked again on the next resolve.
+func (c *Connector) mangaRecord(ctx context.Context, titleID string) (mangaByIDResponse, error) {
+	if record, ok := c.records.Get(titleID); ok {
+		return record, nil
+	}
+
+	// The author and artist relationships are expanded on the same request so
+	// their names arrive with the record; without the includes they are bare
+	// ids that would each cost a request of their own.
+	values := url.Values{}
+	values.Add("includes[]", "cover_art")
+	values.Add("includes[]", "author")
+	values.Add("includes[]", "artist")
+
+	var payload mangaByIDResponse
+	if err := connectors.FetchJSON(ctx, c.httpClient, c.apiBaseURL+"/manga/"+titleID+"?"+values.Encode(), &payload); err != nil {
+		return mangaByIDResponse{}, err
+	}
+	c.records.Put(titleID, payload)
+	return payload, nil
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {

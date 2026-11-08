@@ -75,6 +75,12 @@ type Connector struct {
 	// carries a widened host gap there, so the connector no longer paces on
 	// top of it.
 	breaker *connectors.EscalatingBreaker
+
+	// details keeps each title's detail record (by hid) for a day: it carries
+	// the title, cover and metadata, none of which moves between polls, while
+	// the English chapter listing — fetched on every resolve — is what does.
+	// Caching it halves this site's requests per poll.
+	details *connectors.RecordCache[apiTitleDetail]
 }
 
 func NewConnector() *Connector {
@@ -84,6 +90,7 @@ func NewConnector() *Connector {
 		httpClient: connectors.NewThrottledClient(),
 		signer:     newSigner(),
 		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		details:    connectors.NewRecordCache[apiTitleDetail](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -105,6 +112,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		httpClient: client,
 		signer:     newSigner(),
 		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
+		details:    connectors.NewRecordCache[apiTitleDetail](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -200,9 +208,24 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 		return nil, err
 	}
 
-	detail, err := c.fetchTitleDetail(ctx, hid)
+	detail, cached, err := c.titleDetail(ctx, hid)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manga detail: %w", err)
+	}
+
+	latestChapter, latestReleaseAt, err := c.latestEnglishChapter(ctx, detail.HID)
+	if cached && connectors.IsNotFound(err) {
+		// The cached record may name a title the site has since moved or
+		// removed; asking for the record again either heals the hid or
+		// reports the title gone.
+		c.details.Forget(hid)
+		if detail, _, err = c.titleDetail(ctx, hid); err != nil {
+			return nil, fmt.Errorf("fetch manga detail: %w", err)
+		}
+		latestChapter, latestReleaseAt, err = c.latestEnglishChapter(ctx, detail.HID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch latest %s chapter: %w", chapterLanguage, err)
 	}
 
 	result := c.resultFromAPITitle(detail.apiTitle)
@@ -215,10 +238,6 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	// fallback: a title MangaFire carries only in other languages reports no
 	// chapter at all, which leaves a tracker's stored progress untouched instead
 	// of advancing it to a chapter that was never translated.
-	latestChapter, latestReleaseAt, err := c.latestEnglishChapter(ctx, detail.HID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch latest %s chapter: %w", chapterLanguage, err)
-	}
 	result.LatestChapter = latestChapter
 	result.LastUpdatedAt = latestReleaseAt
 
@@ -291,7 +310,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	}
 
 	if slug == "" {
-		detail, detailErr := c.fetchTitleDetail(ctx, hid)
+		detail, _, detailErr := c.titleDetail(ctx, hid)
 		if detailErr != nil {
 			return "", fmt.Errorf("fetch manga detail: %w", detailErr)
 		}
@@ -348,6 +367,20 @@ func (c *Connector) parseTitleURL(rawURL string) (hid string, slug string, err e
 	default:
 		return "", "", fmt.Errorf("unsupported mangafire path")
 	}
+}
+
+// titleDetail returns the title's detail record, from the day-long cache when
+// it holds one (reported by the second return) or fetched and cached.
+func (c *Connector) titleDetail(ctx context.Context, hid string) (*apiTitleDetail, bool, error) {
+	if detail, ok := c.details.Get(hid); ok {
+		return &detail, true, nil
+	}
+	detail, err := c.fetchTitleDetail(ctx, hid)
+	if err != nil {
+		return nil, false, err
+	}
+	c.details.Put(hid, *detail)
+	return detail, false, nil
 }
 
 func (c *Connector) fetchTitleDetail(ctx context.Context, hid string) (*apiTitleDetail, error) {

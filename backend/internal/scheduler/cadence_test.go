@@ -30,14 +30,23 @@ func TestPollEvery(t *testing.T) {
 		{"reading, dormant with no status", repository.PollingTracker{Status: "reading", LatestKnownChapter: &chapter, LatestChapterSeenAt: ago(100)}, dormantReadingEvery},
 		{"reading, a late find counts as activity", repository.PollingTracker{Status: "reading", LatestKnownChapter: &chapter, LatestReleaseAt: ago(200), LatestChapterFoundAt: ago(2), SeriesStatus: "completed"}, 0},
 		{"reading, no chapter yet", repository.PollingTracker{Status: "reading", SeriesStatus: "completed", LatestReleaseAt: ago(400)}, 0},
-		{"plan to read, active", repository.PollingTracker{Status: "plan_to_read", LatestKnownChapter: &chapter, LatestReleaseAt: ago(2)}, idle},
+		{"plan to read, active", repository.PollingTracker{Status: "plan_to_read", LatestKnownChapter: &chapter, LatestReleaseAt: ago(2)}, planToReadEvery},
+		{"plan to read, no chapter yet", repository.PollingTracker{Status: "plan_to_read"}, planToReadEvery},
 		{"plan to read, finished and quiet", repository.PollingTracker{Status: "plan_to_read", LatestKnownChapter: &chapter, LatestReleaseAt: ago(60), SeriesStatus: "completed"}, finishedEvery},
+		{"plan to read, dormant", repository.PollingTracker{Status: "plan_to_read", LatestKnownChapter: &chapter, LatestReleaseAt: ago(120), SeriesStatus: "ongoing"}, dormantPlanEvery},
+		{"on hold, active", repository.PollingTracker{Status: "on_hold", LatestKnownChapter: &chapter, LatestReleaseAt: ago(2)}, idle},
 		{"dropped, dormant", repository.PollingTracker{Status: "dropped", LatestKnownChapter: &chapter, LatestReleaseAt: ago(365)}, dormantIdleEvery},
 	}
 	for _, tc := range cases {
 		if got := pollEvery(tc.tracker, idle, now); got != tc.want {
 			t.Errorf("%s: pollEvery = %s, want %s", tc.name, got, tc.want)
 		}
+	}
+
+	// An idle interval configured below the plan-to-read cadence wins.
+	plan := repository.PollingTracker{Status: "plan_to_read", LatestKnownChapter: &chapter, LatestReleaseAt: ago(2)}
+	if got := pollEvery(plan, time.Hour, now); got != time.Hour {
+		t.Errorf("plan to read with a 1h idle interval: pollEvery = %s, want 1h", got)
 	}
 }
 
