@@ -166,6 +166,19 @@ func hostFromKey(raw string) string {
 	return strings.TrimPrefix(key, "www.")
 }
 
+// Connectors returns every registered connector, sorted by key.
+func (r *Registry) Connectors() []Connector {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	list := make([]Connector, 0, len(r.connectors))
+	for _, connector := range r.connectors {
+		list = append(list, connector)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Key() < list[j].Key() })
+	return list
+}
+
 func (r *Registry) List() []Descriptor {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
