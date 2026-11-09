@@ -318,6 +318,40 @@ func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracke
 	return items, nil
 }
 
+// pollingTrackersQuery is listPollingTrackers' statement, a constant so the
+// test that pins its query plan runs EXPLAIN on the very text the poller runs.
+//
+// The unary plus on m.source_id is deliberate: it keeps that term out of index
+// selection without changing what it matches. Left bare, the planner answered
+// the subquery through idx_tracker_sources_source_id — an index that happens
+// to return a site's links in id order, sparing it the ORDER BY's sort — and
+// so walked every link of the tracker's site, hundreds of rows, per tracker.
+// With the term disqualified the only index left for the subquery is the
+// UNIQUE(tracker_id, source_id, source_url) one, entered by tracker_id: the
+// tracker's own one to five links, filtered and sorted in passing. The
+// database has no sqlite_stat tables and nothing runs ANALYZE, so the choice
+// cannot be left to statistics; INDEXED BY would pin it too, but by an
+// auto-generated index name that turns every poll into an error the day the
+// table is rebuilt, where the plus merely stops helping.
+const pollingTrackersQuery = `
+	SELECT
+		t.id, t.profile_id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
+		t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
+		t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id,
+		mirror.last_polled_at, t.latest_chapter_seen_at, t.latest_chapter_found_at,
+		COALESCE(tm.series_status, '')
+	FROM trackers t
+	INNER JOIN sources s ON s.id = t.source_id
+	LEFT JOIN tracker_metadata tm ON tm.tracker_id = t.id
+	LEFT JOIN tracker_sources mirror ON mirror.id = (
+		SELECT m.id FROM tracker_sources m
+		WHERE m.tracker_id = t.id AND +m.source_id = t.source_id
+		  AND LOWER(TRIM(m.source_url)) = LOWER(TRIM(t.source_url))
+		ORDER BY m.id
+		LIMIT 1
+	)
+`
+
 // listPollingTrackers drains its cursor before returning so the alternates
 // query that follows is not issued against a connection this one still holds.
 //
@@ -326,24 +360,7 @@ func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracke
 // because an aggregate loses the column's DATETIME type, and the driver then
 // hands back a string that will not scan into a time.
 func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingTracker, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT
-			t.id, t.profile_id, t.title, t.status, t.source_id, t.source_item_id, t.source_url,
-			t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
-			t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id,
-			mirror.last_polled_at, t.latest_chapter_seen_at, t.latest_chapter_found_at,
-			COALESCE(tm.series_status, '')
-		FROM trackers t
-		INNER JOIN sources s ON s.id = t.source_id
-		LEFT JOIN tracker_metadata tm ON tm.tracker_id = t.id
-		LEFT JOIN tracker_sources mirror ON mirror.id = (
-			SELECT m.id FROM tracker_sources m
-			WHERE m.tracker_id = t.id AND m.source_id = t.source_id
-			  AND LOWER(TRIM(m.source_url)) = LOWER(TRIM(t.source_url))
-			ORDER BY m.id
-			LIMIT 1
-		)
-	`)
+	rows, err := r.db.QueryContext(ctx, pollingTrackersQuery)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers for polling: %w", err)
 	}

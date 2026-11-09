@@ -148,7 +148,7 @@ func TestSourceMetadataUpsertAndLinks(t *testing.T) {
 		t.Fatalf("fetched_at after write = %v, %v", got, err)
 	}
 
-	links, err := repo.ListMetadataLinks(ctx)
+	links, err := repo.ListMetadataLinks(ctx, []int64{id})
 	if err != nil {
 		t.Fatal(err)
 	}

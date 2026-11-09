@@ -22,11 +22,20 @@ import (
 // often). Every other answer is dropped without touching the database.
 const RefreshAfter = 7 * 24 * time.Hour
 
-// Store is the repository surface the service needs.
+// Store is the repository surface the service needs. The three link listings
+// differ in what they cost: the loop asks the two cheap ones every few
+// minutes, and the one that carries payloads only for views it must rebuild.
 type Store interface {
 	SourceMetadataFetchedAt(ctx context.Context, sourceID int64, sourceURL string) (*time.Time, error)
 	UpsertSourceMetadata(ctx context.Context, sourceID int64, sourceURL string, payload string, fetchedAt time.Time) error
-	ListMetadataLinks(ctx context.Context) ([]repository.MetadataLink, error)
+	// ListMetadataLinkStamps: every tracker's links with when each site's
+	// metadata was stored, no payloads.
+	ListMetadataLinkStamps(ctx context.Context) ([]repository.MetadataLink, error)
+	// ListMetadataLinks: the given trackers' links, payloads included.
+	ListMetadataLinks(ctx context.Context, trackerIDs []int64) ([]repository.MetadataLink, error)
+	// ListMetadataBackfillLinks: the links of trackers with no stored
+	// metadata from any site, no payloads.
+	ListMetadataBackfillLinks(ctx context.Context) ([]repository.MetadataLink, error)
 	TrackerMetadataSignatures(ctx context.Context) (map[int64]string, error)
 	SaveTrackerMetadata(ctx context.Context, rows []repository.TrackerMetadataRow) error
 }
@@ -191,11 +200,12 @@ func groupLinks(links []repository.MetadataLink) (map[int64][]repository.Metadat
 
 // signatureOf names what a tracker's view is built from: every linked site
 // that has stored metadata, with when it was stored. Any link added, removed
-// or refreshed changes it.
+// or refreshed changes it. It reads no payload — FetchedAt alone says whether
+// a site has metadata — so it can be computed from the payload-free listing.
 func signatureOf(links []repository.MetadataLink) string {
 	parts := make([]string, 0, len(links))
 	for _, link := range links {
-		if link.Payload == "" || link.FetchedAt == nil {
+		if link.FetchedAt == nil {
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%d|%s|%d", link.SourceID, strings.ToLower(strings.TrimSpace(link.SourceURL)), link.FetchedAt.Unix()))
@@ -204,12 +214,26 @@ func signatureOf(links []repository.MetadataLink) string {
 	return strings.Join(parts, ";")
 }
 
+// viewIsStale reports whether a tracker's stored view has to be rebuilt:
+// its inputs no longer match the signature it was built from, or it has
+// inputs and no view yet.
+func viewIsStale(signatures map[int64]string, trackerID int64, signature string) bool {
+	stored, exists := signatures[trackerID]
+	if exists {
+		return stored != signature
+	}
+	// Nothing known and nothing stored: nothing to write yet.
+	return signature != ""
+}
+
 // Reconcile rebuilds every tracker view whose inputs changed since it was
 // built and reports how many it wrote. It is cheap when nothing changed: two
-// queries and a comparison per tracker.
+// queries that carry no payloads and a comparison per tracker. The payloads —
+// nearly all of what the tables hold — are read only for the trackers whose
+// view is stale, which between two passes is none or a handful.
 func (s *Service) Reconcile(ctx context.Context) (int, error) {
 	s.dirty.Store(false)
-	links, err := s.store.ListMetadataLinks(ctx)
+	stamps, err := s.store.ListMetadataLinkStamps(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -218,18 +242,33 @@ func (s *Service) Reconcile(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	byTracker, order := groupLinks(links)
+	byTracker, order := groupLinks(stamps)
+	stale := make([]int64, 0)
+	for _, trackerID := range order {
+		if viewIsStale(signatures, trackerID, signatureOf(byTracker[trackerID])) {
+			stale = append(stale, trackerID)
+		}
+	}
+	if len(stale) == 0 {
+		return 0, nil
+	}
+
+	links, err := s.store.ListMetadataLinks(ctx, stale)
+	if err != nil {
+		return 0, err
+	}
+	byTracker, order = groupLinks(links)
 	now := s.now().UTC()
-	rows := make([]repository.TrackerMetadataRow, 0)
+	rows := make([]repository.TrackerMetadataRow, 0, len(order))
 	for _, trackerID := range order {
 		trackerLinks := byTracker[trackerID]
+		// The signature is taken again from the rows the view is built from,
+		// not carried over from the stamps: the poller stores metadata while
+		// this runs, and a view signed with an older stamp than the payload it
+		// holds would be rebuilt once more for nothing. A tracker deleted in
+		// between has no rows here and is simply not visited.
 		signature := signatureOf(trackerLinks)
-		stored, exists := signatures[trackerID]
-		if exists && stored == signature {
-			continue
-		}
-		if !exists && signature == "" {
-			// Nothing known and nothing stored: nothing to write yet.
+		if !viewIsStale(signatures, trackerID, signature) {
 			continue
 		}
 		consolidated := Consolidate(entriesOf(trackerLinks))
@@ -312,7 +351,10 @@ func (s *Service) backfillPass(ctx context.Context) {
 	if s.resolver == nil {
 		return
 	}
-	links, err := s.store.ListMetadataLinks(ctx)
+	// Only the trackers with no metadata at all, and no payloads: the loop
+	// runs this every minute, and it used to read the whole library's stored
+	// metadata each time to find, almost always, nobody to ask about.
+	links, err := s.store.ListMetadataBackfillLinks(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Debug("metadata backfill could not list links", "error", err)
@@ -327,7 +369,7 @@ func (s *Service) backfillPass(ctx context.Context) {
 			return
 		}
 		trackerLinks := byTracker[trackerID]
-		if hasAnyMetadata(trackerLinks) || s.recentlyFailed(trackerID, now) {
+		if s.recentlyFailed(trackerID, now) {
 			continue
 		}
 		link, connector, ok := s.pickBackfillLink(trackerLinks)
@@ -353,15 +395,6 @@ func (s *Service) backfillPass(ctx context.Context) {
 		case <-time.After(s.cfg.BackfillGap):
 		}
 	}
-}
-
-func hasAnyMetadata(links []repository.MetadataLink) bool {
-	for _, link := range links {
-		if link.Payload != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) pickBackfillLink(links []repository.MetadataLink) (repository.MetadataLink, connectors.Connector, bool) {

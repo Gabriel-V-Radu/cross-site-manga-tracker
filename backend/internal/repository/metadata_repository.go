@@ -49,6 +49,12 @@ func (r *MetadataRepository) UpsertSourceMetadata(ctx context.Context, sourceID 
 	if sourceID <= 0 || key == "" {
 		return fmt.Errorf("upsert source metadata: missing source or url")
 	}
+	// A stored row is read everywhere as "this site has metadata for the
+	// series" (ListMetadataBackfillLinks does not even look inside it), so a
+	// row with nothing in it must never be written.
+	if strings.TrimSpace(payload) == "" {
+		return fmt.Errorf("upsert source metadata: empty payload")
+	}
 	if _, err := r.db.ExecContext(ctx, `
 		INSERT INTO source_metadata (source_id, source_url, payload, fetched_at)
 		VALUES (?, ?, ?, ?)
@@ -61,8 +67,12 @@ func (r *MetadataRepository) UpsertSourceMetadata(ctx context.Context, sourceID 
 	return nil
 }
 
-// MetadataLink is one site a tracker is linked to, with that site's stored
-// metadata for the series when there is any (Payload "" otherwise).
+// MetadataLink is one site a tracker is linked to. FetchedAt is when that
+// site's metadata for the series was stored, nil when it has none. Payload is
+// the stored metadata itself and is only filled by ListMetadataLinks: the
+// payloads are nearly all of the table's weight, and the passes that run
+// every few minutes need to know that a row exists and how old it is, not
+// what it says.
 type MetadataLink struct {
 	TrackerID  int64
 	SourceID   int64
@@ -73,25 +83,109 @@ type MetadataLink struct {
 	FetchedAt  *time.Time
 }
 
-// ListMetadataLinks returns every tracker's linked sites — the primary and
-// every tracker_sources row, the primary's mirror folded into it — with their
-// stored metadata. One query for the whole library: the consolidation pass
-// compares every tracker's inputs with what its stored view was built from.
-func (r *MetadataRepository) ListMetadataLinks(ctx context.Context) ([]MetadataLink, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT links.tracker_id, links.source_id, s.key, s.name, links.source_url, sm.payload, sm.fetched_at
+// The three link queries below share these pieces. metadataLinksFrom is every
+// tracker's linked sites: the primary and every tracker_sources row, the
+// primary's mirror folded into it (UNION folds the exact duplicates,
+// queryMetadataLinks the ones that differ in case or whitespace).
+// metadataLinksJoin attaches a site's stored row by the key source_metadata
+// is stored under. The order ends on the URL so two links of one tracker to
+// the same site come back the same way round from every query: which of them
+// the backfill asks first, and the order a view's sources are merged in, must
+// not depend on which query produced the rows.
+const (
+	metadataLinksFrom = `
 		FROM (
 			SELECT id AS tracker_id, source_id, source_url FROM trackers
 			UNION
 			SELECT tracker_id, source_id, source_url FROM tracker_sources
 		) links
-		INNER JOIN sources s ON s.id = links.source_id
+		INNER JOIN sources s ON s.id = links.source_id`
+	metadataLinksJoin = `
 		LEFT JOIN source_metadata sm
-			ON sm.source_id = links.source_id AND sm.source_url = LOWER(TRIM(links.source_url))
-		ORDER BY links.tracker_id, links.source_id
-	`)
+			ON sm.source_id = links.source_id AND sm.source_url = LOWER(TRIM(links.source_url))`
+	metadataLinksOrder = `
+		ORDER BY links.tracker_id, links.source_id, links.source_url`
+)
+
+// ListMetadataLinkStamps returns every tracker's linked sites with when each
+// site's metadata was stored, and no payloads. It is what the consolidation
+// pass compares against the signature every stored view was built from; on
+// the deployed library the payloads it leaves out were about a megabyte per
+// call, read every few minutes to conclude that nothing had changed.
+func (r *MetadataRepository) ListMetadataLinkStamps(ctx context.Context) ([]MetadataLink, error) {
+	return r.queryMetadataLinks(ctx, "list metadata link stamps", `
+		SELECT links.tracker_id, links.source_id, s.key, s.name, links.source_url, NULL, sm.fetched_at`+
+		metadataLinksFrom+metadataLinksJoin+metadataLinksOrder)
+}
+
+// maxMetadataLinkTrackers bounds one statement's IN list. A fresh database
+// rebuilds every view in its first pass, and the list must stay under
+// SQLite's bound-parameter limit however large the library is.
+const maxMetadataLinkTrackers = 500
+
+// ListMetadataLinks returns the given trackers' linked sites with their
+// stored metadata, payloads included — what a view is built from, asked only
+// for the trackers whose view has to be rebuilt.
+func (r *MetadataRepository) ListMetadataLinks(ctx context.Context, trackerIDs []int64) ([]MetadataLink, error) {
+	links := make([]MetadataLink, 0)
+	for start := 0; start < len(trackerIDs); start += maxMetadataLinkTrackers {
+		batch := trackerIDs[start:min(start+maxMetadataLinkTrackers, len(trackerIDs))]
+		args := make([]any, 0, len(batch))
+		for _, trackerID := range batch {
+			args = append(args, trackerID)
+		}
+		// Each batch's cursor is drained and closed inside queryMetadataLinks
+		// before the next statement is issued: the pool has one connection.
+		batchLinks, err := r.queryMetadataLinks(ctx, "list metadata links", `
+			SELECT links.tracker_id, links.source_id, s.key, s.name, links.source_url, sm.payload, sm.fetched_at`+
+			metadataLinksFrom+metadataLinksJoin+`
+			WHERE links.tracker_id IN (`+sqlPlaceholders(len(batch))+`)`+
+			metadataLinksOrder, args...)
+		if err != nil {
+			return nil, err
+		}
+		links = append(links, batchLinks...)
+	}
+	return links, nil
+}
+
+// ListMetadataBackfillLinks returns the linked sites of the trackers that
+// have no stored metadata from any of them — the only trackers the backfill
+// has anything to do for, and after the first days there are none, so the
+// pass that runs every minute costs one query that returns no rows. Whether
+// a tracker has metadata is settled on source_metadata's primary key alone,
+// without reading a row: UpsertSourceMetadata is the table's only writer and
+// refuses an empty payload, so a row that exists is metadata.
+func (r *MetadataRepository) ListMetadataBackfillLinks(ctx context.Context) ([]MetadataLink, error) {
+	return r.queryMetadataLinks(ctx, "list metadata backfill links", metadataBackfillLinksQuery)
+}
+
+// metadataBackfillLinksQuery is a constant so the test that pins its plan —
+// source_metadata reached through its primary-key index only — runs EXPLAIN
+// on the statement the loop actually issues.
+const metadataBackfillLinksQuery = `
+		SELECT links.tracker_id, links.source_id, s.key, s.name, links.source_url, NULL, NULL` +
+	metadataLinksFrom + `
+		WHERE links.tracker_id NOT IN (
+			SELECT t.id FROM trackers t
+			WHERE EXISTS (
+				SELECT 1 FROM source_metadata sm
+				WHERE sm.source_id = t.source_id AND sm.source_url = LOWER(TRIM(t.source_url))
+			)
+			UNION ALL
+			SELECT ts.tracker_id FROM tracker_sources ts
+			WHERE EXISTS (
+				SELECT 1 FROM source_metadata sm
+				WHERE sm.source_id = ts.source_id AND sm.source_url = LOWER(TRIM(ts.source_url))
+			)
+		)` + metadataLinksOrder
+
+// queryMetadataLinks runs one of the link queries and reads it to the end, so
+// the connection is free again when it returns.
+func (r *MetadataRepository) queryMetadataLinks(ctx context.Context, what string, query string, args ...any) ([]MetadataLink, error) {
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list metadata links: %w", err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
 	defer rows.Close()
 
@@ -102,7 +196,7 @@ func (r *MetadataRepository) ListMetadataLinks(ctx context.Context) ([]MetadataL
 		var payload sql.NullString
 		var fetchedAt sql.NullTime
 		if err := rows.Scan(&link.TrackerID, &link.SourceID, &link.SourceKey, &link.SourceName, &link.SourceURL, &payload, &fetchedAt); err != nil {
-			return nil, fmt.Errorf("scan metadata link: %w", err)
+			return nil, fmt.Errorf("%s: scan: %w", what, err)
 		}
 		// UNION folds exact duplicates only; the primary's mirror row can
 		// differ from the trackers row in case or whitespace.
@@ -121,7 +215,7 @@ func (r *MetadataRepository) ListMetadataLinks(ctx context.Context) ([]MetadataL
 		links = append(links, link)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate metadata links: %w", err)
+		return nil, fmt.Errorf("%s: iterate: %w", what, err)
 	}
 	return links, nil
 }
