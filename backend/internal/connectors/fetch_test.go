@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -400,6 +401,61 @@ func TestFetchHTMLRefusesAnOffSiteRedirect(t *testing.T) {
 	}
 	if page != "<html>Chapter 12</html>" {
 		t.Fatalf("page = %q", page)
+	}
+}
+
+// TestRefuseOffSiteRedirectNeverRequestsTheForeignPage: the connectors' own
+// client stops at the hop that leaves the site, so the foreign host is not
+// asked at all, and the verdict is the same bare OffSiteRedirectError a client
+// that followed the hop gets. A hop within the site is still followed.
+func TestRefuseOffSiteRedirectNeverRequestsTheForeignPage(t *testing.T) {
+	var foreignHits atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignHits.Add(1)
+		io.WriteString(w, "<html>Join our Discord</html>")
+	}))
+	defer foreign.Close()
+	foreignURL := strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)
+
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/series/154":
+			http.Redirect(w, r, foreignURL+"/invite", http.StatusFound)
+		case "/old":
+			http.Redirect(w, r, "/series/1", http.StatusMovedPermanently)
+		default:
+			io.WriteString(w, "<html>Chapter 12</html>")
+		}
+	}))
+	defer site.Close()
+
+	client := &http.Client{CheckRedirect: RefuseOffSiteRedirect}
+
+	_, err := FetchHTML(context.Background(), client, site.URL+"/series/154")
+	var offSite *OffSiteRedirectError
+	if !errors.As(err, &offSite) {
+		t.Fatalf("err = %v, want an off-site redirect verdict", err)
+	}
+	if offSite.From != "127.0.0.1" || offSite.To != "localhost" {
+		t.Fatalf("redirect = %+v, want 127.0.0.1 -> localhost", offSite)
+	}
+	if err.Error() != offSite.Error() {
+		t.Fatalf("the verdict must come back bare, got %q", err)
+	}
+	if hits := foreignHits.Load(); hits != 0 {
+		t.Fatalf("the foreign host must not be requested, got %d requests", hits)
+	}
+
+	page, err := FetchHTML(context.Background(), client, site.URL+"/old")
+	if err != nil {
+		t.Fatalf("a redirect within the site must be followed, got %v", err)
+	}
+	if page != "<html>Chapter 12</html>" {
+		t.Fatalf("page = %q", page)
+	}
+
+	if NewThrottledClient().CheckRedirect == nil {
+		t.Fatal("the connectors' client must refuse off-site redirects")
 	}
 }
 

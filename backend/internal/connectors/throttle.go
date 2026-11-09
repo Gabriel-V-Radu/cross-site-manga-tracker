@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -84,6 +85,10 @@ type hostState struct {
 	nextAllowed         time.Time
 	consecutiveFailures int
 	blockedUntil        time.Time
+	// onProbation is set when the circuit opens and cleared by the first
+	// success after it: until then the host has not shown it is back, and one
+	// more failure is enough to open the circuit again (see observe).
+	onProbation bool
 }
 
 type throttler struct {
@@ -167,6 +172,13 @@ func (t *throttler) release(host string, slot time.Time) {
 
 // observe records a request's outcome. A refused or unreachable host opens the
 // circuit after failureThreshold consecutive failures; any success closes it.
+//
+// A circuit that has just expired is on probation: the first request through
+// is a probe, and if it fails the circuit opens again at once instead of after
+// another failureThreshold failures. Without that, a host that stayed dark got
+// a fresh run of full-length failures every time its cooldown ran out — five
+// dial timeouts of thirty seconds each, per host, every ten minutes, which is
+// what stretched a four-minute poll cycle to sixteen during a route outage.
 func (t *throttler) observe(host string, now time.Time, failed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -179,13 +191,21 @@ func (t *throttler) observe(host string, now time.Time, failed bool) {
 
 	if !failed {
 		state.consecutiveFailures = 0
+		state.onProbation = false
+		return
+	}
+
+	if state.blockedUntil.After(now) {
+		// A request that was already in flight when the circuit opened: the
+		// same incident, not new evidence.
 		return
 	}
 
 	state.consecutiveFailures++
-	if state.consecutiveFailures >= t.failureThreshold {
+	if state.onProbation || state.consecutiveFailures >= t.failureThreshold {
 		state.blockedUntil = now.Add(t.cooldown)
 		state.consecutiveFailures = 0
+		state.onProbation = true
 	}
 }
 
@@ -247,12 +267,40 @@ func isThrottleFailure(ctx context.Context, res *http.Response, err error) bool 
 	}
 }
 
+// connectTimeout bounds opening a connection. net/http's default transport
+// allows thirty seconds, which is the timeout of a host that will never
+// answer: the sites this app reads sit behind CDNs that complete a handshake
+// in well under a second, so a connect still pending after ten is a dead
+// route or a dead address, and every further second is a poll shard standing
+// still. (With several addresses for a name the dialer splits this budget
+// across them.)
+const connectTimeout = 10 * time.Second
+
+// sharedDialer opens the connectors' connections: net/http's default dialer
+// with connectTimeout in place of its thirty seconds.
+var sharedDialer = &net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}
+
+// sharedTransport is http.DefaultTransport dialing through sharedDialer,
+// shared by every throttled client so connections are pooled across
+// connectors exactly as they were on the default transport.
+var sharedTransport = func() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Something replaced the default transport with its own type; there is
+		// no dialer of ours to put into that.
+		return http.DefaultTransport
+	}
+	transport := base.Clone()
+	transport.DialContext = sharedDialer.DialContext
+	return transport
+}()
+
 // ThrottleTransport wraps base with the shared per-host throttle. Connectors
 // that need a custom transport (freewebnovel's TLS-fingerprint dialer) wrap it
 // here so their traffic is paced like everyone else's.
 func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
 	if base == nil {
-		base = http.DefaultTransport
+		base = sharedTransport
 	}
 	return &throttledTransport{base: base, throttler: defaultThrottler}
 }
@@ -265,9 +313,31 @@ func ThrottleTransport(base http.RoundTripper) http.RoundTripper {
 // the callers' per-request contexts, which every call path sets.
 func NewThrottledClient() *http.Client {
 	return &http.Client{
-		Timeout:   MinClientTimeout,
-		Transport: ThrottleTransport(nil),
+		Timeout:       MinClientTimeout,
+		Transport:     ThrottleTransport(nil),
+		CheckRedirect: RefuseOffSiteRedirect,
 	}
+}
+
+// RefuseOffSiteRedirect is an http.Client.CheckRedirect that stops a redirect
+// chain at the hop that leaves the site first asked, with an
+// *OffSiteRedirectError. The page behind such a hop is never the one that was
+// asked for — FetchBytes refuses it anyway — so following it only fetched a
+// stranger's page to throw away: during a FlameComics outage every poll of
+// every Flame tracker also requested a Discord invite page, with this app's
+// browser User-Agent. Same-site hops (a www. or m. host, a path change) are
+// followed up to net/http's usual limit of ten.
+func RefuseOffSiteRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if from, to := via[0].URL.Hostname(), req.URL.Hostname(); !SameSite(from, to) {
+		return &OffSiteRedirectError{From: from, To: to}
+	}
+	return nil
 }
 
 // NoteHostRateLimited opens the shared circuit for host for the standard
@@ -323,4 +393,5 @@ func (t *throttler) block(host string, now time.Time) {
 		state.blockedUntil = until
 	}
 	state.consecutiveFailures = 0
+	state.onProbation = true
 }

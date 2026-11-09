@@ -80,6 +80,65 @@ func TestThrottlerOpensCircuitAfterConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// A host whose cooldown has just run out is on probation: one failed probe
+// opens the circuit again, where it used to take a whole new run of failures —
+// each of them a full timeout while the host stayed dark. A success ends the
+// probation, and the host is back to the ordinary threshold.
+func TestThrottlerReopensOnTheFirstFailureAfterACooldown(t *testing.T) {
+	th := newTestThrottler()
+	now := time.Unix(1000, 0)
+	var cooling *SourceCoolingDownError
+
+	for i := 0; i < 3; i++ {
+		th.observe("a.example", now, true)
+	}
+
+	// A request that was in flight when the circuit opened fails afterwards:
+	// the same incident, it must not move the cooldown.
+	th.observe("a.example", now.Add(10*time.Second), true)
+	if open := th.openCircuits(now.Add(10 * time.Second)); len(open) != 1 || open[0].BlockedFor != 50*time.Second {
+		t.Fatalf("a late failure of the same incident moved the cooldown: %+v", open)
+	}
+
+	afterCooldown := now.Add(2 * time.Minute)
+	if _, _, err := th.reserve("a.example", afterCooldown); err != nil {
+		t.Fatalf("the probe after the cooldown must be admitted, got %v", err)
+	}
+	th.observe("a.example", afterCooldown, true)
+	if _, _, err := th.reserve("a.example", afterCooldown.Add(time.Second)); !errors.As(err, &cooling) {
+		t.Fatalf("one failed probe must reopen the circuit, got %v", err)
+	}
+
+	// The next probe succeeds: probation is over, one failure is a blip again.
+	recovered := afterCooldown.Add(2 * time.Minute)
+	th.observe("a.example", recovered, false)
+	th.observe("a.example", recovered, true)
+	if _, _, err := th.reserve("a.example", recovered.Add(time.Second)); err != nil {
+		t.Fatalf("after a success a single failure must not open the circuit, got %v", err)
+	}
+}
+
+// The connectors' shared transport gives up on a connection that will not open
+// long before net/http's default thirty seconds.
+func TestSharedTransportBoundsTheConnect(t *testing.T) {
+	transport, ok := sharedTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("sharedTransport is %T, want *http.Transport", sharedTransport)
+	}
+	if transport == http.DefaultTransport {
+		t.Fatal("the shared transport must be its own copy, not the process-wide default")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("the shared transport must dial through sharedDialer")
+	}
+	if sharedDialer.Timeout != connectTimeout || connectTimeout > 10*time.Second {
+		t.Fatalf("connect timeout = %s (dialer %s), want at most 10s", connectTimeout, sharedDialer.Timeout)
+	}
+	if wrapped, ok := ThrottleTransport(nil).(*throttledTransport); !ok || wrapped.base != sharedTransport {
+		t.Fatal("a throttled client with no transport of its own must use the shared one")
+	}
+}
+
 func TestThrottlerSuccessResetsFailureStreak(t *testing.T) {
 	th := newTestThrottler()
 	now := time.Unix(1000, 0)

@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,14 @@ func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte,
 
 	res, err := client.Do(req)
 	if err != nil {
+		// A client that refuses off-site hops (RefuseOffSiteRedirect) reports
+		// one here, wrapped in the request's url.Error; it is handed back as
+		// the same bare verdict the check below gives a client that followed
+		// the hop.
+		var offSite *OffSiteRedirectError
+		if errors.As(err, &offSite) {
+			return nil, "", offSite
+		}
 		return nil, "", fmt.Errorf("request failed: %w", err)
 	}
 	defer res.Body.Close()
