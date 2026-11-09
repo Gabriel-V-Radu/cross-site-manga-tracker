@@ -12,10 +12,13 @@ import (
 )
 
 type Config struct {
-	Environment     string
-	AppName         string
-	Port            string
-	LogLevel        slog.Level
+	Environment string
+	AppName     string
+	Port        string
+	LogLevel    slog.Level
+	// LogFile is where the server also appends its log, so it outlives the
+	// container that stdout dies with; empty logs to stdout only.
+	LogFile         string
 	SQLitePath      string
 	SeedDefaultData bool
 	PollingEnabled  bool
@@ -68,6 +71,7 @@ func Load() (Config, error) {
 		Environment:        getEnv("APP_ENV", "development"),
 		AppName:            getEnv("APP_NAME", "cross-site-tracker"),
 		Port:               getEnvAsPort("APP_PORT", "8080"),
+		LogFile:            strings.TrimSpace(os.Getenv("LOG_FILE")),
 		SQLitePath:         getEnv("SQLITE_PATH", "./data/app.sqlite"),
 		SeedDefaultData:    getEnvAsBool("SEED_DEFAULT_DATA", true),
 		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),

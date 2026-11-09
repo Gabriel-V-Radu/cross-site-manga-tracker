@@ -27,7 +27,7 @@ func main() {
 func run() int {
 	// The server is the one binary that always migrates: it owns the database
 	// and a schema behind the code it runs is not a state it can serve from.
-	runtime, err := app.Open(app.Options{Migrate: true, JSONLogs: true})
+	runtime, err := app.Open(app.Options{Migrate: true, JSONLogs: true, FileLog: true})
 	if err != nil {
 		slog.Error("startup failed", "error", err)
 		return 1

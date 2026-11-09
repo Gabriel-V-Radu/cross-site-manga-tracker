@@ -125,6 +125,14 @@ container) and can also be run from `backend/` with `go run ./cmd/<name>`:
   poller changes. It writes to the copy, so never aim it at the live file.
   `--feeds 3 --feed-gap 4m` runs feed ticks instead of cycles.
 
+## Logs
+- The server logs to stdout (`docker logs`), which Docker keeps only as long
+  as the container: a redeploy recreates it and the log is gone.
+- With `LOG_FILE` set (`./data/logs/app.log` in `.env.example`) it also
+  appends the same lines to that file in the data volume, which survives
+  redeploys and reboots. The file is rotated at 5 MB and three old files are
+  kept (`app.log.1` … `app.log.3`), so it never takes more than 20 MB.
+
 ## Polling
 - Every `POLLING_MINUTES` (30) of rest the poller runs a cycle: each tracker
   that is due is asked about on one of its linked sites, in turn.

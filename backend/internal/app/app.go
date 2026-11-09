@@ -11,6 +11,7 @@ package app
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -30,6 +31,11 @@ type Options struct {
 	// LogLevel overrides the configured level when non-nil. The tools run at
 	// Info regardless of what the server's environment says.
 	LogLevel *slog.Level
+	// FileLog also appends the log to the configured LOG_FILE, when one is
+	// configured (see logfile.go). Only the server asks for it: a tool's
+	// output belongs to the terminal it was run from, not in the server's
+	// history.
+	FileLog bool
 }
 
 // Runtime is what Open hands back: the loaded configuration and an open
@@ -37,6 +43,8 @@ type Options struct {
 type Runtime struct {
 	Config config.Config
 	DB     *sql.DB
+	// logFile is the server's log file, nil when it logs to stdout only.
+	logFile *rotatingLogFile
 }
 
 // Open runs the startup sequence. Every failure is returned rather than
@@ -52,41 +60,62 @@ func Open(opts Options) (*Runtime, error) {
 	if opts.LogLevel != nil {
 		level = *opts.LogLevel
 	}
+	// Stdout always gets the log, and gets it first: the file is the copy that
+	// outlives the container, never the only one. A log file that cannot be
+	// opened is a warning, not a reason to refuse to start.
+	var output io.Writer = os.Stdout
+	var logFile *rotatingLogFile
+	var logFileErr error
+	if opts.FileLog && cfg.LogFile != "" {
+		if logFile, logFileErr = openRotatingLogFile(cfg.LogFile, logFileMaxBytes, logFileKeep); logFileErr == nil {
+			output = io.MultiWriter(os.Stdout, logFile)
+		}
+	}
+
 	handlerOptions := &slog.HandlerOptions{Level: level}
 	var handler slog.Handler
 	if opts.JSONLogs {
-		handler = slog.NewJSONHandler(os.Stdout, handlerOptions)
+		handler = slog.NewJSONHandler(output, handlerOptions)
 	} else {
-		handler = slog.NewTextHandler(os.Stdout, handlerOptions)
+		handler = slog.NewTextHandler(output, handlerOptions)
 	}
 	slog.SetDefault(slog.New(handler))
+	if logFileErr != nil {
+		slog.Warn("log file unavailable; logging to stdout only", "path", cfg.LogFile, "error", logFileErr)
+	}
 
 	db, err := database.Open(cfg.SQLitePath)
 	if err != nil {
+		_ = logFile.Close()
 		return nil, fmt.Errorf("open sqlite %s: %w", cfg.SQLitePath, err)
 	}
 
 	if opts.Migrate {
 		if err := database.ApplyMigrations(db); err != nil {
 			_ = db.Close()
+			_ = logFile.Close()
 			return nil, fmt.Errorf("apply migrations: %w", err)
 		}
 		if cfg.SeedDefaultData {
 			if err := database.SeedDefaults(db); err != nil {
 				_ = db.Close()
+				_ = logFile.Close()
 				return nil, fmt.Errorf("seed defaults: %w", err)
 			}
 		}
 	}
 
-	return &Runtime{Config: cfg, DB: db}, nil
+	return &Runtime{Config: cfg, DB: db, logFile: logFile}, nil
 }
 
-// Close releases the database. Safe on a nil runtime, so a caller can defer it
-// right after Open without checking the error first.
+// Close releases the database and the log file. Safe on a nil runtime, so a
+// caller can defer it right after Open without checking the error first.
 func (r *Runtime) Close() {
-	if r == nil || r.DB == nil {
+	if r == nil {
 		return
 	}
-	_ = r.DB.Close()
+	if r.DB != nil {
+		_ = r.DB.Close()
+	}
+	_ = r.logFile.Close()
 }
