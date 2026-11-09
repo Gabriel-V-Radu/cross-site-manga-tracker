@@ -54,9 +54,15 @@ type Progress struct {
 	// WithCandidates counts scanned trackers that yielded at least one
 	// suggestion; the rest land in the queue's "no candidate found" section.
 	WithCandidates int
-	StartedAt      time.Time
-	FinishedAt     *time.Time
-	LastError      string
+	// SearchFailed counts scanned trackers whose search of the source failed
+	// and turned up nothing. Their stored candidates were left as they were:
+	// a search that never ran says nothing about what the source has.
+	// LastError carries the same count in words, which is how it reaches the
+	// status line.
+	SearchFailed int
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	LastError    string
 	// Stopped records that the user cut the scan short; what was already
 	// stored stays stored, the rest simply was not visited.
 	Stopped bool
@@ -246,7 +252,18 @@ func (s *Scanner) shouldStop() bool {
 }
 
 func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, sourceID int64, connector connectors.Connector, filter repository.LinkScanFilter) {
+	// Trackers skipped because their search failed, with the last cause. One
+	// log line for the whole scan: a source that is cooling down fails every
+	// tracker the same way, and a line each would bury everything else.
+	searchFailed := 0
+	var lastSearchErr error
+
 	defer func() {
+		if searchFailed > 0 {
+			s.logger.Info("link scan left stored candidates untouched where the search failed",
+				"source", connector.Key(), "trackers", searchFailed, "lastError", lastSearchErr)
+		}
+
 		s.mu.Lock()
 		now := time.Now().UTC()
 		s.progress.Running = false
@@ -284,7 +301,7 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 			s.logger.Warn("link scan could not load decided candidates", "trackerId", target.TrackerID, "error", err)
 		}
 
-		suggestions := s.findCandidates(ctx, connector, target, sourceID, decided)
+		suggestions, searchErr := s.findCandidates(ctx, connector, target, sourceID, decided)
 
 		// A cancelled scan comes back from the searches above with nothing to
 		// show for them, and storing that nothing would erase the candidates
@@ -293,7 +310,17 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 			return
 		}
 
-		if err := s.store.ReplacePendingSuggestions(ctx, target.TrackerID, sourceID, suggestions); err != nil {
+		if searchErr != nil && len(suggestions) == 0 {
+			// The same rule for a search that failed on its own — a timeout, a
+			// source cooling down, an HTTP error. It found nothing because it
+			// did not run, and replacing with that nothing deleted every pending
+			// candidate of every tracker a rescan of a struggling site walked
+			// past. The tracker still counts as checked: the scan is done with
+			// it, and what it had is what it keeps.
+			searchFailed++
+			lastSearchErr = searchErr
+			s.noteSearchFailed(searchFailed, searchErr)
+		} else if err := s.store.ReplacePendingSuggestions(ctx, target.TrackerID, sourceID, suggestions); err != nil {
 			s.logger.Warn("link scan store failed", "trackerId", target.TrackerID, "error", err)
 			s.setError(fmt.Sprintf("store suggestions: %v", err))
 		}
@@ -313,6 +340,25 @@ func (s *Scanner) setError(message string) {
 	s.mu.Unlock()
 }
 
+// maxSearchErrorLength keeps a connector's error — which can quote a whole
+// URL or a response body — from pushing the status line off the page.
+const maxSearchErrorLength = 160
+
+// noteSearchFailed records that one more tracker was left as it was because
+// its search failed. The count goes into LastError as well as SearchFailed:
+// the status line renders LastError, during the scan and after it.
+func (s *Scanner) noteSearchFailed(total int, cause error) {
+	reason := []rune(strings.TrimSpace(cause.Error()))
+	if len(reason) > maxSearchErrorLength {
+		reason = append(reason[:maxSearchErrorLength], '…')
+	}
+
+	s.mu.Lock()
+	s.progress.SearchFailed = total
+	s.progress.LastError = fmt.Sprintf("%d series could not be searched and kept the candidates they had (last error: %s)", total, string(reason))
+	s.mu.Unlock()
+}
+
 // findCandidates searches the source for one tracker and scores what comes
 // back. A metadata-aggregator lookup runs first: a confirmed record widens
 // the title set candidates are scored against, and on MangaUpdates it skips
@@ -323,7 +369,13 @@ func (s *Scanner) setError(message string) {
 // filled every slot, the store then skipped all three, and the fourth hit —
 // often the right series — was thrown away along with the alternate-title
 // queries that only run when nothing was found.
-func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, decidedURLs []string) []repository.LinkSuggestion {
+//
+// The error is the last search of the source that failed, nil when every one
+// it ran was answered. It comes back beside whatever the other searches found
+// rather than instead of it: candidates are worth storing however they were
+// reached, and only the caller can tell an empty result that means "the source
+// has nothing" from one that means "the source was not asked".
+func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64, decidedURLs []string) ([]repository.LinkSuggestion, error) {
 	wanted := append([]string{target.Title}, target.RelatedTitles...)
 
 	decided := make(map[string]struct{}, len(decidedURLs))
@@ -342,7 +394,7 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 		if connector.Key() == "mangaupdates" {
 			if suggestion := s.directSuggestion(ctx, connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
 				if _, done := decided[suggestion.CandidateURL]; !done {
-					return []repository.LinkSuggestion{*suggestion}
+					return []repository.LinkSuggestion{*suggestion}, nil
 				}
 			}
 		}
@@ -363,12 +415,19 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 
 	seen := map[string]struct{}{}
 	best := make([]repository.LinkSuggestion, 0, maxCandidatesPerTracker)
+	var searchErr error
 	for attempt, query := range queries {
 		if attempt > 0 && len(best) > 0 {
 			break
 		}
 
-		results := s.search(ctx, connector, query)
+		results, err := s.search(ctx, connector, query)
+		if err != nil {
+			// The next query still gets its chance: a title the site chokes
+			// on does not make its alternates unsearchable.
+			searchErr = err
+			continue
+		}
 		for _, result := range results {
 			url := strings.TrimSpace(result.URL)
 			if url == "" {
@@ -423,7 +482,7 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 		}
 	}
 
-	return best
+	return best, searchErr
 }
 
 // lookupAid asks the aggregator about the tracker and returns its record only
@@ -493,16 +552,20 @@ func (s *Scanner) directSuggestion(ctx context.Context, connector connectors.Con
 	return &suggestion
 }
 
-func (s *Scanner) search(parent context.Context, connector connectors.Connector, query string) []connectors.MangaResult {
+// search runs one query against the source. The error is returned, not
+// swallowed into an empty result: a search that failed and a search that
+// matched nothing look the same as slices, and the caller clears a tracker's
+// stored candidates on the second but must not on the first.
+func (s *Scanner) search(parent context.Context, connector connectors.Connector, query string) ([]connectors.MangaResult, error) {
 	ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
 	defer cancel()
 
 	results, err := connector.SearchByTitle(ctx, query, 8)
 	if err != nil {
 		s.logger.Debug("link scan search failed", "query", query, "error", err)
-		return nil
+		return nil, err
 	}
-	return results
+	return results, nil
 }
 
 func (s *Scanner) resolve(parent context.Context, connector connectors.Connector, url string) *connectors.MangaResult {
