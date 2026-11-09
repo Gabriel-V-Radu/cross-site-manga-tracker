@@ -37,7 +37,8 @@ func unicodeLower(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value,
 // TIMESTAMP COLUMNS HOLD TWO DIFFERENT SPELLINGS. Read this before writing a
 // query that does date arithmetic in SQL.
 //
-// The DSN is a bare path, so modernc.org/sqlite binds a time.Time with
+// The DSN names no _time_format (it carries only the PRAGMAs listed at
+// connectionPragmas), so modernc.org/sqlite binds a time.Time with
 // time.Time.String() — "2026-08-29 14:03:22.123456789 +0000 UTC". SQLite's own
 // CURRENT_TIMESTAMP, which the schema uses for column defaults, writes
 // "2026-08-29 14:03:22". Both land in the same columns (created_at,
@@ -65,40 +66,68 @@ func Open(sqlitePath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("create sqlite dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", sqlitePath)
+	db, err := sql.Open("sqlite", dataSourceName(sqlitePath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// One connection, not a pool. PRAGMAs issued through database/sql apply
-	// to whichever pooled connection runs them, so with a pool the settings
-	// below only ever covered one connection — and two of our own connections
-	// could contend hard enough to surface SQLITE_BUSY (a link scan writing
-	// while the dashboard read). SQLite serializes writers anyway; a single
-	// connection makes the serialization explicit and the PRAGMAs reliable.
+	// One connection, not a pool. Two of our own connections could contend
+	// hard enough to surface SQLITE_BUSY (a link scan writing while the
+	// dashboard read). SQLite serializes writers anyway; a single connection
+	// makes the serialization explicit. It is not what keeps the PRAGMAs in
+	// force: those come from the DSN, for every connection the pool opens.
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.Exec(`PRAGMA journal_mode = WAL;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("set sqlite WAL: %w", err)
-	}
-
-	// Still worth having with one connection: external processes (backups,
-	// the CLI tools) can hold the file, and waiting beats failing.
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("set sqlite busy timeout: %w", err)
-	}
-
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("enable sqlite foreign keys: %w", err)
-	}
-
+	// sql.Open connects lazily, so this is where the file is opened and the
+	// DSN's PRAGMAs run; a database that cannot take them fails here.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, fmt.Errorf("open sqlite connection and apply pragmas: %w", err)
 	}
 
 	return db, nil
+}
+
+// connectionPragmas are the settings every connection must run under, spelled
+// as the driver's `_pragma` DSN parameters: modernc.org/sqlite executes each
+// one as a PRAGMA statement on every connection it opens (busy_timeout first,
+// the rest alphabetically).
+//
+// They used to be issued once through db.Exec, which only configures the
+// connection that happens to run them. database/sql replaces a connection the
+// driver reports as bad — this driver does for one still flagged as
+// interrupted, which a cancelled statement can leave behind — without telling
+// anyone, and the replacement came up on SQLite's defaults: foreign keys OFF,
+// so ON DELETE CASCADE stopped cascading, and no busy timeout.
+//
+//   - busy_timeout: still worth having with one connection. External processes
+//     (backups, the CLI tools) can hold the file, and waiting beats failing.
+//   - foreign_keys: off by default in SQLite; the schema's cascades need it.
+//   - journal_mode=WAL: readers do not block the writer.
+//   - synchronous=NORMAL: the default, FULL, fsyncs on every commit, and the
+//     poller commits once per polled tracker — hundreds of fsyncs per cycle on
+//     the Pi. In WAL mode NORMAL syncs at checkpoints only and still cannot
+//     corrupt the database. A crash of the process loses nothing; a power cut
+//     can lose the commits the OS had not flushed yet, a few seconds' worth.
+//     Those are nearly always poll results the next cycle writes again, but
+//     an edit made in those same seconds would go with them.
+//
+// Nothing else belongs in the DSN. In particular no _time_format: the stored
+// timestamp spelling described above Open depends on its absence.
+const connectionPragmas = "_pragma=busy_timeout(5000)" +
+	"&_pragma=foreign_keys(1)" +
+	"&_pragma=journal_mode(WAL)" +
+	"&_pragma=synchronous(NORMAL)"
+
+// dataSourceName appends the pragmas to the configured path. The driver cuts
+// a DSN at its first "?" and opens what precedes it as a plain file name
+// unless it starts with "file:", so a Windows path (C:\dir\app.sqlite) and a
+// relative one (./data/app.sqlite) reach SQLite exactly as they were given. A
+// path that already carries parameters keeps them.
+func dataSourceName(sqlitePath string) string {
+	separator := "?"
+	if strings.Contains(sqlitePath, "?") {
+		separator = "&"
+	}
+	return sqlitePath + separator + connectionPragmas
 }
