@@ -178,6 +178,8 @@ var keepTrackerCardFresh = function (cardID, requestURL) {
         attempts += 1;
         var node = document.getElementById(cardID);
         if (!node) {
+            // Off the page for now (the skeleton is up); the pin puts it back.
+            schedule();
             return;
         }
         if (node.querySelector('details[open]')) {
@@ -215,13 +217,36 @@ var placeTrackerCardAtTop = function (container, card) {
     }
 };
 
-// A tracker created moments ago is pinned to the top of page 1, where the
-// reader can see what they just added whatever the sort says, and the pin
-// survives the list's own re-renders (afterSwap below) until the reader asks
-// for another list. The pin remembers the filters it was made under: a list
-// asked for with other filters does not get it.
+// A tracker created moments ago is pinned to the top of the list on screen,
+// where the reader can see what they just added — and adjust it — whatever the
+// sort and the filters say: a tracker added already caught up is not on
+// Reading's list, and it is exactly the one the reader may want to correct.
+// The pin survives the list's own re-renders (afterSwap below) until the
+// reader asks for another list or reloads; from then on the card is wherever
+// the server puts it. The pin remembers the filters (page included) it was
+// made under: a list asked for with other filters does not get it.
 var pinnedTrackerFilters = '';
 var pinnedTrackerNode = null;
+
+// The grid a pinned card goes into. An empty list has none — the partial
+// renders the empty state instead — so the grid takes the empty state's place.
+// Null while the skeleton stands in for the list.
+var cardsContainerForPin = function () {
+    var container = currentCardsContainer();
+    if (container) {
+        return container;
+    }
+    var zone = document.getElementById('trackers-zone');
+    var empty = zone ? zone.querySelector('.empty-state') : null;
+    if (!empty || !empty.parentNode) {
+        return null;
+    }
+    container = document.createElement('div');
+    container.id = 'cards-container-grid';
+    container.className = 'cards-grid';
+    empty.parentNode.replaceChild(container, empty);
+    return container;
+};
 
 var pinTrackerCard = function (card) {
     window.__pinnedTrackerID = card.id;
@@ -235,14 +260,16 @@ var unpinTrackerCard = function () {
     pinnedTrackerNode = null;
 };
 
-// The new card is put on top only where it belongs: page 1 of a list whose
-// filters it matches. On a Completed filter a new Reading tracker was pinned on
-// top anyway, on page 2 it went on top of page 2, the count kept saying "258
-// results", and the next refresh made the card vanish. Either way the list is
-// then refreshed quietly, so the count, the pages and the card's place in the
-// order come from the server. Everything is read when the fragment arrives,
-// not when it was asked for: the list may have been re-rendered in between,
-// and a card put into the container that was current then went nowhere.
+// The new card always goes on top of the list on screen, whether or not that
+// list would carry it. (For two days it was put there only on page 1 of a list
+// whose filters it matched, so a tracker added caught up under Reading — or
+// under a search, a tag, another status — was saved and nowhere to be seen.)
+// The list is then refreshed quietly, so the count and the pages come from the
+// server; the pin keeps the card on top across that refresh. Everything is
+// read when the fragment arrives, not when it was asked for: the list may have
+// been re-rendered in between, and a card put into the container that was
+// current then went nowhere. With the skeleton up there is no container yet:
+// the card is pinned all the same and goes in when the list arrives.
 document.body.addEventListener('trackerCreated', function (event) {
     var detail = event && event.detail ? event.detail : {};
     var payload = detail;
@@ -259,14 +286,13 @@ document.body.addEventListener('trackerCreated', function (event) {
     fetchTrackerCardFragment(requestURL)
         .then(function (result) {
             var card = result.card;
-            var container = currentCardsContainer();
-            var list = shownTrackersList();
-            if (container && list && list.page === 1 && cardMatchesShownList(card, list)) {
+            var container = cardsContainerForPin();
+            if (container) {
                 placeTrackerCardAtTop(container, card);
-                pinTrackerCard(card);
-                if (result.pending) {
-                    keepTrackerCardFresh(card.id, requestURL);
-                }
+            }
+            pinTrackerCard(card);
+            if (result.pending) {
+                keepTrackerCardFresh(card.id, requestURL);
             }
             window.dispatchTrackersChanged('silent');
         })
@@ -276,15 +302,19 @@ document.body.addEventListener('trackerCreated', function (event) {
 });
 
 // Before the list is swapped: the pinned card about to be replaced is kept,
-// in case the new list does not carry it (sorted onto another page). A pinned
-// card already gone from the page was deleted, and stays gone.
+// in case the new list does not carry it (filtered out, or sorted onto another
+// page). A pinned card already gone from a list that is on the page was
+// deleted, and stays gone; one that never got onto the page because the
+// skeleton was up is still owed to the list that is coming.
 var holdPinnedCardBeforeSwap = function () {
     if (!window.__pinnedTrackerID) {
         return;
     }
     var node = document.getElementById(window.__pinnedTrackerID);
     if (!node) {
-        unpinTrackerCard();
+        if (shownTrackersList()) {
+            unpinTrackerCard();
+        }
         return;
     }
     pinnedTrackerNode = node;
@@ -294,14 +324,13 @@ var restorePinnedCardAfterSwap = function () {
     if (!window.__pinnedTrackerID) {
         return;
     }
-    var container = currentCardsContainer();
-    var list = shownTrackersList();
-    if (!container || !list || list.page !== 1 || trackerFiltersState() !== pinnedTrackerFilters) {
+    if (!shownTrackersList() || trackerFiltersState() !== pinnedTrackerFilters) {
         unpinTrackerCard();
         return;
     }
     var card = document.getElementById(window.__pinnedTrackerID);
-    if (!card && pinnedTrackerNode && cardMatchesShownList(pinnedTrackerNode, list)) {
+    var container = card ? card.parentNode : cardsContainerForPin();
+    if (!card && container && pinnedTrackerNode) {
         // htmx cleaned up the old node's handlers as it removed it, so a copy
         // goes back in and is processed afresh.
         card = pinnedTrackerNode.cloneNode(true);
@@ -310,7 +339,7 @@ var restorePinnedCardAfterSwap = function () {
             window.htmx.process(card);
         }
     }
-    if (!card) {
+    if (!card || !container) {
         unpinTrackerCard();
         return;
     }

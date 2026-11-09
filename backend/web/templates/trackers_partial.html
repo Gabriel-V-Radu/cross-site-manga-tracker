@@ -44,8 +44,8 @@
 {{/* What this list was asked for and whether covers are still being looked
      up. dashboard-trackers.js reads it after each swap: to schedule the quiet
      cover refresh (an inline script here used to, and a list request starting
-     right after a swap wiped the script before htmx ran it), to tell whether a
-     new or edited card belongs on the list, and to word the empty state. */}}
+     right after a swap wiped the script before htmx ran it), to tell whether an
+     edited card still belongs on the list, and to word the empty state. */}}
 <div id="trackers-list-state" hidden
      data-list-url="{{.RefreshKey}}"
      data-page="{{.Page}}"
