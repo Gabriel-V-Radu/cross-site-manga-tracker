@@ -23,6 +23,10 @@ type Config struct {
 	// PollingIdleMinutes is the minimum minutes between polls for trackers
 	// that are not in "reading" status.
 	PollingIdleMinutes int
+	// FeedMinutes is how often, between two poll cycles, the sites' update
+	// feeds are read for chapters the next cycle would only find later; 0
+	// leaves them unread.
+	FeedMinutes int
 	// WebDir holds the dashboard's templates and static assets; DataDir holds
 	// the cover cache and the uploads. Both were spelled out relative to the
 	// working directory at a dozen call sites, which is why the tests had to
@@ -69,6 +73,7 @@ func Load() (Config, error) {
 		PollingEnabled:     getEnvAsBool("POLLING_ENABLED", true),
 		PollingMinutes:     getEnvAsInt("POLLING_MINUTES", 30),
 		PollingIdleMinutes: getEnvAsInt("POLLING_IDLE_MINUTES", 720),
+		FeedMinutes:        getEnvAsInt("FEED_MINUTES", 5),
 		WebDir:             getEnv("WEB_DIR", "./web"),
 		DataDir:            getEnv("DATA_DIR", "./data"),
 	}
@@ -78,6 +83,10 @@ func Load() (Config, error) {
 	}
 	if cfg.PollingIdleMinutes <= 0 {
 		cfg.PollingIdleMinutes = 720
+	}
+	// Zero is a setting here (feeds off), so only a negative value is repaired.
+	if cfg.FeedMinutes < 0 {
+		cfg.FeedMinutes = 0
 	}
 
 	cfg.LogLevel = parseLogLevel(getEnv("LOG_LEVEL", "INFO"))

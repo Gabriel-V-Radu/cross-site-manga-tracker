@@ -63,6 +63,7 @@ func run() int {
 		scheduler.PollerConfig{
 			Interval:     time.Duration(cfg.PollingMinutes) * time.Minute,
 			IdleInterval: time.Duration(cfg.PollingIdleMinutes) * time.Minute,
+			FeedInterval: time.Duration(cfg.FeedMinutes) * time.Minute,
 			Metadata:     metadataService,
 		},
 		slog.Default(),

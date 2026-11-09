@@ -25,10 +25,14 @@ func main() {
 	// The poller rotates each tracker across up to three linked sites, so it
 	// takes three cycles for every site to have had its turn once.
 	cycles := flag.Int("cycles", 1, "How many poll cycles to run back to back")
+	// A feed tick reads each site's update feed once and polls only what it
+	// shows as new; the first tick of a process treats every row as new.
+	feeds := flag.Int("feeds", 0, "Run this many feed ticks instead of poll cycles")
+	feedGap := flag.Duration("feed-gap", time.Minute, "Pause between feed ticks")
 	flag.Parse()
 
-	if *dbPath == "" || *cycles < 1 {
-		fmt.Fprintln(os.Stderr, "-db is required and -cycles must be at least 1")
+	if *dbPath == "" || *cycles < 1 || *feeds < 0 {
+		fmt.Fprintln(os.Stderr, "-db is required, -cycles must be at least 1 and -feeds must not be negative")
 		os.Exit(1)
 	}
 
@@ -74,6 +78,27 @@ func main() {
 	logger.Info("starting poll cycles", "trackers", len(trackers), "cycles", *cycles)
 	for key, count := range primaries {
 		logger.Info("trackers by primary source", "sourceKey", key, "trackers", count)
+	}
+
+	if *feeds > 0 {
+		for tick := 1; tick <= *feeds; tick++ {
+			if tick > 1 {
+				time.Sleep(*feedGap)
+			}
+			started := time.Now()
+			for _, report := range poller.RunFeeds(context.Background()) {
+				logger.Info("feed",
+					"tick", tick,
+					"sourceKey", report.SourceKey,
+					"rows", report.Rows,
+					"news", report.News,
+					"polled", report.Polled,
+					"found", report.Found,
+					"error", report.Err)
+			}
+			logger.Info("feed tick finished", "tick", tick, "took", time.Since(started).Round(time.Millisecond).String())
+		}
+		return
 	}
 
 	for cycle := 1; cycle <= *cycles; cycle++ {

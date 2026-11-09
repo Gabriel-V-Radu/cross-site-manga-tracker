@@ -123,6 +123,16 @@ container) and can also be run from `backend/` with `go run ./cmd/<name>`:
 - `poll-once --db <copy-of-app.sqlite>` (not in the image): runs one full poll
   cycle against a database copy with the real connectors, for rehearsing
   poller changes. It writes to the copy, so never aim it at the live file.
+  `--feeds 3 --feed-gap 4m` runs feed ticks instead of cycles.
+
+## Polling
+- Every `POLLING_MINUTES` (30) of rest the poller runs a cycle: each tracker
+  that is due is asked about on one of its linked sites, in turn.
+- Between cycles, every `FEED_MINUTES` (5; 0 turns it off), it reads each
+  site's "latest updates" listing — one request per site — and polls at once
+  the trackers a listing shows a new chapter for. The log line
+  `poll found a new chapter … via=feed:<site>` (or `via=cycle`) says which of
+  the two found each chapter.
 
 ## Cleanup Stale Sources (Removed Connectors / Old Custom Sites)
 - Removes source records that no longer exist in the current connector registry.

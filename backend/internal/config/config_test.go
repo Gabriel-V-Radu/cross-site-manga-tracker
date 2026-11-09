@@ -37,6 +37,35 @@ func TestLoadDefaultPaths(t *testing.T) {
 	}
 }
 
+// The update feeds are read every five minutes unless told otherwise, and 0 is
+// a real setting (feeds off), not a value to repair.
+func TestLoadFeedMinutes(t *testing.T) {
+	cases := []struct {
+		value string
+		set   bool
+		want  int
+	}{
+		{set: false, want: 5},
+		{value: "0", set: true, want: 0},
+		{value: "12", set: true, want: 12},
+		{value: "-3", set: true, want: 0},
+	}
+	for _, testCase := range cases {
+		if testCase.set {
+			t.Setenv("FEED_MINUTES", testCase.value)
+		} else {
+			t.Setenv("FEED_MINUTES", "")
+		}
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if cfg.FeedMinutes != testCase.want {
+			t.Errorf("FEED_MINUTES=%q: FeedMinutes = %d, want %d", testCase.value, cfg.FeedMinutes, testCase.want)
+		}
+	}
+}
+
 func TestLoadOverridesPaths(t *testing.T) {
 	t.Setenv("WEB_DIR", "/srv/web")
 	t.Setenv("DATA_DIR", "/mnt/tracker")

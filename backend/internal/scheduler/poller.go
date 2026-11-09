@@ -69,6 +69,15 @@ type Poller struct {
 	// it restarts at zero with the process, which at worst asks one site
 	// twice running.
 	cycles atomic.Uint64
+
+	// feedInterval is how often the sites' update feeds are read between
+	// cycles (see RunFeeds); zero turns the feeds off. feedSeen is each
+	// feed as it was last read, series key to chapter, and feedFailures how
+	// many reads in a row each feed has failed. Both belong to the goroutine
+	// that runs the feeds.
+	feedInterval time.Duration
+	feedSeen     map[string]map[string]float64
+	feedFailures map[string]int
 }
 
 type PollerConfig struct {
@@ -88,6 +97,10 @@ type PollerConfig struct {
 	// Metadata receives the series metadata each answered resolve carried;
 	// nil drops it (the operational tools build pollers without one).
 	Metadata MetadataRecorder
+	// FeedInterval is how often, during the rest between two cycles, the
+	// sites' update feeds are read for chapters a cycle would only find later
+	// (see RunFeeds). Zero or negative leaves the feeds unread.
+	FeedInterval time.Duration
 }
 
 func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
@@ -117,6 +130,9 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 		logger:                 logger,
 		stopCh:                 make(chan struct{}),
 		now:                    time.Now,
+		feedInterval:           max(cfg.FeedInterval, 0),
+		feedSeen:               map[string]map[string]float64{},
+		feedFailures:           map[string]int{},
 	}
 }
 
@@ -130,21 +146,46 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 func (p *Poller) Start(ctx context.Context) {
 	p.started.Store(true)
 	p.registry.HealthBoard().PollerStarted(p.interval)
-	p.logger.Info("poller started", "interval", p.interval.String())
+	p.logger.Info("poller started", "interval", p.interval.String(), "feedInterval", p.feedInterval.String())
 	go func() {
 		for {
 			if err := p.RunOnce(ctx); err != nil {
 				p.logger.Warn("poller cycle failed", "error", err)
 			}
-			select {
-			case <-ctx.Done():
+			if !p.rest(ctx) {
 				p.logger.Info("poller stopped")
 				close(p.stopCh)
 				return
-			case <-time.After(p.interval):
 			}
 		}
 	}()
+}
+
+// rest waits out the interval between two cycles, reading the update feeds
+// every feedInterval of it, and reports false when ctx ended first. The rest
+// is measured from the end of the cycle whatever the feed ticks take, and a
+// tick that would land on the next cycle's doorstep is left to the cycle.
+func (p *Poller) rest(ctx context.Context) bool {
+	restUntil := time.Now().Add(p.interval)
+	for {
+		wait := time.Until(restUntil)
+		feedDue := p.feedInterval > 0 && wait > p.feedInterval
+		if feedDue {
+			wait = p.feedInterval
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(wait):
+		}
+		if !feedDue {
+			return true
+		}
+		p.RunFeeds(ctx)
+		if ctx.Err() != nil {
+			return false
+		}
+	}
 }
 
 func (p *Poller) StopWait(timeout time.Duration) {
@@ -298,7 +339,10 @@ type pollAnswer struct {
 // after the stored chapter (releasedWellAfter) or when the next site reports
 // the same number; otherwise it is held, and stands only if no site after it
 // answers at all.
-func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) {
+//
+// It reports whether the poll moved the tracker's chapter up and the write
+// went through, which is how a feed tick counts what it found.
+func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) bool {
 	board := p.registry.HealthBoard()
 
 	var (
@@ -335,7 +379,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// last_checked_at with a dead context only adds a warning per
 		// in-flight tracker to the shutdown log.
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if err == nil && result == nil {
 			err = errors.New("source returned no result")
@@ -452,12 +496,12 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// comes round again next cycle, which costs a refusal until the site is
 		// back.
 		if len(failed) == 0 {
-			return
+			return false
 		}
 		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, now, sourcePolls(nil, failed, nil)); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
-		return
+		return false
 	}
 
 	var reported *float64
@@ -591,9 +635,32 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	})
 	if err != nil {
 		p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
-	} else if !applied {
-		p.logger.Debug("poll update skipped: tracker changed mid-cycle", "trackerId", tracker.ID, "snapshotSourceId", tracker.SourceID)
+		return false
 	}
+	if !applied {
+		p.logger.Debug("poll update skipped: tracker changed mid-cycle", "trackerId", tracker.ID, "snapshotSourceId", tracker.SourceID)
+		return false
+	}
+
+	// A first fill is not a find: the tracker knew no number to move from.
+	found := tracker.LatestKnownChapter != nil && latest != nil && chapterAdvances(tracker.LatestKnownChapter, *latest)
+	if found {
+		// One line per chapter found, with what led the poll to it: the feed
+		// of the site named, or the tracker's own turn in a cycle. It is what
+		// says, from the log alone, how much of the finding the feeds do.
+		via := "cycle"
+		if plan.feed != "" {
+			via = "feed:" + plan.feed
+		}
+		p.logger.Info("poll found a new chapter",
+			"trackerId", tracker.ID,
+			"title", tracker.Title,
+			"from", derefChapter(tracker.LatestKnownChapter),
+			"to", derefChapter(latest),
+			"sourceKey", answer.candidate.ref.SourceKey,
+			"via", via)
+	}
+	return found
 }
 
 // sourcePolls turns the sites one poll reached into the rotation's memory: a

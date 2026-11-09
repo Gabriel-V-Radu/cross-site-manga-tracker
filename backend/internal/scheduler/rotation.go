@@ -59,6 +59,9 @@ type pollCandidate struct {
 // last-resort fallbacks.
 type pollPlan struct {
 	candidates []pollCandidate
+	// feed names the site whose update feed prompted this poll, "" for a
+	// tracker's ordinary turn in a cycle (see planFeedPoll).
+	feed string
 }
 
 // shardKey is the source this poll's first request should go to, which is
