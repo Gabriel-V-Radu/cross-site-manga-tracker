@@ -64,6 +64,11 @@ type Poller struct {
 	// started (polling disabled) would otherwise sit out its whole timeout
 	// waiting for a close that can never come.
 	started atomic.Bool
+	// cycles counts the cycles RunOnce has begun. It is what moves a tracker
+	// asked every cycle from one linked site to the next (see slotRotation);
+	// it restarts at zero with the process, which at worst asks one site
+	// twice running.
+	cycles atomic.Uint64
 }
 
 type PollerConfig struct {
@@ -201,6 +206,9 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return err
 	}
 
+	// The first cycle is number zero.
+	cycle := p.cycles.Add(1) - 1
+
 	var stats cycleStats
 	shards := map[string][]plannedPoll{}
 	for _, tracker := range trackers {
@@ -208,7 +216,7 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			stats.skippedIdle.Add(1)
 			continue
 		}
-		plan, ok := p.planPoll(tracker)
+		plan, ok := p.planPoll(tracker, cycle)
 		if !ok {
 			// Silent in the log on purpose (one line per tracker per cycle),
 			// but not on the board: a tracker on a retired site is never
@@ -436,6 +444,16 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// tracker whose sources are all dark keeps last_checked_at frozen, so
 		// shouldSkipIdle can never defer it and the poller retries it in full
 		// every cycle for as long as the outage lasts.
+		//
+		// A poll in which every site was refused locally is not a check at
+		// all: nothing was asked and nothing was spent. Stamping it put a
+		// tracker that is looked at once a day or every three behind a
+		// ten-minute cooldown for its whole interval; left unstamped it simply
+		// comes round again next cycle, which costs a refusal until the site is
+		// back.
+		if len(failed) == 0 {
+			return
+		}
 		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, now, sourcePolls(nil, failed, nil)); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
@@ -460,7 +478,11 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		}
 	}
 
-	outcome := decideChapter(tracker, reported, chapterFromAlternate, now, p.lowerConfirmationDelay)
+	var reporter chapterReporter
+	if answer != nil {
+		reporter = chapterReporter{alternate: chapterFromAlternate, sourceID: reporterSourceID}
+	}
+	outcome := decideChapter(tracker, reported, reporter, now, p.lowerConfirmationDelay)
 	latest := outcome.latest
 	if outcome.corrected {
 		p.logger.Info("poll corrected the stored chapter downwards",
@@ -684,26 +706,50 @@ type chapterOutcome struct {
 	corrected    bool
 }
 
+// chapterReporter is the site whose number a poll goes by, as far as taking a
+// chapter back is concerned.
+type chapterReporter struct {
+	// alternate is false for the tracker's primary source.
+	alternate bool
+	// sourceID names the site, to match against the stored number's
+	// attribution.
+	sourceID int64
+}
+
 // decideChapter reconciles the number a poll reported with the one on record.
 //
-// A primary source is authoritative over its own numbers: whatever it reports is
-// stored, corrections downwards included, which is how a source that used to
-// over-report gets to fix its own history. An alternate is not — it may be a
-// mirror that simply lags — so a lower number from one is only applied once it
-// has kept reporting the same value for confirmationDelay. Until then it is
-// remembered, not acted on. The same wait applies to the primary when the stored
-// number is not its own: an alternate that advanced the tracker on its turn, or
-// while the primary was dark, put a number there the primary may simply not
-// have indexed yet. With the poll rotating across sites, any site in step that
-// agrees with the stored number clears such a pending lower, so it only ever
-// confirms when every site asked keeps reporting it for the whole window.
+// A number is taken back only by the site that supplied it. The primary is
+// authoritative over its own numbers: a lower report from it replaces a number
+// it put there at once, which is how a source that used to over-report gets to
+// fix its own history. An alternate that supplied the stored number can take
+// it back too ("the chapter I found is gone"), but only once it has kept
+// reporting the same lower value for confirmationDelay; until then the report
+// is remembered, not acted on, and any site agreeing with the stored number in
+// between clears it.
+//
+// Every other lower report is left alone, however long it persists: a site
+// that did not supply the stored number either numbers the series its own way
+// or has not indexed the chapter yet, and its number is no evidence about
+// anyone else's. That includes the primary when the stored number is an
+// alternate's.
+//
+// It used to be that any site's lower number counted once it had been pending
+// for confirmationDelay, on the theory that every other site asked in between
+// would have cleared it by agreeing. That holds for a tracker asked every
+// cycle while every site answers. It does not for one asked every few hours,
+// where the window is two or three polls, nor through an outage of the site
+// that supplied the number: its turns fall back to the very site that
+// disagrees, which then confirms itself. Trackers were walked back to a
+// mirror's number that way and jumped forward again, stamped as a newly found
+// chapter, as soon as the first site answered (a chapter released in July
+// turned up as "found" in November).
 //
 // Both paths refuse to record a chapter below the one the reader has already
 // finished, so no correction can make read chapters look unread.
 func decideChapter(
 	tracker repository.PollingTracker,
 	reported *float64,
-	usedFallback bool,
+	reporter chapterReporter,
 	now time.Time,
 	confirmationDelay time.Duration,
 ) chapterOutcome {
@@ -743,10 +789,20 @@ func decideChapter(
 	// confirmation exists for; applying it at once walked the tracker back
 	// and forth every time a primary came back. No attribution means a number
 	// from before the column existed or a hand repair, which the primary has
-	// always been trusted to correct.
-	storedByPrimary := tracker.LatestChapterSourceID == nil || *tracker.LatestChapterSourceID == tracker.SourceID
-	if !usedFallback && storedByPrimary {
+	// always been trusted to correct. So does an attribution to a site the
+	// tracker is no longer linked to: nobody is left to vouch for that number
+	// or to take it back.
+	storedBy := storedChapterSource(tracker)
+	storedByPrimary := storedBy == nil || *storedBy == tracker.SourceID
+	if !reporter.alternate && storedByPrimary {
 		return chapterOutcome{latest: &candidate, corrected: true}
+	}
+
+	suppliedTheNumber := reporter.alternate && storedBy != nil && *storedBy == reporter.sourceID
+	if !suppliedTheNumber {
+		// Not this site's number to take back. Whatever is pending stays as it
+		// was: this report neither confirms it nor speaks against it.
+		return chapterOutcome{latest: stored, pendingLower: tracker.PendingLowerChapter}
 	}
 
 	confirmed := tracker.PendingLowerChapter != nil &&
@@ -759,6 +815,22 @@ func decideChapter(
 	}
 
 	return chapterOutcome{latest: stored, pendingLower: reported}
+}
+
+// storedChapterSource is the source the stored chapter is attributed to, or
+// nil when there is none to speak of: no attribution recorded, or one naming a
+// site the tracker is no longer linked to.
+func storedChapterSource(tracker repository.PollingTracker) *int64 {
+	storedBy := tracker.LatestChapterSourceID
+	if storedBy == nil || *storedBy == tracker.SourceID {
+		return storedBy
+	}
+	for _, alternate := range tracker.AlternateSources {
+		if alternate.SourceID == *storedBy {
+			return storedBy
+		}
+	}
+	return nil
 }
 
 // implausibleChapterAdvance reports whether a reported chapter number is too

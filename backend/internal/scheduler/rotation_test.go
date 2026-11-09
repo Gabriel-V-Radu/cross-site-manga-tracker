@@ -23,7 +23,18 @@ type siteDouble struct {
 	releasedAt *time.Time
 	err        error
 
+	// cooling makes the site report itself cooling down, so the poller
+	// refuses it locally without a request.
+	cooling atomic.Bool
+
 	calls atomic.Int32
+}
+
+func (s *siteDouble) CooldownRemaining() (time.Duration, string) {
+	if s.cooling.Load() {
+		return 5 * time.Minute, "rate limited"
+	}
+	return 0, ""
 }
 
 func newSite(key string, chapter float64) *siteDouble {
@@ -249,21 +260,94 @@ func TestRotationFindsAChapterOnlyOneSiteCarriesWithinThreeCycles(t *testing.T) 
 	if stored := *repo.items[0].LatestKnownChapter; stored != 11 {
 		t.Fatalf("a lagging primary walked the tracker back to %.0f", stored)
 	}
-	if pending := repo.items[0].PendingLowerChapter; pending == nil || *pending != 10 {
-		t.Fatalf("expected alpha's lower number pending, got %#v", pending)
+	if pending := repo.items[0].PendingLowerChapter; pending != nil {
+		t.Fatalf("chapter 11 is gamma's to take back, alpha's lower number must not be pending: %.0f", *pending)
+	}
+}
+
+// The spread must survive an outage. Under asked-longest-ago order a site that
+// sat out a few cycles — refused while cooling down, which stamps nothing —
+// came back as every tracker's longest-unasked member at once, and the whole
+// library asked the same site in the same cycle from then on.
+func TestRotationStaysSpreadAfterASiteSitsOutSomeCycles(t *testing.T) {
+	repo := &statefulRepo{}
+	for id := int64(1); id <= 6; id++ {
+		repo.items = append(repo.items, rotatingTracker(id, 10, "beta", "gamma"))
+	}
+	alpha, beta, gamma := newSite("alpha", 10), newSite("beta", 10), newSite("gamma", 10)
+	poller, step := cyclingPoller(repo, registryOf(t, alpha, beta, gamma))
+
+	cycle := 0
+	run := func() {
+		t.Helper()
+		step(cycle)
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+		cycle++
+	}
+
+	gamma.cooling.Store(true)
+	for outage := 0; outage < 5; outage++ {
+		run()
+	}
+	if gamma.calls.Load() != 0 {
+		t.Fatalf("gamma was cooling down and must not have been asked, got %d", gamma.calls.Load())
+	}
+	gamma.cooling.Store(false)
+
+	for back := 0; back < 3; back++ {
+		before := [3]int32{alpha.calls.Load(), beta.calls.Load(), gamma.calls.Load()}
+		run()
+		after := [3]int32{alpha.calls.Load(), beta.calls.Load(), gamma.calls.Load()}
+		for index, key := range []string{"alpha", "beta", "gamma"} {
+			if asked := after[index] - before[index]; asked != 2 {
+				t.Fatalf("cycle %d after the outage: expected each site asked for 2 of the 6 trackers, %s was asked %d times",
+					back, key, asked)
+			}
+		}
+	}
+}
+
+// A tracker on a longer cadence sits out most cycles, so the cycle number says
+// nothing about whose turn it is: it keeps asking the site it asked longest
+// ago.
+func TestRotationKeepsLastPolledOrderForATrackerNotAskedEveryCycle(t *testing.T) {
+	tracker := rotatingTracker(1, 10, "beta", "gamma")
+	tracker.Status = "plan_to_read"
+	base := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	alphaAt, betaAt, gammaAt := base.Add(-30*time.Hour), base.Add(-50*time.Hour), base.Add(-40*time.Hour)
+	tracker.PrimaryLastPolledAt = &alphaAt
+	tracker.AlternateSources[0].LastPolledAt = &betaAt
+	tracker.AlternateSources[1].LastPolledAt = &gammaAt
+	repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+
+	alpha, beta, gamma := newSite("alpha", 10), newSite("beta", 10), newSite("gamma", 10)
+	poller, step := cyclingPoller(repo, registryOf(t, alpha, beta, gamma))
+
+	// Twelve hours apart, which is past a plan-to-read tracker's cadence.
+	for poll, want := range []*siteDouble{beta, gamma, alpha} {
+		step(poll * 12)
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+		if want.calls.Load() != 1 {
+			t.Fatalf("poll %d: expected %s, the site asked longest ago, got alpha=%d beta=%d gamma=%d",
+				poll, want.key, alpha.calls.Load(), beta.calls.Load(), gamma.calls.Load())
+		}
 	}
 }
 
 // A site that is not in step may take its turn, but its claim of a new chapter
 // is not stored on its word alone: the poll asks the next site first.
 func TestRotationHoldsAnAdvanceFromASiteNotInStep(t *testing.T) {
-	recently := time.Now().UTC().Add(-time.Minute)
+	// Tracker 2 opens its rotation on its second member: beta has the turn in
+	// a poller's first cycle, with alpha (and gamma, where linked) after it.
 	untrustedTurn := func() repository.PollingTracker {
 		return repository.PollingTracker{
-			ID: 1, Title: "T", Status: "reading",
+			ID: 2, Title: "T", Status: "reading",
 			SourceID: 1, SourceKey: "alpha", SourceURL: "https://alpha/series",
-			LatestKnownChapter:  chapterPtr(10),
-			PrimaryLastPolledAt: &recently,
+			LatestKnownChapter: chapterPtr(10),
 			AlternateSources: []repository.TrackerSourceRef{
 				{SourceID: 2, SourceKey: "beta", SourceURL: "https://beta/series"},
 			},
@@ -356,10 +440,8 @@ func TestRotationHoldsAnAdvanceFromASiteNotInStep(t *testing.T) {
 
 	t.Run("a second site reporting the same number confirms it", func(t *testing.T) {
 		tracker := untrustedTurn()
-		earlier := recently.Add(-time.Hour)
-		tracker.AlternateSources[0].LastPolledAt = &earlier
 		tracker.AlternateSources = append(tracker.AlternateSources,
-			repository.TrackerSourceRef{SourceID: 3, SourceKey: "gamma", SourceURL: "https://gamma/series", LastPolledAt: &earlier})
+			repository.TrackerSourceRef{SourceID: 3, SourceKey: "gamma", SourceURL: "https://gamma/series"})
 		alpha, beta, gamma := newSite("alpha", 10), newSite("beta", 11), newSite("gamma", 11)
 		repo := &fakeRepo{items: []repository.PollingTracker{tracker}}
 		poller := NewPoller(repo, registryOf(t, alpha, beta, gamma), PollerConfig{Interval: time.Minute}, nil)
@@ -396,14 +478,13 @@ func TestRotationHoldsAnAdvanceFromASiteNotInStep(t *testing.T) {
 // Every linked site confirms the stored number in turn. The site that found it
 // keeps the attribution; a confirmation only fills one that is missing.
 func TestRotationKeepsTheAttributionWithTheSiteThatFoundTheChapter(t *testing.T) {
-	recently := time.Now().UTC().Add(-time.Minute)
 	confirmedByBeta := func(storedBy *int64) *fakeRepo {
+		// Tracker 2: beta has the turn in a poller's first cycle.
 		tracker := repository.PollingTracker{
-			ID: 1, Title: "T", Status: "reading",
+			ID: 2, Title: "T", Status: "reading",
 			SourceID: 1, SourceKey: "alpha", SourceURL: "https://alpha/series",
 			LatestKnownChapter:    chapterPtr(10),
 			LatestChapterSourceID: storedBy,
-			PrimaryLastPolledAt:   &recently,
 			AlternateSources: []repository.TrackerSourceRef{
 				{SourceID: 2, SourceKey: "beta", SourceURL: "https://beta/series", InStep: true},
 			},
@@ -514,6 +595,36 @@ func TestRotationRecordsOnlyTheSitesItReached(t *testing.T) {
 	}
 	if poll, ok := byID[3]; !ok || !poll.Answered || !poll.InStep {
 		t.Fatalf("gamma answered the stored number, got %+v", poll)
+	}
+}
+
+// A poll in which every linked site was refused locally asked nobody, so it is
+// not recorded as a check: a tracker looked at once a day must not wait out
+// its whole interval because its site was cooling down for ten minutes. One
+// real failure is a check, and is stamped as before.
+func TestPollRefusedEverywhereIsNotRecordedAsACheck(t *testing.T) {
+	refused := &fakeRepo{items: []repository.PollingTracker{{
+		ID: 1, Title: "T", Status: "completed",
+		SourceID: 1, SourceKey: "alpha", SourceURL: "https://alpha/series",
+		LatestKnownChapter: chapterPtr(10),
+	}}}
+	poller := NewPoller(refused, registryOf(t, &coolingConnector{key: "alpha"}), PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if len(refused.markedChecked) != 0 || refused.updatedCount != 0 {
+		t.Fatalf("nothing was asked, so nothing must be stamped: marked=%v updates=%d", refused.markedChecked, refused.updatedCount)
+	}
+
+	failing := newSite("alpha", 10)
+	failing.fail(&connectors.HTTPStatusError{StatusCode: 503})
+	failed := &fakeRepo{items: refused.items}
+	poller = NewPoller(failed, registryOf(t, failing), PollerConfig{Interval: time.Minute}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if len(failed.markedChecked) != 1 {
+		t.Fatalf("a site that was asked and failed is a check, got marked=%v", failed.markedChecked)
 	}
 }
 

@@ -82,6 +82,9 @@ func TestDecideChapter(t *testing.T) {
 	// The tracker's primary source, and an alternate that once supplied the
 	// stored number while the primary was dark.
 	const primaryID, fallbackID int64 = 7, 9
+	// A source the stored number can be attributed to without the tracker
+	// being linked to it any more.
+	const unlinkedID int64 = 11
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	longAgo := now.Add(-48 * time.Hour)
 	recently := now.Add(-1 * time.Hour)
@@ -139,16 +142,18 @@ func TestDecideChapter(t *testing.T) {
 			wantPendingLower: nil,
 		},
 		{
-			name:             "a first lower report is remembered, not applied",
+			name:             "the alternate that supplied the number: its first lower report is remembered, not applied",
 			stored:           chapterPtr(302),
+			storedBy:         sourceIDPtr(fallbackID),
 			reported:         chapterPtr(176),
 			usedFallback:     true,
 			wantLatest:       chapterPtr(302),
 			wantPendingLower: chapterPtr(176),
 		},
 		{
-			name:             "a lower report still inside the window is not applied",
+			name:             "the alternate that supplied the number: a lower report still inside the window is not applied",
 			stored:           chapterPtr(302),
+			storedBy:         sourceIDPtr(fallbackID),
 			pending:          chapterPtr(176),
 			pendingSeenAt:    &recently,
 			reported:         chapterPtr(176),
@@ -157,8 +162,9 @@ func TestDecideChapter(t *testing.T) {
 			wantPendingLower: chapterPtr(176),
 		},
 		{
-			name:          "a lower report confirmed past the window is applied",
+			name:          "the alternate that supplied the number: a lower report confirmed past the window is applied",
 			stored:        chapterPtr(302),
+			storedBy:      sourceIDPtr(fallbackID),
 			pending:       chapterPtr(176),
 			pendingSeenAt: &longAgo,
 			reported:      chapterPtr(176),
@@ -167,14 +173,46 @@ func TestDecideChapter(t *testing.T) {
 			wantCorrected: true,
 		},
 		{
-			name:             "a different lower report restarts confirmation",
+			name:             "the alternate that supplied the number: a different lower report restarts confirmation",
 			stored:           chapterPtr(302),
+			storedBy:         sourceIDPtr(fallbackID),
 			pending:          chapterPtr(176),
 			pendingSeenAt:    &longAgo,
 			reported:         chapterPtr(170),
 			usedFallback:     true,
 			wantLatest:       chapterPtr(302),
 			wantPendingLower: chapterPtr(170),
+		},
+		{
+			// ComicK numbering a series its own way, or lagging, while
+			// MangaFire — whose number is stored — is behind its challenge.
+			name:         "an alternate that did not supply the number cannot take it back",
+			stored:       chapterPtr(302),
+			storedBy:     sourceIDPtr(primaryID),
+			reported:     chapterPtr(176),
+			usedFallback: true,
+			wantLatest:   chapterPtr(302),
+		},
+		{
+			name:         "nor can it when the number carries no attribution",
+			stored:       chapterPtr(302),
+			reported:     chapterPtr(176),
+			usedFallback: true,
+			wantLatest:   chapterPtr(302),
+		},
+		{
+			// The outage that used to walk trackers back: the lower number has
+			// been pending for longer than the window, and the site reporting
+			// it again is not the one that supplied the stored number.
+			name:             "however long its number has been pending",
+			stored:           chapterPtr(302),
+			storedBy:         sourceIDPtr(primaryID),
+			pending:          chapterPtr(176),
+			pendingSeenAt:    &longAgo,
+			reported:         chapterPtr(176),
+			usedFallback:     true,
+			wantLatest:       chapterPtr(302),
+			wantPendingLower: chapterPtr(176),
 		},
 		{
 			name:          "a primary source corrects downwards immediately",
@@ -187,6 +225,7 @@ func TestDecideChapter(t *testing.T) {
 		{
 			name:          "a correction is clamped at the read position",
 			stored:        chapterPtr(302),
+			storedBy:      sourceIDPtr(fallbackID),
 			lastRead:      chapterPtr(200),
 			pending:       chapterPtr(176),
 			pendingSeenAt: &longAgo,
@@ -213,29 +252,31 @@ func TestDecideChapter(t *testing.T) {
 		{
 			// MangaFire back from its challenge, still topping out at 121
 			// after ComicK moved the tracker to 122 while it was dark.
-			name:             "a primary's lower report over a fallback's number is remembered, not applied",
-			stored:           chapterPtr(122),
-			storedBy:         sourceIDPtr(fallbackID),
-			reported:         chapterPtr(121),
-			wantLatest:       chapterPtr(122),
-			wantPendingLower: chapterPtr(121),
+			name:       "a primary's lower report over a fallback's number is not applied",
+			stored:     chapterPtr(122),
+			storedBy:   sourceIDPtr(fallbackID),
+			reported:   chapterPtr(121),
+			wantLatest: chapterPtr(122),
 		},
 		{
-			name:             "a primary's lower report over a fallback's number still inside the window is not applied",
+			// ComicK's own retraction, still waiting out its window, is not
+			// the primary's to confirm or to cancel.
+			name:             "a primary's lower report leaves a fallback's pending retraction as it was",
 			stored:           chapterPtr(122),
 			storedBy:         sourceIDPtr(fallbackID),
 			pending:          chapterPtr(121),
-			pendingSeenAt:    &recently,
+			pendingSeenAt:    &longAgo,
 			reported:         chapterPtr(121),
 			wantLatest:       chapterPtr(122),
 			wantPendingLower: chapterPtr(121),
 		},
 		{
-			name:          "a primary's lower report over a fallback's number confirmed past the window is applied",
+			// The site that supplied the number was unlinked since: nobody is
+			// left to vouch for it, so the primary corrects it as it would a
+			// number without attribution.
+			name:          "a primary corrects a number attributed to a site no longer linked",
 			stored:        chapterPtr(122),
-			storedBy:      sourceIDPtr(fallbackID),
-			pending:       chapterPtr(121),
-			pendingSeenAt: &longAgo,
+			storedBy:      sourceIDPtr(unlinkedID),
 			reported:      chapterPtr(121),
 			wantLatest:    chapterPtr(121),
 			wantCorrected: true,
@@ -259,9 +300,14 @@ func TestDecideChapter(t *testing.T) {
 				LastReadChapter:         testCase.lastRead,
 				PendingLowerChapter:     testCase.pending,
 				PendingLowerFirstSeenAt: testCase.pendingSeenAt,
+				AlternateSources:        []repository.TrackerSourceRef{{SourceID: fallbackID}},
+			}
+			reporter := chapterReporter{sourceID: primaryID}
+			if testCase.usedFallback {
+				reporter = chapterReporter{alternate: true, sourceID: fallbackID}
 			}
 
-			got := decideChapter(tracker, testCase.reported, testCase.usedFallback, now, window)
+			got := decideChapter(tracker, testCase.reported, reporter, now, window)
 
 			assertChapter(t, "latest", got.latest, testCase.wantLatest)
 			assertChapter(t, "pendingLower", got.pendingLower, testCase.wantPendingLower)
@@ -287,20 +333,24 @@ func assertChapter(t *testing.T, label string, got *float64, want *float64) {
 }
 
 // TestPollerRunOnce_RecordsPendingLowerChapter proves the decision reaches the
-// repository: a lagging mirror leaves the stored number alone but its report is
-// persisted, which is what lets a later poll confirm it.
+// repository: the mirror that supplied the stored number taking it back leaves
+// the number alone at first, but its report is persisted, which is what lets a
+// later poll confirm it.
 func TestPollerRunOnce_RecordsPendingLowerChapter(t *testing.T) {
 	stored := 302.0
 	reported := 176.0
+	mirrorID := int64(9)
 	repo := &fakeRepo{items: []repository.PollingTracker{{
-		ID:                 1,
-		Title:              "A",
-		Status:             "reading",
-		SourceURL:          "https://blocked/series",
-		SourceKey:          "blockedsource",
-		LatestKnownChapter: &stored,
+		ID:                    1,
+		Title:                 "A",
+		Status:                "reading",
+		SourceID:              7,
+		SourceURL:             "https://blocked/series",
+		SourceKey:             "blockedsource",
+		LatestKnownChapter:    &stored,
+		LatestChapterSourceID: &mirrorID,
 		AlternateSources: []repository.TrackerSourceRef{
-			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+			{SourceID: mirrorID, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
 		},
 	}}}
 
@@ -340,17 +390,20 @@ func TestPollerRunOnce_AppliesConfirmedLowerChapter(t *testing.T) {
 	reported := 176.0
 	pending := 176.0
 	firstSeen := time.Now().UTC().Add(-48 * time.Hour)
+	mirrorID := int64(9)
 	repo := &fakeRepo{items: []repository.PollingTracker{{
 		ID:                      1,
 		Title:                   "A",
 		Status:                  "reading",
+		SourceID:                7,
 		SourceURL:               "https://blocked/series",
 		SourceKey:               "blockedsource",
 		LatestKnownChapter:      &stored,
+		LatestChapterSourceID:   &mirrorID,
 		PendingLowerChapter:     &pending,
 		PendingLowerFirstSeenAt: &firstSeen,
 		AlternateSources: []repository.TrackerSourceRef{
-			{SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+			{SourceID: mirrorID, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
 		},
 	}}}
 
@@ -374,6 +427,57 @@ func TestPollerRunOnce_AppliesConfirmedLowerChapter(t *testing.T) {
 	}
 	if repo.updatedPendingLower != nil {
 		t.Fatalf("expected the pending record to be cleared once applied, got %#v", repo.updatedPendingLower)
+	}
+}
+
+// TestPollerRunOnce_MirrorCannotLowerANumberItDidNotSupply is the walk-back
+// seen on the Pi. MangaFire supplied the stored number and went dark for an
+// evening; ComicK, which numbers the series lower, had been reported once a
+// day before. Asked again as the fallback, it used to find its own number
+// pending for longer than the window and confirm it: 255 became 243, and went
+// back to 255, stamped as a new find, the next time MangaFire answered.
+func TestPollerRunOnce_MirrorCannotLowerANumberItDidNotSupply(t *testing.T) {
+	stored := 255.0
+	reported := 243.0
+	pending := 243.0
+	firstSeen := time.Now().UTC().Add(-48 * time.Hour)
+	primaryID := int64(7)
+	repo := &fakeRepo{items: []repository.PollingTracker{{
+		ID:                      1,
+		Title:                   "A",
+		Status:                  "reading",
+		SourceID:                primaryID,
+		SourceURL:               "https://blocked/series",
+		SourceKey:               "blockedsource",
+		LatestKnownChapter:      &stored,
+		LatestChapterSourceID:   &primaryID,
+		PendingLowerChapter:     &pending,
+		PendingLowerFirstSeenAt: &firstSeen,
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceID: 9, SourceKey: "mirrorsource", SourceURL: "https://mirror/series"},
+		},
+	}}}
+
+	registry := connectors.NewRegistry()
+	if err := registry.Register(scriptedConnector{key: "blockedsource", err: errors.New("blocked")}); err != nil {
+		t.Fatalf("register blocked connector: %v", err)
+	}
+	if err := registry.Register(scriptedConnector{key: "mirrorsource", result: &connectors.MangaResult{
+		SourceKey: "mirrorsource", LatestChapter: &reported,
+	}}); err != nil {
+		t.Fatalf("register mirror connector: %v", err)
+	}
+
+	poller := NewPoller(repo, registry, PollerConfig{Interval: time.Minute, LowerConfirmationDelay: 24 * time.Hour}, nil)
+	if err := poller.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run once failed: %v", err)
+	}
+
+	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
+		t.Fatalf("expected the primary's %.0f to stand through its outage, got %#v", stored, repo.updatedLatest)
+	}
+	if repo.updatedLatestSource != nil {
+		t.Fatalf("the mirror must not take over the attribution, got %#v", repo.updatedLatestSource)
 	}
 }
 
@@ -1019,8 +1123,9 @@ func TestPollerRunOnce_NumberlessPrimaryKeepsItsAnswerWhenNoAlternateHasANumber(
 }
 
 // TestPollerRunOnce_NumberlessPrimaryTreatsALowerAlternateAsAMirror proves a
-// number taken from an alternate keeps the fallback rules: a lower one waits
-// for confirmation instead of being applied as if the primary had said it.
+// number taken from an alternate keeps the fallback rules: a lower one from a
+// site that did not supply the stored number is left alone instead of being
+// applied as if the primary had said it.
 func TestPollerRunOnce_NumberlessPrimaryTreatsALowerAlternateAsAMirror(t *testing.T) {
 	stored := 100.0
 	behind := 90.0
@@ -1044,8 +1149,8 @@ func TestPollerRunOnce_NumberlessPrimaryTreatsALowerAlternateAsAMirror(t *testin
 	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
 		t.Fatalf("expected the stored chapter %.1f to survive a lagging alternate, got %#v", stored, repo.updatedLatest)
 	}
-	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != behind {
-		t.Fatalf("expected the alternate's lower chapter to be pending, got %#v", repo.updatedPendingLower)
+	if repo.updatedPendingLower != nil {
+		t.Fatalf("a lagging alternate's number is not a pending correction, got %#v", repo.updatedPendingLower)
 	}
 }
 
@@ -1118,7 +1223,8 @@ func TestPollerRunOnce_PrimaryWithChapterNeverAsksAlternates(t *testing.T) {
 // TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber is the
 // walk-back from a recovered primary: ComicK advanced the tracker to 122 while
 // MangaFire was behind its challenge, and MangaFire comes back still at 121.
-// Its lower number is a lagging mirror's, so it waits for confirmation.
+// Its lower number is a lagging mirror's: 122 is ComicK's to take back, not
+// MangaFire's.
 func TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber(t *testing.T) {
 	stored := 122.0
 	lagging := 121.0
@@ -1132,6 +1238,11 @@ func TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber(t *testin
 		SourceKey:             "primarysource",
 		LatestKnownChapter:    &stored,
 		LatestChapterSourceID: &fallbackID,
+		// Still linked, which is what keeps the attribution meaningful; it has
+		// no connector registered here, so it takes no turn.
+		AlternateSources: []repository.TrackerSourceRef{
+			{SourceID: fallbackID, SourceKey: "fallbacksource", SourceURL: "https://fallback/series", InStep: true},
+		},
 	}}}
 
 	registry := connectors.NewRegistry()
@@ -1149,8 +1260,8 @@ func TestPollerRunOnce_RecoveredPrimaryDoesNotWalkBackAFallbacksNumber(t *testin
 	if repo.updatedLatest == nil || *repo.updatedLatest != stored {
 		t.Fatalf("expected the fallback's %.0f to stand, got %#v", stored, repo.updatedLatest)
 	}
-	if repo.updatedPendingLower == nil || *repo.updatedPendingLower != lagging {
-		t.Fatalf("expected the primary's lower %.0f to be pending, got %#v", lagging, repo.updatedPendingLower)
+	if repo.updatedPendingLower != nil {
+		t.Fatalf("the primary's lower %.0f is not a pending correction, got %#v", lagging, repo.updatedPendingLower)
 	}
 	if repo.updatedLatestSource != nil {
 		t.Fatalf("a lagging report must not take over the attribution, got %#v", repo.updatedLatestSource)

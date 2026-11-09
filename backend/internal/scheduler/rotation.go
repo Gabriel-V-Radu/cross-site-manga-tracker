@@ -10,8 +10,9 @@ import (
 )
 
 // The poller no longer asks every tracker's primary source on every cycle. A
-// tracker linked to several sites takes turns: each cycle asks the site in its
-// rotation that it asked longest ago, so the cycle's requests spread across the
+// tracker linked to several sites takes turns: each cycle asks the next site in
+// its rotation (slotRotation; the one asked longest ago for a tracker on a
+// longer cadence, orderRotation), so the cycle's requests spread across the
 // sites instead of piling onto whichever one most trackers were created on
 // (MangaFire, behind a request signer and recurring Cloudflare challenges, was
 // the primary of most of the library and carried nearly all of its polls).
@@ -90,10 +91,10 @@ func trailingFeed(connector connectors.Connector) bool {
 	return ok && info.TrailingChapterFeed()
 }
 
-// planPoll orders a tracker's linked sites for this cycle's poll. It reports
-// false when the primary has no connector: such a tracker is reported on the
-// health board for the reader to relink rather than polled.
-func (p *Poller) planPoll(tracker repository.PollingTracker) (pollPlan, bool) {
+// planPoll orders a tracker's linked sites for the poll of the given cycle. It
+// reports false when the primary has no connector: such a tracker is reported
+// on the health board for the reader to relink rather than polled.
+func (p *Poller) planPoll(tracker repository.PollingTracker, cycle uint64) (pollPlan, bool) {
 	primaryConnector, ok := p.registry.Get(tracker.SourceKey)
 	if !ok {
 		return pollPlan{}, false
@@ -140,8 +141,50 @@ func (p *Poller) planPoll(tracker repository.PollingTracker) (pollPlan, bool) {
 		fallbackOnly = append(fallbackOnly, candidate)
 	}
 
-	orderRotation(rotation, tracker.ID)
+	if pollEvery(tracker, p.idleInterval, p.now()) == 0 {
+		slotRotation(rotation, tracker.ID, cycle)
+	} else {
+		orderRotation(rotation, tracker.ID)
+	}
 	return pollPlan{candidates: append(rotation, fallbackOnly...)}, true
+}
+
+// slotRotation orders the rotation of a tracker that is asked every cycle: the
+// members in a fixed order (by source, then URL), started at the one whose
+// slot this cycle is — the cycle number plus the tracker id, modulo the
+// members. Each member is therefore asked once every len(rotation) cycles,
+// which is the bound the rotation promises, and in any one cycle the library
+// is spread evenly across its sites whatever happened before.
+//
+// Asked-longest-ago order (orderRotation) keeps that spread only for as long
+// as nothing disturbs it. A site that sits out a few cycles — refused while
+// cooling down, which stamps nothing — comes back as every tracker's
+// longest-unasked member at once, and from then on the whole library asks the
+// same site in the same cycle: after one evening of outages a cycle read
+// MangaHub 104, ComicK 12, MangaFire 11, and nothing in last-polled order
+// ever spreads that out again. A slot cannot drift, because it remembers
+// nothing.
+//
+// Trackers on a longer cadence keep the last-polled order: they are few, so
+// their spread does not matter, and a cycle number says nothing useful about a
+// tracker that sits out most cycles — one asked every sixth cycle would land
+// on the same member of three every time.
+func slotRotation(rotation []pollCandidate, trackerID int64, cycle uint64) {
+	count := len(rotation)
+	if count < 2 {
+		return
+	}
+	sort.SliceStable(rotation, func(i, j int) bool {
+		if rotation[i].ref.SourceID != rotation[j].ref.SourceID {
+			return rotation[i].ref.SourceID < rotation[j].ref.SourceID
+		}
+		return rotation[i].ref.SourceURL < rotation[j].ref.SourceURL
+	})
+	start := int((cycle + uint64(trackerID-1)) % uint64(count))
+	ordered := make([]pollCandidate, 0, count)
+	ordered = append(ordered, rotation[start:]...)
+	ordered = append(ordered, rotation[:start]...)
+	copy(rotation, ordered)
 }
 
 // orderRotation puts the member asked longest ago first. Members never asked
