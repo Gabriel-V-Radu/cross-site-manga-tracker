@@ -113,9 +113,13 @@ func (h *DashboardHandler) TrackerInfo(c *fiber.Ctx) error {
 	}
 	view.Sites = sites
 
-	// The panel is the same until the next poll or edit; a minute of private
-	// caching lets hovering back and forth over a card skip the round trip.
-	c.Set("Cache-Control", "private, max-age=60")
+	// Never served from the browser's cache without asking. The script that
+	// opens the panel keeps its own copy for a minute (dashboard-info.js), which
+	// is what lets hovering back and forth skip the round trip, and drops that
+	// copy when the card is saved or rated. With max-age=60 here the refetch
+	// that followed was answered by the browser's cache instead, so the panel
+	// showed the old links and titles for up to a minute after an edit.
+	c.Set("Cache-Control", "private, no-cache")
 	return h.render(c, "tracker_info_popover.html", view)
 }
 

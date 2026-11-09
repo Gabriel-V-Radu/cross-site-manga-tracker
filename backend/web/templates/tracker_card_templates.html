@@ -143,10 +143,14 @@ opens the panel.
         </div>
     </div>
 
+    {{/* The button sends the latest chapter this card was rendered with: a
+         poll can store a newer one while the card sits on screen, and the
+         click means "I read up to the chapter I am looking at". */}}
     <div class="card-actions">
         <button type="button"
                 class="mini-btn"
                 hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
+                {{if .LatestKnownChapterRaw}}hx-vals='{"shown_latest_chapter":"{{chapterInputValue .LatestKnownChapterRaw}}"}'{{end}}
                 hx-target="#modal-zone"
                 hx-swap="innerHTML">Set last read</button>
         <a class="mini-btn mini-btn--highlight"

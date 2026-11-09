@@ -119,37 +119,106 @@ func (r *TrackerRepository) ReplaceTrackerSources(ctx context.Context, profileID
 // replaceTrackerSourcesInTx is ReplaceTrackerSources' body on a caller-owned
 // transaction, so Create can run the tracker INSERT and its source rows as one
 // atomic write. The caller commits or rolls back.
+//
+// The list replaces the tracker's links, but a link that is in both the old
+// set and the new one keeps its row. This used to be DELETE-all then INSERT,
+// and the edit form sends the whole list on every save: a title or tag edit
+// recreated every row, which reset the poll rotation's memory (last_polled_at,
+// in_step — see scheduler.planPoll) for every site the tracker is linked to.
+// The next cycles then asked the sites in their starting order again and
+// stopped trusting every alternate until it had answered in step once more.
+//
+// A link is the same link when its source and LOWER(TRIM(source_url)) match,
+// the key the poller records its polls under. A tracker the profile does not
+// own is left alone.
 func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64, trackerID int64, sources []models.TrackerSource) error {
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM tracker_sources
-		WHERE tracker_id = ?
-		  AND EXISTS (SELECT 1 FROM trackers t WHERE t.id = ? AND t.profile_id = ?)
-	`, trackerID, trackerID, profileID); err != nil {
+	owned, err := trackerOwnedByProfileTx(ctx, tx, trackerID, profileID)
+	if err != nil {
+		return fmt.Errorf("check tracker ownership for sources: %w", err)
+	}
+	if !owned {
+		return nil
+	}
+
+	// Two entries of the list can name the same (source, url) — the edit form
+	// canonicalizes each link to the site's own URL, so a reader link and the
+	// series page become one — and the second used to trip the unique key and
+	// roll back the whole save. The duplicate finds the row the first one
+	// wrote and folds into it, keeping an item id either of them knew.
+	keptIDs := make([]any, 0, len(sources))
+	for _, source := range sources {
+		sourceURL := strings.TrimSpace(source.SourceURL)
+		if sourceURL == "" || source.SourceID <= 0 {
+			continue
+		}
+		rowID, err := keepOrInsertTrackerSourceTx(ctx, tx, trackerID, source.SourceID, source.SourceItemID, sourceURL)
+		if err != nil {
+			return err
+		}
+		keptIDs = append(keptIDs, rowID)
+	}
+
+	// Whatever the list did not name goes, including a second stored spelling
+	// of a link it did name: one row per link is what a replace leaves behind.
+	query := `DELETE FROM tracker_sources WHERE tracker_id = ?`
+	args := []any{trackerID}
+	if len(keptIDs) > 0 {
+		query += ` AND id NOT IN (` + sqlPlaceholders(len(keptIDs)) + `)`
+		args = append(args, keptIDs...)
+	}
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("delete tracker sources: %w", err)
 	}
 
-	// An upsert rather than a plain INSERT: two entries of the list can name the
-	// same (source, url) — the edit form canonicalizes each link to the site's
-	// own URL, so a reader link and the series page become one — and the
-	// second used to trip the unique key and roll back the whole save. The
-	// duplicate folds into the first, keeping an item id either of them knew.
-	for _, source := range sources {
-		if strings.TrimSpace(source.SourceURL) == "" || source.SourceID <= 0 {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
+	return nil
+}
+
+// keepOrInsertTrackerSourceTx makes one entry of a replaced list a row and
+// returns the row's id: the stored row for that link when there is one, a new
+// row otherwise. A stored row takes the submitted spelling of the URL and an
+// item id the entry knows (an entry without one keeps the stored id), and
+// nothing else of it is touched — its created_at and the rotation's memory
+// stay as they were. updated_at moves only when the row actually changed.
+func keepOrInsertTrackerSourceTx(ctx context.Context, tx *sql.Tx, trackerID int64, sourceID int64, sourceItemID *string, sourceURL string) (int64, error) {
+	// Rows that differ only in case or padding can both be stored. The one
+	// spelled exactly as submitted is preferred, so rewriting the URL below
+	// can never collide with it on the table's unique key.
+	var rowID int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM tracker_sources
+		WHERE tracker_id = ? AND source_id = ? AND LOWER(TRIM(source_url)) = LOWER(TRIM(?))
+		ORDER BY (source_url = ?) DESC, id ASC
+		LIMIT 1
+	`, trackerID, sourceID, sourceURL, sourceURL).Scan(&rowID)
+	if err == sql.ErrNoRows {
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
 			VALUES (?, ?, ?, ?)
-			ON CONFLICT(tracker_id, source_id, source_url)
-			DO UPDATE SET
-				source_item_id = COALESCE(excluded.source_item_id, tracker_sources.source_item_id),
-				updated_at = CURRENT_TIMESTAMP
-		`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL)); err != nil {
-			return fmt.Errorf("insert tracker source: %w", err)
+		`, trackerID, sourceID, sourceItemID, sourceURL)
+		if err != nil {
+			return 0, fmt.Errorf("insert tracker source: %w", err)
 		}
+		rowID, err = result.LastInsertId()
+		if err != nil {
+			return 0, fmt.Errorf("get tracker source insert id: %w", err)
+		}
+		return rowID, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find tracker source: %w", err)
 	}
 
-	return nil
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tracker_sources
+		SET source_url = ?,
+			source_item_id = COALESCE(?, source_item_id),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		  AND (source_url IS NOT ? OR source_item_id IS NOT COALESCE(?, source_item_id))
+	`, sourceURL, sourceItemID, rowID, sourceURL, sourceItemID); err != nil {
+		return 0, fmt.Errorf("update tracker source: %w", err)
+	}
+	return rowID, nil
 }
 
 func (r *TrackerRepository) UpsertTrackerSource(ctx context.Context, profileID int64, trackerID int64, source models.TrackerSource) error {

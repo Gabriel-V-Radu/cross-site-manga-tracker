@@ -418,7 +418,17 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 
 	sourcesChanged := !sameTrackerSources(existingSources, uniqueSources)
 	if sourcesChanged {
-		primarySource, latestKnownChapter, latestReleaseAt, relatedTitles := h.selectPrimaryTrackerSource(c.Context(), uniqueSources)
+		// The primary as stored, with its source id realigned on its URL like
+		// every submitted pair above, so a stored mismatch is still recognised
+		// in the list.
+		currentPrimary := models.TrackerSource{SourceID: existingTracker.SourceID, SourceURL: existingTracker.SourceURL}
+		if currentPrimary.SourceID, err = h.sourceIDForURL(c.Context(), currentPrimary.SourceID, currentPrimary.SourceURL); err != nil {
+			return h.fail(c, fiber.StatusInternalServerError, "Failed to validate source", err)
+		}
+		// Neither the stored chapter nor one the reader typed over it in this
+		// save is lowered on the word of an incomplete set of answers.
+		chapterFloor := higherChapter(existingTracker.LatestKnownChapter, tracker.LatestKnownChapter)
+		primarySource, latestKnownChapter, latestReleaseAt, relatedTitles := h.selectPrimaryTrackerSource(c.Context(), uniqueSources, currentPrimary, chapterFloor)
 		// Canonicalizing can turn two links that looked different — a reader
 		// link and the series page, an old domain and the current one — into
 		// the same URL, and the second row then tripped tracker_sources' unique
@@ -502,6 +512,15 @@ func chapterUnlessEdited(c *fiber.Ctx, originalField string, submitted *float64,
 	return stored
 }
 
+// higherChapter returns the larger of two optional chapter numbers, or the one
+// that is present.
+func higherChapter(a, b *float64) *float64 {
+	if a == nil || (b != nil && *b > *a) {
+		return b
+	}
+	return a
+}
+
 // samePointedValue reports whether two optional values are both absent or
 // both present and equal.
 func samePointedValue[T comparable](a, b *T) bool {
@@ -553,13 +572,38 @@ func (h *DashboardHandler) SetLastReadFromCard(c *fiber.Ctx) error {
 	}
 
 	if tracker.LatestKnownChapter != nil {
-		_, err := h.trackerRepo.UpdateLastReadChapter(c.Context(), activeProfile.ID, id, tracker.LatestKnownChapter)
+		lastRead := lastReadChapterFromCard(c.FormValue(shownLatestChapterField), *tracker.LatestKnownChapter)
+		_, err := h.trackerRepo.UpdateLastReadChapter(c.Context(), activeProfile.ID, id, &lastRead)
 		if err != nil {
 			return h.fail(c, fiber.StatusInternalServerError, "Failed to update tracker", err)
 		}
 	}
 
 	return h.renderSingleCardOOB(c, activeProfile.ID, id)
+}
+
+// shownLatestChapterField is the form field a card's "Set last read" button
+// sends: the latest chapter the card was rendered with
+// (tracker_card_templates.html).
+const shownLatestChapterField = "shown_latest_chapter"
+
+// lastReadChapterFromCard picks the chapter "Set last read" writes. The click
+// means "I have read up to the chapter this card shows", and the card can be
+// older than the database: a tab left open on "Ch. 100" while a poll stored
+// 102 used to mark 101 and 102 read as well, and they then never showed up as
+// unread. So the chapter the card sent is the one written, and the card that
+// comes back shows what is left to read.
+//
+// The stored latest is the ceiling — a card cannot have shown a chapter the
+// tracker does not know, so a higher number is cut down to it — and it is also
+// what is written when the request carries no usable number: a page loaded
+// before the button sent one, or another client posting to this route.
+func lastReadChapterFromCard(raw string, storedLatest float64) float64 {
+	shown, err := parseOptionalFloat(raw)
+	if err != nil || shown == nil || validateChapterNumber("Shown chapter", shown) != nil || *shown > storedLatest {
+		return storedLatest
+	}
+	return *shown
 }
 
 func (h *DashboardHandler) SetRatingFromCard(c *fiber.Ctx) error {
@@ -965,23 +1009,54 @@ func sameTrackerSources(existing []models.TrackerSource, incoming []models.Track
 // caller stores the whole list, so a source that loses the comparison still
 // gets its item id filled in and its URL rewritten to the site's own.
 //
-// The first source stays the primary when nothing resolves, which is what
-// makes an unreachable site (MangaFire behind its challenge) survive a save
-// instead of being demoted by an outage.
-func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource) (models.TrackerSource, *float64, *time.Time, []string) {
+// A site that did not answer says nothing about the series, so its silence
+// changes as little as possible. The sources arrive in the form's order (by
+// site name), not primary first, and the best ANSWERING source used to take
+// over outright: saving a link edit while MangaFire sat behind its challenge
+// demoted it to an alternate and stored whatever lower chapter the site that
+// did answer was on. Now:
+//
+//   - the current primary, when it is still in the list and did not answer,
+//     stays the primary — whether or not another site answered;
+//   - only when the current primary was unlinked and nothing answered does the
+//     first entry take over;
+//   - while any linked source failed to answer, the chapter (and its release
+//     date) is returned only if it is not below chapterFloor, the number the
+//     tracker already holds: a partial set of answers may raise the chapter
+//     but never walk it back. With every source answering the best reading is
+//     returned as it is, lower or not.
+//
+// current is the tracker's primary before the save; a zero value (no source
+// id) means there is none to keep.
+func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, sources []models.TrackerSource, current models.TrackerSource, chapterFloor *float64) (models.TrackerSource, *float64, *time.Time, []string) {
 	if len(sources) == 0 {
 		return models.TrackerSource{}, nil, nil, nil
 	}
 
-	bestIndex := 0
+	// Found before the loop below rewrites the URLs to each site's own.
+	currentIndex := -1
+	for idx, source := range sources {
+		if sameTrackerSourceLink(source, current) {
+			currentIndex = idx
+			break
+		}
+	}
+
+	bestIndex := -1
 	best := sourcepick.Reading{}
 	var bestRelatedTitles []string
+	failed := 0
+	currentAnswered := false
 
 	for idx := range sources {
 		source := &sources[idx]
 		resolved, err := h.resolveLinkedSource(parent, source.SourceID, source.SourceURL)
 		if err != nil || resolved == nil {
+			failed++
 			continue
+		}
+		if idx == currentIndex {
+			currentAnswered = true
 		}
 
 		resolvedItemID := strings.TrimSpace(resolved.SourceItemID)
@@ -992,9 +1067,6 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 			source.SourceURL = resolvedURL
 		}
 		resolvedRelatedTitles := searchutil.FilterEnglishAlphabetNames(resolved.RelatedTitles)
-		if idx == bestIndex && len(bestRelatedTitles) == 0 && len(resolvedRelatedTitles) > 0 {
-			bestRelatedTitles = resolvedRelatedTitles
-		}
 
 		// Copied out of the connector's result: what is returned here is stored
 		// on the tracker and must not alias a value the connector still owns.
@@ -1008,14 +1080,40 @@ func (h *DashboardHandler) selectPrimaryTrackerSource(parent context.Context, so
 			candidate.ReleaseAt = &resolvedReleaseAt
 		}
 
-		if sourcepick.Better(best, candidate) {
+		// The first source to answer leads until another reads better, even
+		// when its page carried no chapter number at all.
+		if bestIndex < 0 || sourcepick.Better(best, candidate) {
 			bestIndex = idx
 			best = candidate
 			bestRelatedTitles = resolvedRelatedTitles
 		}
 	}
 
-	return sources[bestIndex], best.Chapter, best.ReleaseAt, bestRelatedTitles
+	primaryIndex := bestIndex
+	switch {
+	case currentIndex >= 0 && !currentAnswered:
+		primaryIndex = currentIndex
+	case bestIndex < 0:
+		primaryIndex = 0
+	}
+
+	chapter, releaseAt := best.Chapter, best.ReleaseAt
+	if failed > 0 && chapter != nil && chapterFloor != nil && *chapter < *chapterFloor {
+		chapter, releaseAt = nil, nil
+	}
+
+	return sources[primaryIndex], chapter, releaseAt, bestRelatedTitles
+}
+
+// sameTrackerSourceLink reports whether two entries name the same link: the
+// same source and the same URL once trimmed and lower-cased, the key
+// tracker_sources rows are matched with everywhere else.
+func sameTrackerSourceLink(a models.TrackerSource, b models.TrackerSource) bool {
+	if a.SourceID <= 0 || a.SourceID != b.SourceID {
+		return false
+	}
+	aURL, bURL := strings.TrimSpace(a.SourceURL), strings.TrimSpace(b.SourceURL)
+	return aURL != "" && strings.EqualFold(aURL, bURL)
 }
 
 func (h *DashboardHandler) resolveLinkedSource(parent context.Context, sourceID int64, sourceURL string) (*connectors.MangaResult, error) {
