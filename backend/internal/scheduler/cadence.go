@@ -42,7 +42,13 @@ const (
 // moving plan-to-read one, idleInterval for the other statuses, and longer for
 // a series that is finished, on hiatus or has been quiet for months (see the
 // constants above).
-func pollEvery(tracker repository.PollingTracker, idleInterval time.Duration, now time.Time) time.Duration {
+//
+// feedSweep is non-zero for a tracker the sites' update feeds watch
+// (Poller.feedCovered). Its new chapters are found by the feeds within minutes,
+// so a cycle asking about it is only the sweep behind them, and it is asked
+// about once every feedSweep or so instead of every cycle; the cadences that
+// are already slower than that stay as they are.
+func pollEvery(tracker repository.PollingTracker, idleInterval time.Duration, feedSweep time.Duration, now time.Time) time.Duration {
 	status := strings.ToLower(strings.TrimSpace(tracker.Status))
 	reading := status == "reading"
 	planned := status == "plan_to_read"
@@ -53,6 +59,9 @@ func pollEvery(tracker repository.PollingTracker, idleInterval time.Duration, no
 		interval = min(planToReadEvery, idleInterval)
 	default:
 		interval = idleInterval
+	}
+	if feedSweep > 0 {
+		interval = max(interval, staggeredSweep(tracker.ID, feedSweep))
 	}
 
 	quiet, known := quietFor(tracker, now)
@@ -80,6 +89,18 @@ func pollEvery(tracker repository.PollingTracker, idleInterval time.Duration, no
 		}
 	}
 	return interval
+}
+
+// staggeredSweep is a tracker's own sweep interval: sweep, lengthened or
+// shortened by up to a quarter according to the tracker's id. The trackers the
+// feeds watch were all asked in the same cycle the day this cadence went live,
+// and with one interval for all of them they would all come due together
+// again, every time: one cycle in four asking about the whole library and the
+// rest about nobody. Intervals that differ a little drift them apart for good.
+func staggeredSweep(trackerID int64, sweep time.Duration) time.Duration {
+	// Knuth's multiplicative hash, so neighbouring ids land far apart.
+	spread := float64(uint64(trackerID)*2654435761%1000) / 1000
+	return time.Duration(float64(sweep) * (0.75 + 0.5*spread))
 }
 
 // quietFor is how long ago the tracker's latest chapter came out, as best the

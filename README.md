@@ -123,7 +123,9 @@ container) and can also be run from `backend/` with `go run ./cmd/<name>`:
 - `poll-once --db <copy-of-app.sqlite>` (not in the image): runs one full poll
   cycle against a database copy with the real connectors, for rehearsing
   poller changes. It writes to the copy, so never aim it at the live file.
-  `--feeds 3 --feed-gap 4m` runs feed ticks instead of cycles.
+  `--feeds 3 --feed-gap 4m` runs feed ticks instead of cycles, and
+  `--feed-sweep 2h` makes a cycle skip what the feeds watch, as the server
+  does.
 
 ## Logs
 - The server logs to stdout (`docker logs`), which Docker keeps only as long
@@ -141,6 +143,13 @@ container) and can also be run from `backend/` with `go run ./cmd/<name>`:
   the trackers a listing shows a new chapter for. The log line
   `poll found a new chapter … via=feed:<site>` (or `via=cycle`) says which of
   the two found each chapter.
+- A series whose linked sites all have such a listing is left to them: a
+  cycle only asks about it every `FEED_SWEEP_MINUTES` (120; 0 asks every
+  cycle), give or take a quarter so the sweeps do not bunch up. A series with a
+  site that has no listing, or whose listing keeps failing, is asked every
+  cycle as before — and so is, for a month, one whose chapter the sweep found
+  more than half an hour after it came out (`the feeds missed a chapter` in
+  the log).
 
 ## Cleanup Stale Sources (Removed Connectors / Old Custom Sites)
 - Removes source records that no longer exist in the current connector registry.

@@ -101,6 +101,11 @@ type PollingTracker struct {
 	// (connectors.SeriesStatus*), "" when no site has said. A finished or
 	// paused series that has also gone quiet is polled less often.
 	SeriesStatus string
+	// FeedMissedAt is when a cycle last found a chapter for this tracker that
+	// its sites' update feeds should have shown and did not (trackers.
+	// feed_missed_at); nil when that has not happened. While it is recent the
+	// poller does not rely on the feeds for this tracker.
+	FeedMissedAt *time.Time
 	// PrimaryLastPolledAt is the primary's last_polled_at, read from the
 	// mirror row UpdatePollingState keeps for it in tracker_sources; nil when
 	// the poller has not asked the primary since the column exists.
@@ -188,6 +193,11 @@ type PollingUpdate struct {
 	// being stored. Nil leaves whatever is recorded untouched - the right
 	// value for a poll whose report did not decide the stored number.
 	LatestChapterSourceID *int64
+
+	// FeedMissed stamps feed_missed_at with CheckedAt: this poll found a
+	// chapter the update feeds should have shown the poller first. False
+	// leaves the column as it is.
+	FeedMissed bool
 
 	// PendingLowerChapter records a lower chapter number awaiting confirmation.
 	// Nil clears whatever was pending, which is what every poll that agrees with

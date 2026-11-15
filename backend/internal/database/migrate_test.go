@@ -14,6 +14,7 @@ const baselineFile = "0001_baseline_2026-11.sql"
 // laterFiles are the migrations added after the squash, in order.
 var laterFiles = []string{
 	"0002_series_metadata.sql",
+	"0003_feed_missed.sql",
 }
 
 // expectCurrentLedger fails unless the ledger names exactly the baseline and

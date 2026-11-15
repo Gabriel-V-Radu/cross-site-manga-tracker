@@ -339,7 +339,7 @@ const pollingTrackersQuery = `
 		t.latest_known_chapter, t.last_read_chapter, t.latest_release_at, s.key, t.last_checked_at,
 		t.pending_lower_chapter, t.pending_lower_first_seen_at, t.latest_chapter_source_id,
 		mirror.last_polled_at, t.latest_chapter_seen_at, t.latest_chapter_found_at,
-		COALESCE(tm.series_status, '')
+		COALESCE(tm.series_status, ''), t.feed_missed_at
 	FROM trackers t
 	INNER JOIN sources s ON s.id = t.source_id
 	LEFT JOIN tracker_metadata tm ON tm.tracker_id = t.id
@@ -380,13 +380,18 @@ func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingT
 		var primaryPolledAt sql.NullTime
 		var seenAt sql.NullTime
 		var foundAt sql.NullTime
+		var feedMissedAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID, &item.ProfileID, &item.Title, &item.Status, &item.SourceID, &sourceItemID, &item.SourceURL,
 			&latest, &lastRead, &latestReleaseAt, &item.SourceKey, &lastCheckedAt,
 			&pendingLower, &pendingLowerSeenAt, &latestChapterSourceID,
-			&primaryPolledAt, &seenAt, &foundAt, &item.SeriesStatus,
+			&primaryPolledAt, &seenAt, &foundAt, &item.SeriesStatus, &feedMissedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan polling tracker: %w", err)
+		}
+		if feedMissedAt.Valid {
+			value := feedMissedAt.Time.UTC()
+			item.FeedMissedAt = &value
 		}
 		if seenAt.Valid {
 			value := seenAt.Time.UTC()
@@ -648,6 +653,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 				ELSE COALESCE(pending_lower_first_seen_at, ?)
 			END,
 			pending_lower_chapter = ?,
+			feed_missed_at = CASE WHEN ? THEN ? ELSE feed_missed_at END,
 			latest_release_at = CASE
 				WHEN ? THEN NULL
 				WHEN ? IS NOT NULL THEN ?
@@ -662,6 +668,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		latestChapterSourceValue,
 		pendingLower, pendingLower, checkedAt, checkedAt,
 		pendingLower,
+		update.FeedMissed, checkedAt,
 		update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue, checkedAt,
 		update.TrackerID, update.SnapshotSourceID, update.SnapshotSourceURL, update.SnapshotLatestKnownChapter)
 	if err != nil {

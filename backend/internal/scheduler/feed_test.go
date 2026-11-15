@@ -261,6 +261,202 @@ func TestFeedAsksTheSiteThatSpokeFirstWhateverItsPlaceInTheRotation(t *testing.T
 	}
 }
 
+// sweepingPoller is a poller with the feeds on and a two-hour sweep, whose
+// clock reads what the returned function last set.
+func sweepingPoller(repo pollRepository, registry *connectors.Registry) (*Poller, func(time.Time)) {
+	poller := NewPoller(repo, registry, PollerConfig{
+		Interval: 30 * time.Minute, FeedInterval: 5 * time.Minute, FeedSweepInterval: 2 * time.Hour,
+	}, nil)
+	var current atomic.Int64
+	poller.now = func() time.Time { return time.Unix(0, current.Load()).UTC() }
+	return poller, func(at time.Time) { current.Store(at.UnixNano()) }
+}
+
+// A tracker whose sites all publish a feed is found by the feeds, so the cycle
+// only asks about it every couple of hours. Anything that leaves the feeds
+// blind to it — a linked site without a feed, a feed that keeps failing, a
+// chapter the feeds already missed — puts it back on every cycle.
+func TestCycleOnlySweepsATrackerTheFeedsWatch(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	checked := func(ago time.Duration) *time.Time { at := now.Add(-ago); return &at }
+
+	cases := []struct {
+		name string
+		// alphaHasFeed is whether the primary's site publishes a feed (beta,
+		// the alternate, always does).
+		alphaHasFeed bool
+		checkedAgo   time.Duration
+		prepare      func(poller *Poller, tracker *repository.PollingTracker)
+		wantPolled   bool
+	}{
+		{name: "watched and checked half an hour ago: left to the feeds", alphaHasFeed: true, checkedAgo: 30 * time.Minute, wantPolled: false},
+		{name: "watched and not checked for three hours: swept", alphaHasFeed: true, checkedAgo: 3 * time.Hour, wantPolled: true},
+		{name: "one linked site has no feed: asked every cycle", alphaHasFeed: false, checkedAgo: 30 * time.Minute, wantPolled: true},
+		{
+			name: "a site's feed keeps failing: asked every cycle", alphaHasFeed: true, checkedAgo: 30 * time.Minute,
+			prepare: func(poller *Poller, _ *repository.PollingTracker) {
+				poller.feedFailures["beta"] = feedFailuresWorthAWarning
+			},
+			wantPolled: true,
+		},
+		{
+			name: "the feeds missed its last chapter: asked every cycle", alphaHasFeed: true, checkedAgo: 30 * time.Minute,
+			prepare: func(_ *Poller, tracker *repository.PollingTracker) {
+				tracker.FeedMissedAt = checked(3 * 24 * time.Hour)
+			},
+			wantPolled: true,
+		},
+		{
+			name: "a miss long enough ago is forgotten", alphaHasFeed: true, checkedAgo: 30 * time.Minute,
+			prepare: func(_ *Poller, tracker *repository.PollingTracker) {
+				tracker.FeedMissedAt = checked(feedMissMemory + time.Hour)
+			},
+			wantPolled: false,
+		},
+		{
+			name: "a link the feed cannot name: asked every cycle", alphaHasFeed: true, checkedAgo: 30 * time.Minute,
+			prepare: func(_ *Poller, tracker *repository.PollingTracker) {
+				tracker.AlternateSources[0].SourceURL = "https://elsewhere/one"
+			},
+			wantPolled: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tracker := feedTracker(1, "one", 10)
+			tracker.LastCheckedAt = checked(testCase.checkedAgo)
+			repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+
+			beta := newFeedSite("beta", 10)
+			var alpha connectors.Connector = newSite("alpha", 10)
+			resolves := func() int32 { return alpha.(*siteDouble).calls.Load() + beta.calls.Load() }
+			if testCase.alphaHasFeed {
+				feed := newFeedSite("alpha", 10)
+				alpha = feed
+				resolves = func() int32 { return feed.calls.Load() + beta.calls.Load() }
+			}
+			poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+			setNow(now)
+			if testCase.prepare != nil {
+				testCase.prepare(poller, tracker)
+			}
+
+			if err := poller.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run once: %v", err)
+			}
+			if polled := resolves() > 0; polled != testCase.wantPolled {
+				t.Fatalf("polled = %v, want %v", polled, testCase.wantPolled)
+			}
+		})
+	}
+
+	// With the sweep turned off, or the feeds, a reading tracker is asked
+	// every cycle whatever its sites publish.
+	for name, cfg := range map[string]PollerConfig{
+		"no sweep": {Interval: 30 * time.Minute, FeedInterval: 5 * time.Minute},
+		"no feeds": {Interval: 30 * time.Minute, FeedSweepInterval: 2 * time.Hour},
+	} {
+		tracker := feedTracker(1, "one", 10)
+		tracker.LastCheckedAt = checked(30 * time.Minute)
+		alpha, beta := newFeedSite("alpha", 10), newFeedSite("beta", 10)
+		poller := NewPoller(&statefulRepo{items: []*repository.PollingTracker{tracker}}, registryOf(t, alpha, beta), cfg, nil)
+		poller.now = func() time.Time { return now }
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("%s: run once: %v", name, err)
+		}
+		if alpha.calls.Load()+beta.calls.Load() != 1 {
+			t.Fatalf("%s: a reading tracker must be asked every cycle, got %d resolves", name, alpha.calls.Load()+beta.calls.Load())
+		}
+	}
+}
+
+// When the sweep finds a chapter that came out long before, the feeds missed
+// it, and the tracker goes back to being asked every cycle. A chapter the
+// sweep merely reached first, one a feed prompted, or one without a credible
+// date says nothing against the feeds.
+func TestSweepFindingALateChapterPutsTheTrackerBackOnEveryCycle(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	sweepFinds := func(t *testing.T, releasedAgo *time.Duration) (*statefulRepo, *Poller, func(time.Time), *feedSite, *feedSite) {
+		t.Helper()
+		tracker := feedTracker(1, "one", 10)
+		lastChecked := now.Add(-3 * time.Hour)
+		tracker.LastCheckedAt = &lastChecked
+		repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+		alpha, beta := newFeedSite("alpha", 11), newFeedSite("beta", 11)
+		if releasedAgo != nil {
+			releasedAt := now.Add(-*releasedAgo)
+			alpha.releasedAt, beta.releasedAt = &releasedAt, &releasedAt
+		}
+		poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+		setNow(now)
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run once: %v", err)
+		}
+		if got := *repo.items[0].LatestKnownChapter; got != 11 {
+			t.Fatalf("the sweep must find chapter 11, tracker reads %.0f", got)
+		}
+		return repo, poller, setNow, alpha, beta
+	}
+	ago := func(d time.Duration) *time.Duration { return &d }
+
+	t.Run("found two hours after it came out: the feeds missed it", func(t *testing.T) {
+		repo, poller, setNow, alpha, beta := sweepFinds(t, ago(2*time.Hour))
+		if repo.items[0].FeedMissedAt == nil || !repo.items[0].FeedMissedAt.Equal(now) {
+			t.Fatalf("expected the miss stamped at the poll, got %v", repo.items[0].FeedMissedAt)
+		}
+		// Half an hour on, a watched tracker would be left to the feeds; this
+		// one is asked.
+		before := alpha.calls.Load() + beta.calls.Load()
+		setNow(now.Add(30 * time.Minute))
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run once: %v", err)
+		}
+		if alpha.calls.Load()+beta.calls.Load() != before+1 {
+			t.Fatal("a tracker the feeds missed must be asked every cycle again")
+		}
+	})
+
+	t.Run("found ten minutes after it came out: the sweep got there first", func(t *testing.T) {
+		if repo, _, _, _, _ := sweepFinds(t, ago(10*time.Minute)); repo.items[0].FeedMissedAt != nil {
+			t.Fatalf("a chapter found within the grace is no miss, got %v", repo.items[0].FeedMissedAt)
+		}
+	})
+
+	t.Run("dated months ago: not a date to judge the feeds by", func(t *testing.T) {
+		if repo, _, _, _, _ := sweepFinds(t, ago(90*24*time.Hour)); repo.items[0].FeedMissedAt != nil {
+			t.Fatalf("an old date must not count as a miss, got %v", repo.items[0].FeedMissedAt)
+		}
+	})
+
+	t.Run("undated: nothing to judge by", func(t *testing.T) {
+		if repo, _, _, _, _ := sweepFinds(t, nil); repo.items[0].FeedMissedAt != nil {
+			t.Fatalf("an undated chapter must not count as a miss, got %v", repo.items[0].FeedMissedAt)
+		}
+	})
+
+	t.Run("prompted by a feed: the feeds did their job, however late the site listed it", func(t *testing.T) {
+		tracker := feedTracker(1, "one", 10)
+		lastChecked := now.Add(-30 * time.Minute)
+		tracker.LastCheckedAt = &lastChecked
+		repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+		alpha, beta := newFeedSite("alpha", 10), newFeedSite("beta", 11)
+		releasedAt := now.Add(-2 * time.Hour)
+		beta.releasedAt = &releasedAt
+		beta.list(feedRow("https://beta/one", 11))
+		poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+		setNow(now)
+
+		report := reportFor(t, poller.RunFeeds(context.Background()), "beta")
+		if report.Found != 1 {
+			t.Fatalf("the feed must find the chapter: %+v", report)
+		}
+		if repo.items[0].FeedMissedAt != nil {
+			t.Fatalf("a find the feed prompted is not a miss, got %v", repo.items[0].FeedMissedAt)
+		}
+	})
+}
+
 // The rest between two cycles is where the feeds are read: every feed
 // interval, not on the next cycle's doorstep, and not at all when they are
 // turned off.

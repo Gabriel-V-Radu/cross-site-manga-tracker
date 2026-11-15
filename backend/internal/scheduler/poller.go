@@ -78,6 +78,10 @@ type Poller struct {
 	feedInterval time.Duration
 	feedSeen     map[string]map[string]float64
 	feedFailures map[string]int
+	// feedSweepInterval is how often a cycle still asks about a tracker the
+	// feeds watch (see feedCovered); zero keeps such trackers on the cadence
+	// they would have without feeds.
+	feedSweepInterval time.Duration
 }
 
 type PollerConfig struct {
@@ -101,6 +105,11 @@ type PollerConfig struct {
 	// sites' update feeds are read for chapters a cycle would only find later
 	// (see RunFeeds). Zero or negative leaves the feeds unread.
 	FeedInterval time.Duration
+	// FeedSweepInterval is how often a cycle asks about a tracker whose
+	// linked sites all publish a feed, instead of every cycle: the feeds find
+	// its chapters, the cycle only sweeps behind them. Zero or negative, or
+	// feeds turned off, keeps every tracker on its ordinary cadence.
+	FeedSweepInterval time.Duration
 }
 
 func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerConfig, logger *slog.Logger) *Poller {
@@ -133,6 +142,7 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 		feedInterval:           max(cfg.FeedInterval, 0),
 		feedSeen:               map[string]map[string]float64{},
 		feedFailures:           map[string]int{},
+		feedSweepInterval:      max(cfg.FeedSweepInterval, 0),
 	}
 }
 
@@ -146,7 +156,8 @@ func NewPoller(repo pollRepository, registry *connectors.Registry, cfg PollerCon
 func (p *Poller) Start(ctx context.Context) {
 	p.started.Store(true)
 	p.registry.HealthBoard().PollerStarted(p.interval)
-	p.logger.Info("poller started", "interval", p.interval.String(), "feedInterval", p.feedInterval.String())
+	p.logger.Info("poller started", "interval", p.interval.String(),
+		"feedInterval", p.feedInterval.String(), "feedSweepInterval", p.feedSweepInterval.String())
 	go func() {
 		for {
 			if err := p.RunOnce(ctx); err != nil {
@@ -611,6 +622,20 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		currentSourceURL = tracker.SourceURL
 	}
 
+	// A first fill is not a find: the tracker knew no number to move from.
+	found := tracker.LatestKnownChapter != nil && latest != nil && chapterAdvances(tracker.LatestKnownChapter, *latest)
+
+	// A chapter the feeds watch for, found by the cycle instead and well after
+	// it came out, is one they missed. The tracker is then asked every cycle
+	// again for a while (feedCovered), so a title the feeds cannot see is late
+	// once and not on every chapter.
+	feedMissedBy := time.Duration(0)
+	if found && plan.feed == "" && plan.feedCovered && reportedReleaseAt != nil {
+		if late := now.Sub(*reportedReleaseAt); late > feedMissGrace && late < feedMissHorizon {
+			feedMissedBy = late
+		}
+	}
+
 	// The Snapshot fields come straight from the tracker as the cycle read
 	// it, not from canonicalSourceURL or currentSourceURL: the first is what
 	// this poll wants to write and both are blank when the primary was not
@@ -630,6 +655,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		LatestReleaseAt:            latestReleaseAt,
 		ClearLatestReleaseAt:       clearLatestReleaseAt,
 		PendingLowerChapter:        outcome.pendingLower,
+		FeedMissed:                 feedMissedBy > 0,
 		SourcePolls:                sourcePolls(answered, failed, latest),
 		CheckedAt:                  now,
 	})
@@ -642,8 +668,6 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		return false
 	}
 
-	// A first fill is not a find: the tracker knew no number to move from.
-	found := tracker.LatestKnownChapter != nil && latest != nil && chapterAdvances(tracker.LatestKnownChapter, *latest)
 	if found {
 		// One line per chapter found, with what led the poll to it: the feed
 		// of the site named, or the tracker's own turn in a cycle. It is what
@@ -659,6 +683,13 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			"to", derefChapter(latest),
 			"sourceKey", answer.candidate.ref.SourceKey,
 			"via", via)
+	}
+	if feedMissedBy > 0 {
+		p.logger.Info("the feeds missed a chapter; the tracker is asked every cycle again for a while",
+			"trackerId", tracker.ID,
+			"title", tracker.Title,
+			"sourceKey", answer.candidate.ref.SourceKey,
+			"foundAfter", feedMissedBy.Round(time.Minute).String())
 	}
 	return found
 }
@@ -943,14 +974,25 @@ func readingOf(result *connectors.MangaResult) sourcepick.Reading {
 }
 
 // shouldSkipIdle reports whether the tracker was checked recently enough for
-// its cadence (pollEvery) that this cycle can skip it.
+// its cadence that this cycle can skip it.
 func (p *Poller) shouldSkipIdle(tracker repository.PollingTracker) bool {
 	now := p.now()
-	interval := pollEvery(tracker, p.idleInterval, now)
+	interval, _ := p.cadence(tracker, now)
 	if interval <= 0 || tracker.LastCheckedAt == nil {
 		return false
 	}
 	return now.Sub(*tracker.LastCheckedAt) < interval
+}
+
+// cadence is the least time between two polls of the tracker (pollEvery), and
+// whether that reckons with the update feeds watching it.
+func (p *Poller) cadence(tracker repository.PollingTracker, now time.Time) (time.Duration, bool) {
+	covered := p.feedCovered(tracker, now)
+	sweep := time.Duration(0)
+	if covered {
+		sweep = p.feedSweepInterval
+	}
+	return pollEvery(tracker, p.idleInterval, sweep, now), covered
 }
 
 // sameChapterNumber compares two chapter numbers with a tolerance. The pending

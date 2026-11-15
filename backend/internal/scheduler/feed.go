@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -26,6 +27,81 @@ import (
 // The cycle stays as it is underneath: it is what finds a chapter on a site
 // without a feed, one a feed's window missed, and one a feed cannot see (a
 // MangaFire title whose raws run ahead of its English chapters).
+
+// With the feeds finding the chapters, a cycle asking about a tracker they
+// watch only sweeps behind them, and does so every feedSweepInterval rather
+// than every cycle (cadence.go). In the feeds' first week on the Pi they found
+// 106 chapters; of the 29 the cycle found on the same sites, 17 were found
+// within minutes of coming out, before the next feed tick, and 8 — one in
+// seventeen of those sites' chapters — were ones a feed had really missed.
+//
+// feedCovered decides which trackers the feeds watch, tracker by tracker, and
+// errs towards asking: a tracker is covered only while every site it takes
+// turns on publishes a feed that is being read and can match the tracker's
+// link, and while the feeds have not recently failed that very tracker
+// (feedMissMemory).
+
+const (
+	// feedMissGrace is how long after a chapter came out a cycle may find it
+	// before that counts as the feeds having missed it. The slowest feed
+	// (MangaFire's listing) shows a chapter a quarter of an hour late at
+	// worst; half an hour leaves room for a tick or two besides.
+	feedMissGrace = 30 * time.Minute
+	// feedMissHorizon is the oldest release date a miss is judged by. A
+	// chapter "released" weeks ago was not missed by a feed: the date is the
+	// original's, or a number the site re-used.
+	feedMissHorizon = 7 * 24 * time.Hour
+	// feedMissMemory is how long a tracker the feeds failed goes back to
+	// being asked every cycle.
+	feedMissMemory = 30 * 24 * time.Hour
+)
+
+// feedCovered reports whether the update feeds watch every site the tracker
+// takes turns on, so that a cycle need only sweep behind them.
+func (p *Poller) feedCovered(tracker repository.PollingTracker, now time.Time) bool {
+	if p.feedInterval <= 0 || p.feedSweepInterval <= 0 {
+		return false
+	}
+	if tracker.FeedMissedAt != nil && now.Sub(*tracker.FeedMissedAt) < feedMissMemory {
+		return false
+	}
+	if !p.feedWatches(tracker.SourceKey, tracker.SourceURL, true) {
+		return false
+	}
+	for _, alternate := range tracker.AlternateSources {
+		if strings.TrimSpace(alternate.SourceURL) == "" {
+			continue
+		}
+		if !p.feedWatches(alternate.SourceKey, alternate.SourceURL, false) {
+			return false
+		}
+	}
+	return true
+}
+
+// feedWatches reports whether one linked site leaves the tracker covered: it
+// publishes a feed that is being read and names this link's series. A site
+// the poller never gives a turn — one with no connector, or a trailing feed —
+// does not count against the tracker, except as its primary, which the poll
+// cannot do without.
+func (p *Poller) feedWatches(sourceKey string, sourceURL string, primary bool) bool {
+	connector, ok := p.registry.Get(sourceKey)
+	if !ok {
+		return !primary
+	}
+	if !primary && trailingFeed(connector) {
+		return true
+	}
+	feed, ok := connector.(connectors.UpdateFeed)
+	if !ok {
+		return false
+	}
+	if _, ok := feed.FeedKey(sourceURL); !ok {
+		return false
+	}
+	// A feed that keeps failing watches nothing until it is read again.
+	return p.feedFailures[connector.Key()] < feedFailuresWorthAWarning
+}
 
 // feedFetchTimeout bounds one site's feed read, pacing wait included.
 const feedFetchTimeout = 60 * time.Second
@@ -232,5 +308,5 @@ func (p *Poller) planFeedPoll(tracker repository.PollingTracker, sourceKey strin
 	if len(ordered) == 0 {
 		return pollPlan{}, false
 	}
-	return pollPlan{candidates: append(ordered, rest...), feed: sourceKey}, true
+	return pollPlan{candidates: append(ordered, rest...), feed: sourceKey, feedCovered: plan.feedCovered}, true
 }

@@ -29,6 +29,10 @@ func main() {
 	// shows as new; the first tick of a process treats every row as new.
 	feeds := flag.Int("feeds", 0, "Run this many feed ticks instead of poll cycles")
 	feedGap := flag.Duration("feed-gap", time.Minute, "Pause between feed ticks")
+	// The server leaves a tracker its sites' feeds watch to them and only
+	// sweeps it this often; with 0 a cycle here asks about every due tracker,
+	// as it did before the feeds.
+	feedSweep := flag.Duration("feed-sweep", 0, "Sweep interval for trackers the feeds watch (the server's FEED_SWEEP_MINUTES)")
 	flag.Parse()
 
 	if *dbPath == "" || *cycles < 1 || *feeds < 0 {
@@ -62,7 +66,12 @@ func main() {
 
 	repo := repository.NewTrackerRepository(db)
 	registry := connectordefaults.NewRegistry()
-	poller := scheduler.NewPoller(repo, registry, scheduler.PollerConfig{}, logger)
+	pollerConfig := scheduler.PollerConfig{}
+	if *feedSweep > 0 {
+		pollerConfig.FeedInterval = 5 * time.Minute
+		pollerConfig.FeedSweepInterval = *feedSweep
+	}
+	poller := scheduler.NewPoller(repo, registry, pollerConfig, logger)
 
 	trackers, err := repo.ListForPolling(context.Background())
 	if err != nil {

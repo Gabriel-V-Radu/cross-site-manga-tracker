@@ -61,10 +61,11 @@ func run() int {
 		repository.NewTrackerRepository(db),
 		connectorRegistry,
 		scheduler.PollerConfig{
-			Interval:     time.Duration(cfg.PollingMinutes) * time.Minute,
-			IdleInterval: time.Duration(cfg.PollingIdleMinutes) * time.Minute,
-			FeedInterval: time.Duration(cfg.FeedMinutes) * time.Minute,
-			Metadata:     metadataService,
+			Interval:          time.Duration(cfg.PollingMinutes) * time.Minute,
+			IdleInterval:      time.Duration(cfg.PollingIdleMinutes) * time.Minute,
+			FeedInterval:      time.Duration(cfg.FeedMinutes) * time.Minute,
+			FeedSweepInterval: time.Duration(cfg.FeedSweepMinutes) * time.Minute,
+			Metadata:          metadataService,
 		},
 		slog.Default(),
 	)

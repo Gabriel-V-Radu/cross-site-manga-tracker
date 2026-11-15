@@ -62,6 +62,10 @@ type pollPlan struct {
 	// feed names the site whose update feed prompted this poll, "" for a
 	// tracker's ordinary turn in a cycle (see planFeedPoll).
 	feed string
+	// feedCovered says the tracker was, when this poll was planned, one the
+	// update feeds watch (Poller.feedCovered): a chapter a cycle then finds
+	// long after it came out is one the feeds missed.
+	feedCovered bool
 }
 
 // shardKey is the source this poll's first request should go to, which is
@@ -144,12 +148,13 @@ func (p *Poller) planPoll(tracker repository.PollingTracker, cycle uint64) (poll
 		fallbackOnly = append(fallbackOnly, candidate)
 	}
 
-	if pollEvery(tracker, p.idleInterval, p.now()) == 0 {
+	every, covered := p.cadence(tracker, p.now())
+	if every == 0 {
 		slotRotation(rotation, tracker.ID, cycle)
 	} else {
 		orderRotation(rotation, tracker.ID)
 	}
-	return pollPlan{candidates: append(rotation, fallbackOnly...)}, true
+	return pollPlan{candidates: append(rotation, fallbackOnly...), feedCovered: covered}, true
 }
 
 // slotRotation orders the rotation of a tracker that is asked every cycle: the

@@ -127,6 +127,10 @@ func (r *statefulRepo) UpdatePollingState(_ context.Context, update repository.P
 		tracker.PendingLowerFirstSeenAt = &seenAt
 	}
 	tracker.PendingLowerChapter = update.PendingLowerChapter
+	if update.FeedMissed {
+		missedAt := update.CheckedAt
+		tracker.FeedMissedAt = &missedAt
+	}
 	checkedAt := update.CheckedAt
 	tracker.LastCheckedAt = &checkedAt
 	applySourcePolls(tracker, update.CheckedAt, update.SourcePolls)
