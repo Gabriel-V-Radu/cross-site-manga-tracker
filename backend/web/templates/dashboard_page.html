@@ -230,9 +230,10 @@ two tabs on different profiles kept acting on each other's library.
                   hx-trigger="trackersQuietRefresh"></span>
 
             <div class="panel-actions">
-                {{/* Shown while any filter besides Status and Sort is on:
-                     with eight of them, finding the one left ticked inside a
-                     closed dropdown is the slow part (dashboard-trackers.js). */}}
+                {{/* Shown whenever the form is not the default view (Reading,
+                     newest chapter first, nothing else on) and goes back to
+                     it: with eight filters, finding the one left ticked inside
+                     a closed dropdown is the slow part (dashboard-trackers.js). */}}
                 <button type="button" class="action-btn" id="filters-reset" hidden>Clear filters</button>
                 <button type="button"
                         class="action-btn action-btn--accent"

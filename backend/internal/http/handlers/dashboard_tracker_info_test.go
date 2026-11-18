@@ -125,6 +125,16 @@ func TestTrackersPartialFiltersByGenreAndKeepsCaughtUpReading(t *testing.T) {
 		t.Fatalf("Reading + genre must list both Action titles, caught-up included, and nothing else:\n%s", filtered)
 	}
 
+	// Changing only the sort leaves the default view too.
+	_, sorted := fetchPage(t, app, "/dashboard/trackers?status=reading&sort=unread")
+	if !strings.Contains(sorted, ">Behind<") || !strings.Contains(sorted, ">Caught<") {
+		t.Fatalf("Reading under another sort must list the caught-up tracker too:\n%s", sorted)
+	}
+	_, defaults := fetchPage(t, app, "/dashboard/trackers?status=reading&sort=latest_known_chapter&q=&page=1")
+	if !strings.Contains(defaults, ">Behind<") || strings.Contains(defaults, ">Caught<") {
+		t.Fatalf("the default view as the form sends it must leave out the caught-up tracker")
+	}
+
 	_, typed := fetchPage(t, app, "/dashboard/trackers?status=all&types=manga")
 	if !strings.Contains(typed, ">Elsewhere<") || strings.Contains(typed, ">Behind<") {
 		t.Fatalf("type filter did not narrow to manga")

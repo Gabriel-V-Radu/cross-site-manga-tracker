@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"testing"
 	"time"
 
@@ -32,11 +33,12 @@ func saveView(t *testing.T, repo *repository.MetadataRepository, trackerID int64
 	}
 }
 
+// listTitles returns the titles a list carries, in alphabetical order. The
+// sort is the caller's (it decides whether Reading leaves out caught-up
+// trackers), so the titles are ordered here rather than by the query.
 func listTitles(t *testing.T, repo *repository.TrackerRepository, options repository.TrackerListOptions) []string {
 	t.Helper()
 	options.ProfileID = 1
-	options.SortBy = "title"
-	options.Order = "asc"
 	items, err := repo.List(context.Background(), options)
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -45,6 +47,7 @@ func listTitles(t *testing.T, repo *repository.TrackerRepository, options reposi
 	for _, item := range items {
 		titles = append(titles, item.Title)
 	}
+	sort.Strings(titles)
 	count, err := repo.Count(context.Background(), options)
 	if err != nil {
 		t.Fatalf("count: %v", err)
@@ -107,11 +110,24 @@ func TestReadingKeepsCaughtUpTrackersWhenNarrowed(t *testing.T) {
 	if got := listTitles(t, trackers, repository.TrackerListOptions{Statuses: reading}); len(got) != 1 || got[0] != "behind" {
 		t.Fatalf("Reading alone must leave out the caught-up tracker, got %v", got)
 	}
+	// The default order spelled out, or a sort the list does not know (which
+	// falls back to it), is still the default view.
+	for _, options := range []repository.TrackerListOptions{
+		{Statuses: reading, SortBy: "latest_known_chapter", Order: "desc"},
+		{Statuses: reading, SortBy: "nonsense"},
+	} {
+		if got := listTitles(t, trackers, options); len(got) != 1 || got[0] != "behind" {
+			t.Fatalf("Reading in the default order must leave out the caught-up tracker: options %+v gave %v", options, got)
+		}
+	}
 	narrowed := []repository.TrackerListOptions{
 		{Statuses: reading, Query: "caught"},
 		{Statuses: reading, Genres: []string{"Action"}},
 		{Statuses: reading, SeriesTypes: []string{"manhwa"}},
 		{Statuses: reading, SourceIDs: []int64{1}},
+		{Statuses: reading, SortBy: "unread"},
+		{Statuses: reading, SortBy: "rating", Order: "desc"},
+		{Statuses: reading, SortBy: "latest_known_chapter", Order: "asc"},
 	}
 	for _, options := range narrowed {
 		got := listTitles(t, trackers, options)
@@ -122,7 +138,7 @@ func TestReadingKeepsCaughtUpTrackersWhenNarrowed(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("Reading plus a filter must include caught-up trackers: options %+v gave %v", options, got)
+			t.Fatalf("Reading plus a filter or another sort must include caught-up trackers: options %+v gave %v", options, got)
 		}
 	}
 }

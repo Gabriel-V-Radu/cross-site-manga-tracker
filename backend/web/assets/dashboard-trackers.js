@@ -48,8 +48,7 @@ var trackerCardFragmentURL = function (trackerID) {
 };
 
 // The filters besides Status and Sort. Each narrows the list by something the
-// card does not carry, so only the server can tell whether a card matches one;
-// and with any of them on, Reading stops leaving out caught-up trackers
+// card does not carry, so only the server can tell whether a card matches one
 // (repository.TrackerListOptions.Narrowed).
 var narrowingFilterNames = ['q', 'sites', 'tags', 'types', 'publication', 'genres'];
 
@@ -59,6 +58,25 @@ var listIsNarrowed = function (params) {
             return String(value || '').trim() !== '';
         });
     });
+};
+
+// The list as the dashboard opens: Reading, newest chapter first, nothing
+// else filtering it. That view alone is the reading queue, which leaves out
+// the trackers the reader is caught up on; change anything — the status, the
+// sort, any filter — and they are back (buildTrackerListFilters in the
+// repository), with Clear filters there to return to it. The server reads a
+// missing or empty status or sort as the default.
+var defaultListStatus = 'reading';
+var defaultListSort = 'latest_known_chapter';
+
+var listParam = function (params, name, fallback) {
+    return String(params.get(name) || '').trim() || fallback;
+};
+
+var listIsDefaultView = function (params) {
+    return !listIsNarrowed(params) &&
+        listParam(params, 'status', defaultListStatus) === defaultListStatus &&
+        listParam(params, 'sort', defaultListSort) === defaultListSort;
 };
 
 // What the list on screen was asked for, as the trackers partial records it in
@@ -86,11 +104,7 @@ var shownTrackersList = function () {
 };
 
 var listStatusFilter = function (list) {
-    // The server reads a missing status as Reading and an empty one as All.
-    if (!list.params.has('status')) {
-        return 'reading';
-    }
-    return String(list.params.get('status') || '').trim();
+    return listParam(list.params, 'status', defaultListStatus);
 };
 
 var cardIsCaughtUp = function (card) {
@@ -100,10 +114,10 @@ var cardIsCaughtUp = function (card) {
 };
 
 // Whether a card, as just rendered, belongs in the list on screen. Status is
-// on the card (with Reading's rule that a caught-up tracker is not on it); a
-// search, a tag, a site, a type, a publication status or a genre depends on
-// what the card does not carry, so with one of those active only the server
-// can tell and the answer is no.
+// on the card (with the default view's rule that a caught-up tracker is not
+// on it); a search, a tag, a site, a type, a publication status or a genre
+// depends on what the card does not carry, so with one of those active only
+// the server can tell and the answer is no.
 var cardMatchesShownList = function (card, list) {
     if (!card || !list) {
         return false;
@@ -115,7 +129,7 @@ var cardMatchesShownList = function (card, list) {
     if (status !== '' && status !== 'all' && card.getAttribute('data-status') !== status) {
         return false;
     }
-    return !(status === 'reading' && cardIsCaughtUp(card));
+    return !(listIsDefaultView(list.params) && cardIsCaughtUp(card));
 };
 
 // A card replaced in place keeps its position in the grid and the reader's
@@ -499,15 +513,15 @@ var summarizeFilterDropdown = function (dropdown) {
     dropdown.classList.toggle('filter-multi-select--active', labels.length > 0);
 };
 
-// Whether anything besides Status and Sort narrows the list, which is when
-// the Clear filters button shows.
+// The Clear filters button shows whenever the form is not the default view:
+// a status other than Reading, another sort, or any filter on.
 var syncFiltersResetButton = function () {
     var button = document.getElementById('filters-reset');
     var form = document.getElementById('tracker-filters');
     if (!button || !form || typeof window.FormData !== 'function') {
         return;
     }
-    button.hidden = !listIsNarrowed(new window.URLSearchParams(new window.FormData(form)));
+    button.hidden = listIsDefaultView(new window.URLSearchParams(new window.FormData(form)));
 };
 
 window.updateFilterSummaries = function () {
@@ -569,10 +583,14 @@ window.applyTrackerFilter = function (name, value, label) {
 
 document.addEventListener('change', function (event) {
     var target = event.target;
-    if (!target || multiSelectFilterNames.indexOf(target.name) === -1) {
+    if (!target) {
         return;
     }
-    window.updateFilterSummaries();
+    if (multiSelectFilterNames.indexOf(target.name) !== -1) {
+        window.updateFilterSummaries();
+    } else if ((target.name === 'status' || target.name === 'sort') && target.closest && target.closest('#tracker-filters')) {
+        syncFiltersResetButton();
+    }
 });
 
 document.addEventListener('input', function (event) {
@@ -612,6 +630,15 @@ document.addEventListener('click', function (event) {
     Array.prototype.forEach.call(form.querySelectorAll('details.filter-multi-select input[type="checkbox"]:checked'), function (box) {
         box.checked = false;
     });
+    // Back to the default view, so the status and the sort go back too.
+    var statusSelect = form.querySelector('select[name="status"]');
+    if (statusSelect) {
+        statusSelect.value = defaultListStatus;
+    }
+    var sortSelect = form.querySelector('select[name="sort"]');
+    if (sortSelect) {
+        sortSelect.value = defaultListSort;
+    }
     var search = form.querySelector('input[name="q"]');
     if (search) {
         search.value = '';
@@ -1455,7 +1482,7 @@ var pendingDashboardScroll = null;
 // it: a reload, a phone bringing a discarded tab back, or a Back from the Link
 // review page all open on the same list instead of the defaults. Defaults are
 // left out so the plain dashboard keeps its plain URL.
-var filterURLDefaults = { status: 'reading', sort: 'latest_known_chapter', page: '1', q: '' };
+var filterURLDefaults = { status: defaultListStatus, sort: defaultListSort, page: '1', q: '' };
 
 var rememberFiltersInURL = function () {
     var form = document.getElementById('tracker-filters');
@@ -1608,16 +1635,16 @@ var reopenHeldMenus = function (zone) {
 };
 
 // "No trackers found — add your first source entry" was all a profile whose
-// trackers are all caught up saw on opening: Reading, the default, leaves out
-// the trackers whose latest chapter has been read. On Reading alone the empty
-// state says so instead; with another filter on, Reading keeps them, so the
-// plain hint is the right one.
+// trackers are all caught up saw on opening: the default view leaves out the
+// trackers whose latest chapter has been read. There the empty state says so
+// instead; with the status, the sort or any filter changed, Reading keeps
+// them, so the plain hint is the right one.
 var explainEmptyList = function (zone, list) {
     var empty = zone.querySelector('.empty-state');
     if (!empty || !list) {
         return;
     }
-    var onReading = listStatusFilter(list) === 'reading' && !listIsNarrowed(list.params);
+    var onReading = listIsDefaultView(list.params);
     Array.prototype.forEach.call(empty.querySelectorAll('[data-empty-hint]'), function (hint) {
         hint.hidden = (hint.getAttribute('data-empty-hint') === 'reading') !== onReading;
     });

@@ -12,44 +12,50 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
 
+// defaultTrackerSort is the order a list comes in when none is asked for:
+// newest chapter first.
+const defaultTrackerSort = "latest_known_chapter"
+
+// trackerSortFields maps each sort a list can be asked for to what it ranks by.
+var trackerSortFields = map[string]string{
+	"title":           "title",
+	"created_at":      "created_at",
+	"updated_at":      "updated_at",
+	"last_read_at":    "last_read_at",
+	"last_checked_at": "last_checked_at",
+	"rating":          "rating",
+	// How many chapters are left to read, most first. Trackers with
+	// nothing pending — caught up, never started, or with no chapter
+	// known — rank NULL, which a descending sort puts last.
+	"unread": `CASE
+		WHEN latest_known_chapter IS NULL OR last_read_chapter IS NULL OR latest_known_chapter <= last_read_chapter THEN NULL
+		ELSE latest_known_chapter - last_read_chapter
+	END`,
+	// "Newest chapter first" must rank by when the chapter appeared, so the
+	// fallbacks may only be dates that move when a chapter does.
+	// last_checked_at and updated_at were in this chain and both are rewritten
+	// by every poll, which ranked a tracker whose source reports no release
+	// date by when it was last polled: those trackers were pinned to the top of
+	// the library and could never move down, however old the series was.
+	//
+	// When a poll found the chapter well after it came out — a finished
+	// series polled every few days that got an extra, a site that indexed
+	// it late — the find time ranks it instead, so the reader sees it on
+	// top rather than days down the list. latest_chapter_found_at is only
+	// ever set by a poll that moved the number up, so trackers whose number
+	// came from creation or an edit keep ranking by release date exactly as
+	// before. SQLite's two-argument MAX is NULL if either side is, hence
+	// the fallback inside the second COALESCE.
+	defaultTrackerSort: `CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE MAX(
+		COALESCE(latest_release_at, latest_chapter_seen_at, created_at),
+		COALESCE(latest_chapter_found_at, latest_release_at, latest_chapter_seen_at, created_at)
+	) END`,
+}
+
 func (r *TrackerRepository) List(ctx context.Context, options TrackerListOptions) ([]models.Tracker, error) {
-	validSortFields := map[string]string{
-		"title":           "title",
-		"created_at":      "created_at",
-		"updated_at":      "updated_at",
-		"last_read_at":    "last_read_at",
-		"last_checked_at": "last_checked_at",
-		"rating":          "rating",
-		// "Newest chapter first" must rank by when the chapter appeared, so the
-		// fallbacks may only be dates that move when a chapter does.
-		// last_checked_at and updated_at were in this chain and both are rewritten
-		// by every poll, which ranked a tracker whose source reports no release
-		// date by when it was last polled: those trackers were pinned to the top of
-		// the library and could never move down, however old the series was.
-		//
-		// When a poll found the chapter well after it came out — a finished
-		// series polled every few days that got an extra, a site that indexed
-		// it late — the find time ranks it instead, so the reader sees it on
-		// top rather than days down the list. latest_chapter_found_at is only
-		// ever set by a poll that moved the number up, so trackers whose number
-		// came from creation or an edit keep ranking by release date exactly as
-		// before. SQLite's two-argument MAX is NULL if either side is, hence
-		// the fallback inside the second COALESCE.
-		// How many chapters are left to read, most first. Trackers with
-		// nothing pending — caught up, never started, or with no chapter
-		// known — rank NULL, which a descending sort puts last.
-		"unread": `CASE
-			WHEN latest_known_chapter IS NULL OR last_read_chapter IS NULL OR latest_known_chapter <= last_read_chapter THEN NULL
-			ELSE latest_known_chapter - last_read_chapter
-		END`,
-		"latest_known_chapter": `CASE WHEN latest_known_chapter IS NULL THEN NULL ELSE MAX(
-			COALESCE(latest_release_at, latest_chapter_seen_at, created_at),
-			COALESCE(latest_chapter_found_at, latest_release_at, latest_chapter_seen_at, created_at)
-		) END`,
-	}
-	sortField, ok := validSortFields[options.SortBy]
+	sortField, ok := trackerSortFields[options.SortBy]
 	if !ok {
-		sortField = validSortFields["latest_known_chapter"]
+		sortField = trackerSortFields[defaultTrackerSort]
 	}
 
 	order := strings.ToUpper(options.Order)
@@ -197,11 +203,12 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 			}
 		}
 
-		// Reading on its own is the reading queue, so it leaves out what has
-		// been read up to the latest chapter. With any other filter on, the
-		// reader is looking for a particular title among the ones they read,
+		// Reading as the list opens — nothing else filtering it, in its own
+		// order — is the reading queue, so it leaves out what has been read
+		// up to the latest chapter. Once the reader changes anything, a
+		// filter or the sort, they are looking through the titles they read,
 		// and a title they are caught up on is as much one of those as any.
-		if hasReading && !options.Narrowed() {
+		if hasReading && !options.Narrowed() && !options.Reordered() {
 			whereClauses = append(whereClauses, `(status <> 'reading' OR latest_known_chapter IS NULL OR last_read_chapter IS NULL OR last_read_chapter < latest_known_chapter)`)
 		}
 	}

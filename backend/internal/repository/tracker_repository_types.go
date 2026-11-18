@@ -44,6 +44,18 @@ func (o TrackerListOptions) Narrowed() bool {
 	return false
 }
 
+// Reordered reports whether the list was asked for in an order other than
+// its own, newest chapter first. A sort the list does not know falls back to
+// that order (List), so it does not count. Reading stops leaving out
+// caught-up trackers then too (buildTrackerListFilters).
+func (o TrackerListOptions) Reordered() bool {
+	if strings.ToUpper(o.Order) == "ASC" {
+		return true
+	}
+	_, known := trackerSortFields[o.SortBy]
+	return known && o.SortBy != defaultTrackerSort
+}
+
 // distinctTrimmed drops blanks and exact duplicates, keeping order.
 func distinctTrimmed(values []string) []string {
 	if len(values) == 0 {
