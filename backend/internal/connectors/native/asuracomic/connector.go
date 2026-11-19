@@ -147,6 +147,11 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		return []connectors.MangaResult{}, nil
 	}
 
+	// Every series link's text, read off the page once. It used to be looked
+	// up per series id, and each lookup matched every anchor on the page
+	// again: a browse page of sixty-odd series was scanned sixty-odd times.
+	anchorTitles := seriesAnchorTitles(body)
+
 	results := make([]connectors.MangaResult, 0, query.Limit)
 	for _, seriesID := range seriesIDs {
 		if len(results) >= query.Limit {
@@ -166,7 +171,7 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		// link on the page, nav and sidebar entries included, before a real
 		// hit further down got its turn.
 		seriesSlugTitle := strings.ReplaceAll(seriesID, "-", " ")
-		anchorTitle := extractAnchorTextForSeriesID(body, seriesID)
+		anchorTitle := anchorTitles[seriesID]
 		if !query.Matches(anchorTitle, seriesSlugTitle, seriesID) {
 			continue
 		}
@@ -215,7 +220,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// chapter, and the reader chain ranks sites by that claim. A chapter the
 	// page lists as locked early-access counts as carried — its page exists
 	// and unlocks on its own timer.
-	result, listed, err := c.resolveBySeriesID(ctx, seriesID)
+	result, seriesPage, err := c.resolveBySeriesID(ctx, seriesID)
 	if err != nil {
 		return "", err
 	}
@@ -233,7 +238,7 @@ func (c *Connector) ResolveChapterURL(ctx context.Context, rawURL string, chapte
 	// so a chapter Asura never ran (a .5 extra numbered by another site, the
 	// early run of a series it picked up midway) got a built link that 404s,
 	// which the reading chain then cached for hours as a verified hit.
-	if !chapterCarried(listed, chapter) {
+	if !chapterCarried(listedChapters(seriesPage, seriesID), chapter) {
 		return "", fmt.Errorf("chapter %s not listed: %w", chapterSegment, connectors.ErrChapterNotFound)
 	}
 
@@ -264,39 +269,45 @@ func (c *Connector) parseSeriesURL(rawURL string) (string, string, error) {
 	return seriesID, routeKind, nil
 }
 
-func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, []float64, error) {
-	result, listed, err := c.resolveBySeriesIDExact(ctx, seriesID)
+// resolveBySeriesID resolves a series, looking its current id up in the
+// catalogue when the one given answers 404. The second return is the series
+// page the result was read from, under the id the result names.
+func (c *Connector) resolveBySeriesID(ctx context.Context, seriesID string) (*connectors.MangaResult, string, error) {
+	result, seriesPage, err := c.resolveBySeriesIDExact(ctx, seriesID)
 	if err == nil {
-		return result, listed, nil
+		return result, seriesPage, nil
 	}
 	if !connectors.IsNotFound(err) {
-		return nil, nil, err
+		return nil, "", err
 	}
 
 	canonicalSeriesID, findErr := c.findCanonicalSeriesID(ctx, seriesID)
 	if findErr != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
 	if canonicalSeriesID == seriesID {
-		return nil, nil, err
+		return nil, "", err
 	}
 
 	// resolveBySeriesIDExact hands its result back beside a no-chapters error
 	// for search's sake; a resolve answers with a result only on success.
-	result, listed, err = c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
+	result, seriesPage, err = c.resolveBySeriesIDExact(ctx, canonicalSeriesID)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
-	return result, listed, nil
+	return result, seriesPage, nil
 }
 
-// resolveBySeriesIDExact reads one series page. Beside the result it returns
-// every chapter number the page carries (see listedChapters), which only the
-// chapter-link check reads.
-func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, []float64, error) {
+// resolveBySeriesIDExact reads one series page and hands the page back beside
+// the result. The page rather than the list of chapter numbers on it
+// (listedChapters), which this used to work out for every caller: only the
+// chapter-link check reads that list, and a poll — a resolve every half hour
+// per tracker — paid for half a dozen more passes over the page to build a
+// slice it dropped.
+func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string) (*connectors.MangaResult, string, error) {
 	body, err := c.fetchPage(ctx, c.AbsoluteURL("/comics/"+url.PathEscape(seriesID)))
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch series page: %w", err)
+		return nil, "", fmt.Errorf("fetch series page: %w", err)
 	}
 
 	title := extractTitle(body)
@@ -326,9 +337,9 @@ func (c *Connector) resolveBySeriesIDExact(ctx context.Context, seriesID string)
 	// log line and no turn for its other sources. The result still comes back
 	// beside the error so search can list a series with no chapter out yet.
 	if latestChapter == nil {
-		return result, nil, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
+		return result, body, fmt.Errorf("series %s: %w", seriesID, connectors.ErrNoChaptersListed)
 	}
-	return result, listedChapters(body, seriesID), nil
+	return result, body, nil
 }
 
 func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) (string, error) {
@@ -354,12 +365,18 @@ func (c *Connector) findCanonicalSeriesID(ctx context.Context, seriesID string) 
 
 	targetBase := stripSeriesIDHashSuffix(trimmedSeriesID)
 	targetNorm := searchutil.Normalize(strings.ReplaceAll(targetBase, "-", " "))
+	// Read off the page only if a candidate has to be judged by its title;
+	// most lookups end on the id match above it.
+	var anchorTitles map[string]string
 	for _, candidateID := range seriesIDs {
 		if stripSeriesIDHashSuffix(candidateID) == targetBase {
 			return candidateID, nil
 		}
 
-		candidateTitle := extractAnchorTextForSeriesID(body, candidateID)
+		if anchorTitles == nil {
+			anchorTitles = seriesAnchorTitles(body)
+		}
+		candidateTitle := anchorTitles[candidateID]
 		if candidateTitle != "" && searchutil.Normalize(candidateTitle) == targetNorm {
 			return candidateID, nil
 		}
@@ -402,16 +419,21 @@ func collectUniqueSeriesIDs(body string) []string {
 	return ids
 }
 
-// extractAnchorTextForSeriesID returns the first usable link text of an anchor
-// pointing at seriesID; the series anchors are matched once with a shared
-// pattern and the id compared afterwards.
-func extractAnchorTextForSeriesID(body string, seriesID string) string {
-	if seriesID == "" {
-		return ""
-	}
+// seriesAnchorTitles reads the link text of every series anchor on a page in
+// one pass, keyed by the lower-cased series id (the form collectUniqueSeriesIDs
+// hands out). A series is linked several times — its cover, its name, its
+// latest chapter — and the first usable text wins: a cover's "poster" or
+// "image" alt names nothing, and a link that runs on into its chapter keeps
+// only the name before it.
+func seriesAnchorTitles(body string) map[string]string {
 	matches := seriesAnchorPattern.FindAllStringSubmatch(body, -1)
+	titles := make(map[string]string, len(matches))
 	for _, match := range matches {
-		if len(match) < 3 || !strings.EqualFold(match[1], seriesID) {
+		if len(match) < 3 {
+			continue
+		}
+		seriesID := strings.ToLower(match[1])
+		if _, named := titles[seriesID]; named {
 			continue
 		}
 		candidate := connectors.CleanText(match[2])
@@ -422,10 +444,10 @@ func extractAnchorTextForSeriesID(body string, seriesID string) string {
 			candidate = strings.TrimSpace(candidate[:chapterIndex])
 		}
 		if candidate != "" {
-			return candidate
+			titles[seriesID] = candidate
 		}
 	}
-	return ""
+	return titles
 }
 
 func extractTitle(body string) string {

@@ -98,23 +98,48 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 		return trimmedSourceURL, false, false
 	}
 
-	// Captured now rather than when the resolve gets its slot: an Invalidate
+	// Captured now rather than when the resolve gets its slot: an invalidation
 	// that lands while it waits in the queue voids its answer just the same.
-	generation := r.cache.currentGeneration()
+	generation := r.cache.currentGeneration(chapterScope(trimmedSourceKey, trimmedSourceURL))
 	r.queue.run(cacheKey, r.sem, pageKey, func(ctx context.Context) {
 		_, _ = r.fetch(ctx, generation, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	})
 	return trimmedSourceURL, false, true
 }
 
-// Invalidate drops every remembered chapter link. Called whenever a tracker's
-// linked sources or reading pin change: a "no link found" computed before a
-// source was attached would otherwise outlive the attachment by its whole TTL,
-// which reads as the new link not working. A resolve already queued or in
-// flight was working from the links as they were, so it no longer writes its
-// answer either (see fetch's generation).
-func (r *ChapterLinkResolver) Invalidate() {
-	r.cache.reset()
+// InvalidateSource drops the chapter links remembered for lookups that start
+// from one link — the source and series URL a card's chapter lookups are made
+// with, which is the tracker's primary or the source its reading pin names.
+// Called for each of a tracker's links when they or its pin change: a "no
+// link found" computed before a source was attached would otherwise outlive
+// the attachment by its whole TTL, which reads as the new link not working. A
+// resolve already queued or in flight for that link was working from the
+// links as they were, so it no longer writes its answer either (see fetch's
+// generation).
+//
+// Every other tracker's links stay. This used to drop the whole cache: one
+// tracker edited, and the next render of the list sent two resolves per card
+// back to the sites for the entire library.
+func (r *ChapterLinkResolver) InvalidateSource(sourceKey, sourceURL string) {
+	scope := chapterScope(sourceKey, sourceURL)
+	if scope == "" {
+		return
+	}
+	r.cache.invalidateScope(scope, func(key string, _ chapterEntry) bool {
+		return strings.HasPrefix(key, scope)
+	})
+}
+
+// chapterScope names the lookups that start from one link, and is the prefix
+// their cache keys share (see chapterCacheKey): the source, the series URL,
+// and the separator that ends the URL. Empty for a link that names neither.
+func chapterScope(sourceKey, sourceURL string) string {
+	key := strings.ToLower(strings.TrimSpace(sourceKey))
+	seriesURL := strings.ToLower(strings.TrimSpace(sourceURL))
+	if key == "" || seriesURL == "" {
+		return ""
+	}
+	return key + "|" + seriesURL + "|"
 }
 
 // fetch resolves a chapter's reader URL across a tracker's linked sources in
@@ -131,8 +156,8 @@ func (r *ChapterLinkResolver) Invalidate() {
 // sites (ComicK): they always carry the chapter page, but nobody wants to read
 // there, so they only serve when nothing else could.
 //
-// generation is the cache's invalidation count when the resolve was queued. The
-// answer is only written while it still holds; see Invalidate.
+// generation is the link's invalidation count when the resolve was queued. The
+// answer is only written while it still holds; see InvalidateSource.
 func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
@@ -152,11 +177,12 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 		return trimmedSourceURL, fmt.Errorf("chapter url not found")
 	}
 
-	// An Invalidate ran while this resolve waited for its slot, so nothing it
-	// finds could be written. Asking the sites anyway would spend requests on
-	// an answer that is thrown away; the card's next render queues one that
-	// counts.
-	if r.cache.currentGeneration() != generation {
+	// The link was invalidated while this resolve waited for its slot, so
+	// nothing it finds could be written. Asking the sites anyway would spend
+	// requests on an answer that is thrown away; the card's next render queues
+	// one that counts.
+	scope := chapterScope(trimmedSourceKey, trimmedSourceURL)
+	if r.cache.currentGeneration(scope) != generation {
 		return trimmedSourceURL, fmt.Errorf("chapter links invalidated while queued")
 	}
 
@@ -229,7 +255,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 		}
 
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(generation, cacheKey, chapterURL, true, verifiedChapterTTL)
+			r.cacheResult(generation, scope, cacheKey, chapterURL, true, verifiedChapterTTL)
 			return chapterURL, nil
 		}
 	}
@@ -240,7 +266,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 	// rather than a day later.
 	for _, candidate := range blocked {
 		if built, buildOK := candidate.linker.BuildChapterURL(candidate.url, chapter); buildOK && strings.TrimSpace(built) != "" {
-			r.cacheResult(generation, cacheKey, built, true, jitteredTTL(lookupRetryTTL))
+			r.cacheResult(generation, scope, cacheKey, built, true, jitteredTTL(lookupRetryTTL))
 			return built, nil
 		}
 	}
@@ -267,7 +293,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 			continue
 		}
 		if chapterURL, ok := resolveCandidate(candidateKey, candidateURL); ok {
-			r.cacheResult(generation, cacheKey, chapterURL, true, floorTTL)
+			r.cacheResult(generation, scope, cacheKey, chapterURL, true, floorTTL)
 			return chapterURL, nil
 		}
 	}
@@ -276,7 +302,7 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 	if attempted {
 		negativeTTL = lookupRetryTTL
 	}
-	r.cacheResult(generation, cacheKey, "", false, jitteredTTL(negativeTTL))
+	r.cacheResult(generation, scope, cacheKey, "", false, jitteredTTL(negativeTTL))
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no usable source")
 	}
@@ -388,10 +414,10 @@ func (r *ChapterLinkResolver) cached(cacheKey string) (chapterURL string, found 
 	return entry.ChapterURL, entry.Found, true
 }
 
-// cacheResult writes a resolve's answer unless an Invalidate ran since the
-// resolve was queued at generation.
-func (r *ChapterLinkResolver) cacheResult(generation uint64, cacheKey, chapterURL string, found bool, ttl time.Duration) {
-	r.cache.putIfGeneration(generation, cacheKey, chapterEntry{
+// cacheResult writes a resolve's answer unless its link (scope) was
+// invalidated since the resolve was queued at generation.
+func (r *ChapterLinkResolver) cacheResult(generation uint64, scope, cacheKey, chapterURL string, found bool, ttl time.Duration) {
+	r.cache.putIfGeneration(generation, scope, cacheKey, chapterEntry{
 		ChapterURL: chapterURL,
 		Found:      found,
 		ExpiresAt:  time.Now().UTC().Add(ttl),

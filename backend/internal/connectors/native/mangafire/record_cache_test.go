@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 // A resolve reads the detail record once a day and the English chapter
@@ -93,5 +95,62 @@ func TestMangaFireStaleCachedRecordHeals(t *testing.T) {
 	}
 	if resolved.LatestChapter == nil || *resolved.LatestChapter != 11 || detailHits.Load() != 2 {
 		t.Fatalf("chapter %v after %d detail requests; want 11 after 2", resolved.LatestChapter, detailHits.Load())
+	}
+}
+
+// The cover is on the detail record, so asking for it alone (the cover
+// resolver, through connectors.CoverURLResolver) reads no chapter listing, and
+// nothing at all while the record is cached. A full resolve per cover spent a
+// chapters request — and a signed token — on an answer nothing looked at.
+func TestMangaFireCoverComesFromTheDetailRecordAlone(t *testing.T) {
+	var detailHits, chapterHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/titles/dkw", func(w http.ResponseWriter, _ *http.Request) {
+		detailHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":1,"hid":"dkw","slug":"one-piece","title":"One Piece","poster":{"medium":"https://static.example/m.webp","large":"https://static.example/l.webp"}}}`))
+	})
+	mux.HandleFunc("/api/titles/med", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":2,"hid":"med","slug":"medium-only","title":"Medium Only","poster":{"medium":"https://static.example/only-m.webp"}}}`))
+	})
+	mux.HandleFunc("/api/titles/dkw/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		chapterHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[{"id":75117,"number":1187,"language":"en","createdAt":1783047602}],"meta":{"hasNext":false}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	connector := NewConnectorWithOptions(server.URL, []string{"mangafire.to"}, &http.Client{Timeout: 5 * time.Second})
+	var resolver connectors.CoverURLResolver = connector
+
+	for attempt := 0; attempt < 2; attempt++ {
+		// A legacy link, as old trackers store them: the hid is all it needs.
+		cover, err := resolver.ResolveCoverURL(context.Background(), "https://mangafire.to/manga/one-piecee.dkw")
+		if err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		if cover != "https://static.example/l.webp" {
+			t.Fatalf("attempt %d: cover %q, want the large poster", attempt, cover)
+		}
+	}
+	if detailHits.Load() != 1 || chapterHits.Load() != 0 {
+		t.Fatalf("detail asked %d times, chapters %d; want 1 and 0", detailHits.Load(), chapterHits.Load())
+	}
+
+	// The same cover a resolve reports, from the record the cover left cached.
+	resolved, err := connector.ResolveByURL(context.Background(), "https://mangafire.to/title/dkw-one-piece")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.CoverImageURL != "https://static.example/l.webp" || detailHits.Load() != 1 {
+		t.Fatalf("resolve reported %q after %d detail requests; want the same cover after 1", resolved.CoverImageURL, detailHits.Load())
+	}
+
+	if cover, err := resolver.ResolveCoverURL(context.Background(), "https://mangafire.to/title/med-medium-only"); err != nil || cover != "https://static.example/only-m.webp" {
+		t.Fatalf("expected the medium poster when there is no large one, got %q, %v", cover, err)
+	}
+	if _, err := resolver.ResolveCoverURL(context.Background(), "https://comick.dev/comic/x"); err == nil {
+		t.Fatal("expected another site's URL to be refused")
 	}
 }

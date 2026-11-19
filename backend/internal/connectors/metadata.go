@@ -4,6 +4,7 @@ import (
 	"html"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -55,6 +56,26 @@ func (m *SeriesMetadata) Empty() bool {
 	return m.Type == "" && m.Status == "" && m.Year == 0 && len(m.Genres) == 0 && len(m.Tags) == 0 &&
 		m.Demographic == "" && m.ContentRating == "" && m.Description == "" && len(m.Authors) == 0 &&
 		len(m.Artists) == 0 && m.Rating == nil
+}
+
+// Clone copies the metadata, slices and rating included. A connector that keeps
+// a series record between resolves hands each result a copy, so a caller that
+// edits what it was given cannot reach into the cached record every later
+// resolve is answered from.
+func (m *SeriesMetadata) Clone() *SeriesMetadata {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	clone.Genres = slices.Clone(m.Genres)
+	clone.Tags = slices.Clone(m.Tags)
+	clone.Authors = slices.Clone(m.Authors)
+	clone.Artists = slices.Clone(m.Artists)
+	if m.Rating != nil {
+		rating := *m.Rating
+		clone.Rating = &rating
+	}
+	return &clone
 }
 
 // The series types every site's own wording is mapped onto.

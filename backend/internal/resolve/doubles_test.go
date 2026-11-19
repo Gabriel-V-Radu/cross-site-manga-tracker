@@ -66,6 +66,29 @@ func (m mirrorConnector) ResolveChapterURL(_ context.Context, rawURL string, cha
 	return rawURL + "/chapter-" + strconv.FormatFloat(chapter, 'f', -1, 64), nil
 }
 
+// coverOnlyConnector names a cover from its series record alone, the way the
+// API sites do (connectors.CoverURLResolver), and counts what it is asked: a
+// full resolve is what the cover resolver is supposed to spare it.
+type coverOnlyConnector struct {
+	mirrorConnector
+	coverErr      error
+	coverAsks     int
+	fullResolves  int
+	lastCoverAsk  string
+	recordedCover string
+}
+
+func (c *coverOnlyConnector) ResolveByURL(ctx context.Context, rawURL string) (*connectors.MangaResult, error) {
+	c.fullResolves++
+	return c.mirrorConnector.ResolveByURL(ctx, rawURL)
+}
+
+func (c *coverOnlyConnector) ResolveCoverURL(_ context.Context, rawURL string) (string, error) {
+	c.coverAsks++
+	c.lastCoverAsk = rawURL
+	return c.recordedCover, c.coverErr
+}
+
 // blockedLinkableConnector is a blocked source that can still construct its
 // reader URLs offline, the way a site whose reader URL needs nothing but the
 // series URL and the chapter number can. No live connector qualifies right now

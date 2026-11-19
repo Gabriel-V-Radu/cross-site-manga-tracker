@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -608,5 +609,79 @@ func TestFetchBytesSendsTheRequestBody(t *testing.T) {
 	}
 	if got := <-received; got != `{"query":"{ me }"}` {
 		t.Fatalf("server received %q", got)
+	}
+}
+
+// TestFetchBytesReturnsARefusedAnswersConnection pins what happens to the
+// connection behind an answer FetchBytes refuses. Its body used to be closed
+// unread, and net/http cannot reuse an HTTP/1.1 connection in that state: a
+// site answering 404 or 429 — the ones about to be asked again — cost a new
+// TCP and TLS handshake on every request. The body is read to its end first,
+// when the end is near; an error page longer than maxRefusedBodyDrain is
+// abandoned at the limit, since reading a stranger's megabytes to save a
+// handshake is the worse trade.
+func TestFetchBytesReturnsARefusedAnswersConnection(t *testing.T) {
+	countConnections := func(handler http.Handler) (*httptest.Server, *atomic.Int32) {
+		var opened atomic.Int32
+		server := httptest.NewUnstartedServer(handler)
+		server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				opened.Add(1)
+			}
+		}
+		server.Start()
+		t.Cleanup(server.Close)
+		return server, &opened
+	}
+
+	foreign, foreignOpened := countConnections(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, strings.Repeat("<p>Join our Discord</p>", 400))
+	}))
+	foreignURL := strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)
+
+	site, siteOpened := countConnections(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gone":
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, strings.Repeat("<p>Not found</p>", 600))
+		case "/endless":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, strings.Repeat("x", 4*maxRefusedBodyDrain))
+		case "/moved":
+			http.Redirect(w, r, foreignURL+"/invite", http.StatusFound)
+		}
+	}))
+
+	tests := []struct {
+		name            string
+		path            string
+		opened          *atomic.Int32
+		wantConnections int32
+	}{
+		{name: "an error status", path: "/gone", opened: siteOpened, wantConnections: 1},
+		// Followed by this plain client, so the body refused is the foreign
+		// page's and the connection at stake is the one to the foreign host.
+		{name: "a redirect off the site", path: "/moved", opened: foreignOpened, wantConnections: 1},
+		{name: "an error page longer than the drain", path: "/endless", opened: siteOpened, wantConnections: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// A transport of its own: the pool under test must hold nothing an
+			// earlier case left in it.
+			transport := &http.Transport{}
+			defer transport.CloseIdleConnections()
+			client := &http.Client{Transport: transport}
+			test.opened.Store(0)
+
+			for attempt := 0; attempt < 3; attempt++ {
+				body, _, err := FetchBytes(client, newRequest(t, http.MethodGet, site.URL+test.path), 0)
+				if err == nil || body != nil {
+					t.Fatalf("attempt %d: expected the answer refused, got %d bytes and %v", attempt, len(body), err)
+				}
+			}
+			if got := test.opened.Load(); got != test.wantConnections {
+				t.Fatalf("three requests opened %d connections, want %d", got, test.wantConnections)
+			}
+		})
 	}
 }

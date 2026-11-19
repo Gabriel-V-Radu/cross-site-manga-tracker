@@ -319,14 +319,57 @@ func (h *DashboardHandler) sourceKeyForURL(rawURL string) string {
 	return connector.Key()
 }
 
-// invalidateLinkLookups drops the chapter-URL cache and every negative cover
-// entry. Called whenever a tracker's linked sources or reading pin change: a
+// invalidateTrackerLookups drops what the two resolvers remember about one
+// tracker's links. Called whenever its linked sources or reading pin change: a
 // "no link found" computed before a source was attached would otherwise
 // outlive the attachment by its whole TTL, which reads as the new link not
 // working. Found covers stay — a new link cannot make a good cover worse.
-func (h *DashboardHandler) invalidateLinkLookups() {
-	h.chapterLinks.Invalidate()
-	h.covers.InvalidateNegatives()
+//
+// It names every link the tracker has now, read back after the write, and
+// every link in former — what the caller knows it had before, for an edit that
+// may have removed or replaced one. All of them rather than the primary alone:
+// under a reading pin the card's chapter lookups start from the pinned link,
+// and a pin can move to any of them.
+//
+// This used to empty the chapter-link cache and drop every "no cover" there
+// was, for one tracker's change: the next render of the list asked the sites
+// about every card in the library again. A read that fails here leaves the
+// tracker's entries to run out their TTL, which is minutes, and is logged.
+func (h *DashboardHandler) invalidateTrackerLookups(ctx context.Context, profileID int64, trackerID int64, former ...models.TrackerSource) {
+	links := append([]models.TrackerSource(nil), former...)
+
+	tracker, err := h.trackerRepo.GetByID(ctx, profileID, trackerID)
+	if err != nil {
+		slog.Warn("could not load a tracker to drop its cached lookups", "tracker", trackerID, "error", err)
+	} else if tracker != nil {
+		links = append(links, models.TrackerSource{
+			SourceID:     tracker.SourceID,
+			SourceItemID: tracker.SourceItemID,
+			SourceURL:    tracker.SourceURL,
+		})
+	}
+	current, err := h.trackerRepo.ListTrackerSources(ctx, profileID, trackerID)
+	if err != nil {
+		slog.Warn("could not load a tracker's links to drop its cached lookups", "tracker", trackerID, "error", err)
+	}
+	links = append(links, current...)
+	if len(links) == 0 {
+		return
+	}
+
+	sourceByID, err := h.listSourcesByID(ctx)
+	if err != nil {
+		slog.Warn("could not load the sources to drop a tracker's cached lookups", "tracker", trackerID, "error", err)
+		return
+	}
+	for _, link := range links {
+		sourceKey := strings.TrimSpace(sourceByID[link.SourceID].Key)
+		if sourceKey == "" {
+			continue
+		}
+		h.chapterLinks.InvalidateSource(sourceKey, link.SourceURL)
+		h.covers.InvalidateNegative(sourceKey, link.SourceURL, link.SourceItemID)
+	}
 }
 
 // assetVersions stamps a static asset's URL with its last-modified time. The

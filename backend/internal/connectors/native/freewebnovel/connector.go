@@ -137,12 +137,19 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 // Client.Timeout, and the 12s this used to be cut down any request queued more
 // than a dozen deep behind a burst — while the slot it had claimed stayed
 // claimed. Per-request deadlines are the callers' contexts.
+//
+// This client is this connector's own, so what the shared one refuses it has
+// to be told to refuse: a redirect that leaves the site is stopped at the hop
+// (connectors.RefuseOffSiteRedirect). FetchBytes refuses such an answer either
+// way, but only after the client had followed the hop — a stranger's page
+// requested with this client's Chrome headers and cookie jar, to be thrown
+// away.
 func newChromeHTTPClient(timeout time.Duration) *http.Client {
 	jar, _ := cookiejar.New(nil)
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     false,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           chromeDialer.DialContext,
 		DialTLSContext:        dialChromeTLS,
 		MaxIdleConns:          20,
 		IdleConnTimeout:       90 * time.Second,
@@ -152,11 +159,22 @@ func newChromeHTTPClient(timeout time.Duration) *http.Client {
 		// shared one carries or a hung freewebnovel never opens its circuit.
 		ResponseHeaderTimeout: connectors.ResponseHeaderTimeout,
 	}
-	return &http.Client{Timeout: timeout, Jar: jar, Transport: connectors.ThrottleTransport(transport)}
+	return &http.Client{
+		Timeout:       timeout,
+		Jar:           jar,
+		Transport:     connectors.ThrottleTransport(transport),
+		CheckRedirect: connectors.RefuseOffSiteRedirect,
+	}
 }
 
+// chromeDialer opens every connection of the client above, plain or TLS. The
+// TLS dial — the only one the site is reached through — used to build a dialer
+// of its own on each call, with the transport's connect timeout and without
+// its keep-alive period; one dialer, so the two cannot drift apart again.
+var chromeDialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+
 func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) {
-	rawConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+	rawConn, err := chromeDialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}

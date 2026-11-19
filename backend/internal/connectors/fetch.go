@@ -55,11 +55,13 @@ func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte,
 	if res.Request != nil && res.Request.URL != nil {
 		finalURL = res.Request.URL.String()
 		if from, to := req.URL.Hostname(), res.Request.URL.Hostname(); !SameSite(from, to) {
+			drainRefusedBody(res.Body)
 			return nil, finalURL, &OffSiteRedirectError{From: from, To: to}
 		}
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		drainRefusedBody(res.Body)
 		return nil, finalURL, &HTTPStatusError{StatusCode: res.StatusCode, URL: finalURL}
 	}
 
@@ -68,6 +70,24 @@ func FetchBytes(client *http.Client, req *http.Request, maxBytes int64) ([]byte,
 		return nil, finalURL, fmt.Errorf("read response body: %w", err)
 	}
 	return body, finalURL, nil
+}
+
+// maxRefusedBodyDrain is how much of a body nobody will read is read anyway
+// before the response is closed. An HTTP/1.1 connection closed with its body
+// unread cannot be reused: net/http drops it, and the next request to that
+// host opens a new one — a TCP and a TLS handshake, on a Pi, to a site that
+// had just answered 404 or 429 and is about to be asked again. The error
+// pages these sites send are a few KB to a few tens of KB, so this much
+// reaches the end of nearly all of them; a longer one is abandoned at the
+// limit and costs the connection, as every one did before.
+const maxRefusedBodyDrain = 64 << 10
+
+// drainRefusedBody reads what is left of a body that is being refused, up to
+// maxRefusedBodyDrain, so its connection goes back to the pool. Whether it
+// got to the end is the transport's to notice; an error here changes nothing
+// about the verdict the caller is about to return.
+func drainRefusedBody(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxRefusedBodyDrain))
 }
 
 // ReadBodyLimited reads body through an io.LimitReader bounded at maxBytes

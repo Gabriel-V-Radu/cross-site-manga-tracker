@@ -654,3 +654,39 @@ func TestAsuraComicChapterlessSeriesPageFailsResolveButNotSearch(t *testing.T) {
 		t.Fatalf("expected title New Series with no chapter, got %q / %v", results[0].Title, results[0].LatestChapter)
 	}
 }
+
+// TestSeriesAnchorTitlesReadsEachSeriesNameOnce pins the one-pass reading of a
+// browse page's series links. The name used to be looked up per series id,
+// each lookup matching every anchor on the page again; the rules it applied
+// are the ones kept here. A series is linked several times, and the first
+// link text that names it wins: a cover's "poster" or "image" alt does not,
+// and a link that runs on into the latest chapter keeps the name before it.
+func TestSeriesAnchorTitlesReadsEachSeriesNameOnce(t *testing.T) {
+	page := `
+<a href="/comics/nano-machine-7f873ca6"><img alt="poster"></a>
+<a href="/comics/Nano-Machine-7f873ca6"><span>Nano Machine</span></a>
+<a href="/comics/nano-machine-7f873ca6">Nano Machine (second link)</a>
+<a href='https://asurascans.com/comics/solo-max-level-newbie-1a2b3c4d'>Solo Max-Level Newbie Chapter 245</a>
+<a href="series/the-greatest-estate-developer-9f8e7d6c">Image</a>
+<a href="series/the-greatest-estate-developer-9f8e7d6c">The Greatest Estate Developer</a>
+<a href="/comics/cover-only-00000000"><img alt="Image"></a>
+<a href="/browse?page=2">Next</a>`
+
+	titles := seriesAnchorTitles(page)
+	want := map[string]string{
+		"nano-machine-7f873ca6":                  "Nano Machine",
+		"solo-max-level-newbie-1a2b3c4d":         "Solo Max-Level Newbie",
+		"the-greatest-estate-developer-9f8e7d6c": "The Greatest Estate Developer",
+	}
+	if len(titles) != len(want) {
+		t.Fatalf("read %d series names, want %d: %v", len(titles), len(want), titles)
+	}
+	for seriesID, name := range want {
+		if titles[seriesID] != name {
+			t.Errorf("series %q named %q, want %q", seriesID, titles[seriesID], name)
+		}
+	}
+	if len(seriesAnchorTitles("<html><body>No series here</body></html>")) != 0 {
+		t.Error("a page without series links named some")
+	}
+}

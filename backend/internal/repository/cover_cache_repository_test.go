@@ -113,7 +113,11 @@ func TestCoverCacheLocalEntriesSurviveTheSweep(t *testing.T) {
 	}
 }
 
-func TestCoverCacheUpsertReplacesAndDeleteNegatives(t *testing.T) {
+// TestCoverCacheUpsertReplacesAndDeleteNegative also pins what DeleteNegative
+// leaves alone: another key's "no cover" — it used to be every negative there
+// was, whichever tracker's links had changed — and a found cover under the key
+// it was given.
+func TestCoverCacheUpsertReplacesAndDeleteNegative(t *testing.T) {
 	repo := repository.NewCoverCacheRepository(openCoverCacheTestDB(t))
 
 	key := "comick|url:https://comick.dev/comic/x"
@@ -123,19 +127,33 @@ func TestCoverCacheUpsertReplacesAndDeleteNegatives(t *testing.T) {
 	if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: key, CoverURL: "https://cover", SourceKey: "comick", Found: true, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
-	if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: "neg", Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
-		t.Fatalf("negative upsert: %v", err)
+	for _, negative := range []string{"neg", "other-neg"} {
+		if err := repo.Upsert(context.Background(), repository.CoverCacheRow{CacheKey: negative, Found: false, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+			t.Fatalf("negative upsert %q: %v", negative, err)
+		}
 	}
 
-	if err := repo.DeleteNegatives(context.Background()); err != nil {
-		t.Fatalf("delete negatives: %v", err)
+	for _, target := range []string{"neg", key} {
+		if err := repo.DeleteNegative(context.Background(), target); err != nil {
+			t.Fatalf("delete negative %q: %v", target, err)
+		}
 	}
 	entries, err := repo.LoadFresh(context.Background())
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
-	if len(entries) != 1 || entries[0].CacheKey != key || !entries[0].Found || entries[0].CoverURL != "https://cover" {
-		t.Fatalf("expected only the upgraded positive entry, got %+v", entries)
+	kept := map[string]repository.CoverCacheRow{}
+	for _, entry := range entries {
+		kept[entry.CacheKey] = entry
+	}
+	if len(kept) != 2 || !kept[key].Found || kept[key].CoverURL != "https://cover" {
+		t.Fatalf("expected the found cover and the other key's negative to stay, got %+v", entries)
+	}
+	if other, ok := kept["other-neg"]; !ok || other.Found {
+		t.Fatalf("expected another key's negative left alone, got %+v", entries)
+	}
+	if err := repo.Delete(context.Background(), "other-neg"); err != nil {
+		t.Fatalf("delete other negative: %v", err)
 	}
 
 	if err := repo.Delete(context.Background(), key); err != nil {

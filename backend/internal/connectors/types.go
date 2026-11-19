@@ -48,6 +48,24 @@ type ChapterURLResolver interface {
 	ResolveChapterURL(ctx context.Context, rawURL string, chapter float64) (string, error)
 }
 
+// CoverURLResolver is implemented by connectors that can name a series' cover
+// without reading its chapters. On the API sites a resolve is two requests —
+// the series record, which carries the cover, and the chapter listing — and
+// the record is kept for a day (see RecordCache) while the listing never is,
+// so a cover asked for through ResolveByURL paid for a chapter listing it then
+// threw away: one request per card on a first page of covers, against the
+// hosts with the widest gaps between requests. Through this the cover comes
+// from the record alone, which is no request at all for a series the poller
+// resolved in the last day.
+//
+// An empty URL with no error means the site has the series and lists no cover
+// for it. A connector whose cover sits on the same page as its chapters has
+// nothing to save and does not implement this; the cover resolver falls back
+// to ResolveByURL for those.
+type CoverURLResolver interface {
+	ResolveCoverURL(ctx context.Context, rawURL string) (string, error)
+}
+
 // CooldownReporter is implemented by connectors that keep their own circuit
 // breaker (MangaFire classifies Cloudflare responses the shared per-host
 // throttle cannot see). CooldownRemaining returns how much longer the

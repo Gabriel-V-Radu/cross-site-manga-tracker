@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,23 @@ type Connector struct {
 	connectors.Site
 	baseURL    string
 	httpClient *http.Client
+	// records holds what each slug's manga page says about the series, for a
+	// day (see seriesRecord).
+	records *connectors.RecordCache[seriesRecord]
+}
+
+// seriesRecord is the half of a resolve that comes off the manga page and
+// describes the series rather than its chapters: title, alternate titles,
+// cover, metadata. A resolve used to read that page every time and then the
+// all-chapters page, the only one the latest chapter is read from — two
+// requests per poll, one of them for facts that change over weeks. Kept for
+// connectors.SeriesRecordTTL, as the API connectors keep theirs, a poll is the
+// all-chapters request alone.
+type seriesRecord struct {
+	title         string
+	relatedTitles []string
+	coverImageURL string
+	metadata      *connectors.SeriesMetadata
 }
 
 type searchEntry struct {
@@ -87,6 +105,7 @@ func NewConnector() *Connector {
 		Site:       site,
 		baseURL:    canonicalBaseURL,
 		httpClient: connectors.NewThrottledClient(),
+		records:    connectors.NewRecordCache[seriesRecord](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -106,6 +125,7 @@ func NewConnectorWithOptions(baseURL string, allowedHost []string, client *http.
 		Site:       identity,
 		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		httpClient: client,
+		records:    connectors.NewRecordCache[seriesRecord](connectors.SeriesRecordTTL),
 	}
 }
 
@@ -221,24 +241,75 @@ func (c *Connector) parseMangaURL(rawURL string) (string, error) {
 	return slug, nil
 }
 
-func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
+// ResolveCoverURL implements connectors.CoverURLResolver: the cover is on the
+// manga page, so it costs no all-chapters request — and no request at all
+// while the page's record is cached.
+func (c *Connector) ResolveCoverURL(ctx context.Context, rawURL string) (string, error) {
+	slug, err := c.parseMangaURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if record, ok := c.records.Get(slug); ok {
+		return record.coverImageURL, nil
+	}
+	record, _, err := c.fetchSeriesRecord(ctx, slug)
+	if err != nil {
+		return "", err
+	}
+	return record.coverImageURL, nil
+}
+
+// fetchSeriesRecord reads the manga page, caches the series record it carries
+// and hands back the page as well: the chapter links on it are resolveBySlug's
+// fallback.
+func (c *Connector) fetchSeriesRecord(ctx context.Context, slug string) (seriesRecord, string, error) {
 	body, err := c.fetchPage(ctx, c.baseURL+"/manga/"+url.PathEscape(slug)+"/")
 	if err != nil {
-		return nil, fmt.Errorf("fetch manga page: %w", err)
+		return seriesRecord{}, "", fmt.Errorf("fetch manga page: %w", err)
 	}
 
 	title := extractTitle(body, slug)
-	relatedTitles := extractRelatedTitles(body, title)
-
 	coverImageURL := strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(ogImagePattern, body)))
 	if coverImageURL == "" {
 		coverImageURL = strings.TrimSpace(html.UnescapeString(connectors.FirstSubmatch(coverDataSrcPattern, body)))
 	}
-	coverImageURL = c.AbsoluteURL(coverImageURL)
+	record := seriesRecord{
+		title:         title,
+		relatedTitles: extractRelatedTitles(body, title),
+		coverImageURL: c.AbsoluteURL(coverImageURL),
+		metadata:      extractMetadata(body),
+	}
+	c.records.Put(slug, record)
+	return record, body, nil
+}
+
+func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors.MangaResult, error) {
+	// mangaPage stays empty while the record comes from the cache: the page
+	// was not read this time.
+	record, cached := c.records.Get(slug)
+	mangaPage := ""
+	if !cached {
+		var err error
+		if record, mangaPage, err = c.fetchSeriesRecord(ctx, slug); err != nil {
+			return nil, err
+		}
+	}
 
 	latestChapter, lastUpdatedAt, chapterErr := c.fetchLatestChapterFromAllChapters(ctx, slug)
+	if chapterErr != nil && cached {
+		// The all-chapters page failed and the manga page — whose chapter links
+		// are the fallback — is not in hand, so it is read now: the two
+		// requests a resolve always made, only in the other order and only
+		// when the first one failed. If the page cannot be read either, the
+		// listing's own error is the verdict, and the cached record stays for
+		// the next attempt.
+		var pageErr error
+		if record, mangaPage, pageErr = c.fetchSeriesRecord(ctx, slug); pageErr != nil {
+			return nil, fmt.Errorf("fetch all chapters: %w", chapterErr)
+		}
+	}
 	if chapterErr != nil || latestChapter == nil {
-		fallbackEntries := parseChapterEntries(body, time.Now().UTC())
+		fallbackEntries := parseChapterEntries(mangaPage, time.Now().UTC())
 		fallbackLatest, fallbackUpdated := selectLatestChapter(fallbackEntries)
 		if latestChapter == nil {
 			latestChapter = fallbackLatest
@@ -259,13 +330,14 @@ func (c *Connector) resolveBySlug(ctx context.Context, slug string) (*connectors
 	return &connectors.MangaResult{
 		SourceKey:     c.Key(),
 		SourceItemID:  slug,
-		Title:         title,
-		RelatedTitles: relatedTitles,
+		Title:         record.title,
+		RelatedTitles: slices.Clone(record.relatedTitles),
 		URL:           c.mangaURL(slug),
-		CoverImageURL: coverImageURL,
+		CoverImageURL: record.coverImageURL,
 		LatestChapter: latestChapter,
 		LastUpdatedAt: lastUpdatedAt,
-		Metadata:      extractMetadata(body),
+		// A copy each time: the record is shared by every later resolve.
+		Metadata: record.metadata.Clone(),
 	}, nil
 }
 
@@ -576,64 +648,72 @@ func parseRelativeTime(raw string, now time.Time) *time.Time {
 	return &result
 }
 
+// mgekoDatetimeReplacer rewrites the site's date spelling ("Jan. 4, 2026, 8:00
+// p.m.", with a no-break space here and there) into what time.Parse reads, and
+// mgekoDatetimeLayouts are the shapes that comes out in. Both are built once:
+// parseMgekoDatetime runs for every chapter of an all-chapters page, which is
+// hundreds of calls per resolve on a long series, and each one used to build
+// this replacer — a lookup table over its thirty-odd pairs — and the layout
+// slice again before parsing one date.
+var mgekoDatetimeReplacer = strings.NewReplacer(
+	" ", " ",
+	"a.m.", "AM",
+	"p.m.", "PM",
+	"a.m", "AM",
+	"p.m", "PM",
+	"A.M.", "AM",
+	"P.M.", "PM",
+	"A.M", "AM",
+	"P.M", "PM",
+	"Sept.", "Sep",
+	"sept.", "Sep",
+	"Jan.", "Jan",
+	"jan.", "Jan",
+	"Feb.", "Feb",
+	"feb.", "Feb",
+	"Mar.", "Mar",
+	"mar.", "Mar",
+	"Apr.", "Apr",
+	"apr.", "Apr",
+	"Jun.", "Jun",
+	"jun.", "Jun",
+	"Jul.", "Jul",
+	"jul.", "Jul",
+	"Aug.", "Aug",
+	"aug.", "Aug",
+	"Sep.", "Sep",
+	"sep.", "Sep",
+	"Oct.", "Oct",
+	"oct.", "Oct",
+	"Nov.", "Nov",
+	"nov.", "Nov",
+	"Dec.", "Dec",
+	"dec.", "Dec",
+)
+
+var mgekoDatetimeLayouts = []string{
+	"Jan 2, 2006, 3:04 PM",
+	"Jan 2, 2006, 3 PM",
+	"January 2, 2006, 3:04 PM",
+	"January 2, 2006, 3 PM",
+	"Jan 2, 2006 3:04 PM",
+	"Jan 2, 2006 3 PM",
+	"January 2, 2006 3:04 PM",
+	"January 2, 2006 3 PM",
+	"Jan 2, 2006",
+	"January 2, 2006",
+}
+
 func parseMgekoDatetime(raw string) *time.Time {
 	normalized := strings.TrimSpace(raw)
 	if normalized == "" {
 		return nil
 	}
 
-	replacer := strings.NewReplacer(
-		" ", " ",
-		"a.m.", "AM",
-		"p.m.", "PM",
-		"a.m", "AM",
-		"p.m", "PM",
-		"A.M.", "AM",
-		"P.M.", "PM",
-		"A.M", "AM",
-		"P.M", "PM",
-		"Sept.", "Sep",
-		"sept.", "Sep",
-		"Jan.", "Jan",
-		"jan.", "Jan",
-		"Feb.", "Feb",
-		"feb.", "Feb",
-		"Mar.", "Mar",
-		"mar.", "Mar",
-		"Apr.", "Apr",
-		"apr.", "Apr",
-		"Jun.", "Jun",
-		"jun.", "Jun",
-		"Jul.", "Jul",
-		"jul.", "Jul",
-		"Aug.", "Aug",
-		"aug.", "Aug",
-		"Sep.", "Sep",
-		"sep.", "Sep",
-		"Oct.", "Oct",
-		"oct.", "Oct",
-		"Nov.", "Nov",
-		"nov.", "Nov",
-		"Dec.", "Dec",
-		"dec.", "Dec",
-	)
-	normalized = replacer.Replace(normalized)
+	normalized = mgekoDatetimeReplacer.Replace(normalized)
 	normalized = strings.Join(strings.Fields(normalized), " ")
 
-	layouts := []string{
-		"Jan 2, 2006, 3:04 PM",
-		"Jan 2, 2006, 3 PM",
-		"January 2, 2006, 3:04 PM",
-		"January 2, 2006, 3 PM",
-		"Jan 2, 2006 3:04 PM",
-		"Jan 2, 2006 3 PM",
-		"January 2, 2006 3:04 PM",
-		"January 2, 2006 3 PM",
-		"Jan 2, 2006",
-		"January 2, 2006",
-	}
-
-	for _, layout := range layouts {
+	for _, layout := range mgekoDatetimeLayouts {
 		parsed, err := time.Parse(layout, normalized)
 		if err != nil {
 			continue

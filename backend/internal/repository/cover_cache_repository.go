@@ -111,11 +111,14 @@ func (r *CoverCacheRepository) RenameLocalPath(ctx context.Context, oldName stri
 	return moved, nil
 }
 
-// DeleteNegatives drops every "no cover found" entry, mirroring the in-memory
-// invalidation that runs when a tracker's linked sources change.
-func (r *CoverCacheRepository) DeleteNegatives(ctx context.Context) error {
-	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE found = 0`); err != nil {
-		return fmt.Errorf("delete negative cover entries: %w", err)
+// DeleteNegative drops one entry while it still says "no cover found",
+// mirroring the in-memory invalidation that runs when a tracker's linked
+// sources change. The condition is in the statement because the caller decided
+// on what its memory held: a cover a fetch has stored under the key since is
+// left where it is.
+func (r *CoverCacheRepository) DeleteNegative(ctx context.Context, cacheKey string) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE cache_key = ? AND found = 0`, cacheKey); err != nil {
+		return fmt.Errorf("delete negative cover entry: %w", err)
 	}
 	return nil
 }

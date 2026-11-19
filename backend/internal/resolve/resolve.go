@@ -50,16 +50,25 @@ type cacheEntry interface {
 type resultCache[V cacheEntry] struct {
 	mu      sync.RWMutex
 	entries map[string]V
-	// generation counts invalidations. A background fetch reads it when it is
-	// queued and writes through putIfGeneration, which refuses once an
-	// invalidation has run since: the fetch was working from the links as they
-	// were before it, and landing its answer afterwards restored exactly what
+	// invalidations counts, per scope, how often that scope was invalidated.
+	// A scope is whatever a resolver invalidates together — one tracker's
+	// links, one cover — named by a string the resolver derives from the
+	// question. A background fetch reads its scope's count when it is queued
+	// and writes through putIfGeneration, which refuses once the scope has
+	// been invalidated since: the fetch was working from the links as they
+	// were before, and landing its answer afterwards restored exactly what
 	// the invalidation had just dropped, for that answer's whole TTL.
-	generation uint64
+	//
+	// The count used to be one for the whole cache, because invalidating was:
+	// a tracker edited dropped every tracker's answers and voided every fetch
+	// in flight, and the next render of the list asked every site about every
+	// card again. An entry here is added per scope ever invalidated, which is
+	// one per link a reader has edited since the process started.
+	invalidations map[string]uint64
 }
 
 func newResultCache[V cacheEntry]() *resultCache[V] {
-	return &resultCache[V]{entries: make(map[string]V)}
+	return &resultCache[V]{entries: make(map[string]V), invalidations: make(map[string]uint64)}
 }
 
 func (c *resultCache[V]) get(key string) (V, bool) {
@@ -75,25 +84,44 @@ func (c *resultCache[V]) put(key string, entry V) {
 	c.mu.Unlock()
 }
 
-// currentGeneration is what a fetch captures when it is queued, to hand back to
-// putIfGeneration with its answer.
-func (c *resultCache[V]) currentGeneration() uint64 {
+// currentGeneration is what a fetch captures for its scope when it is queued,
+// to hand back to putIfGeneration with its answer.
+func (c *resultCache[V]) currentGeneration(scope string) uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.generation
+	return c.invalidations[scope]
 }
 
-// putIfGeneration stores entry only while no invalidation has run since
-// generation was read, and reports whether it did. The check holds the same
-// write lock the invalidations take, so none can land between it and the write.
-func (c *resultCache[V]) putIfGeneration(generation uint64, key string, entry V) bool {
+// putIfGeneration stores entry only while scope has not been invalidated
+// since generation was read, and reports whether it did. The check holds the
+// same write lock the invalidations take, so none can land between it and the
+// write.
+func (c *resultCache[V]) putIfGeneration(generation uint64, scope string, key string, entry V) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.generation != generation {
+	if c.invalidations[scope] != generation {
 		return false
 	}
 	c.entries[key] = entry
 	return true
+}
+
+// invalidateScope drops the entries match picks out and counts an
+// invalidation of scope, so a fetch queued for that scope before now no longer
+// writes its answer. It reports how many entries it dropped. Entries and
+// fetches of every other scope are left as they are.
+func (c *resultCache[V]) invalidateScope(scope string, match func(key string, entry V) bool) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dropped := 0
+	for key, entry := range c.entries {
+		if match(key, entry) {
+			delete(c.entries, key)
+			dropped++
+		}
+	}
+	c.invalidations[scope]++
+	return dropped
 }
 
 // dropIf removes key only while match still holds for the entry under the
@@ -113,43 +141,17 @@ func (c *resultCache[V]) dropIf(key string, match func(V) bool) bool {
 	return true
 }
 
-// reset drops every entry, and counts as an invalidation.
-func (c *resultCache[V]) reset() {
+// sweepExpired only removes entries that already read as misses, so it cannot
+// change what a cached lookup answers. It is not an invalidation: an entry
+// running out its TTL says nothing about a fetch in flight.
+func (c *resultCache[V]) sweepExpired(now time.Time) {
 	c.mu.Lock()
-	c.entries = make(map[string]V)
-	c.generation++
-	c.mu.Unlock()
-}
-
-func (c *resultCache[V]) dropWhere(match func(V) bool) {
-	c.mu.Lock()
-	c.dropMatchingLocked(match)
-	c.mu.Unlock()
-}
-
-// invalidateWhere is dropWhere counted as an invalidation, for a caller whose
-// drop means "what was worked out before now is suspect". The expiry sweep
-// keeps the plain dropWhere: an entry running out its TTL says nothing about a
-// fetch in flight, and counting it would void every one of them each sweep.
-func (c *resultCache[V]) invalidateWhere(match func(V) bool) {
-	c.mu.Lock()
-	c.dropMatchingLocked(match)
-	c.generation++
-	c.mu.Unlock()
-}
-
-func (c *resultCache[V]) dropMatchingLocked(match func(V) bool) {
+	defer c.mu.Unlock()
 	for key, entry := range c.entries {
-		if match(entry) {
+		if entry.expired(now) {
 			delete(c.entries, key)
 		}
 	}
-}
-
-// sweepExpired only removes entries that already read as misses, so it cannot
-// change what a cached lookup answers.
-func (c *resultCache[V]) sweepExpired(now time.Time) {
-	c.dropWhere(func(entry V) bool { return entry.expired(now) })
 }
 
 // PageGate names the trackers page the reader is currently looking at, so a

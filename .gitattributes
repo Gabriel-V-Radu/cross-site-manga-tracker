@@ -1,0 +1,5 @@
+# The lowered MangaFire signer is generated and embedded into the server byte
+# for byte; a test compares it with a fresh lowering of signer_bundle.js. With
+# core.autocrlf on, a Windows checkout would rewrite its line endings and the
+# comparison (and the embedded bytes) would differ from Linux and CI.
+backend/internal/connectors/native/mangafire/signer_bundle.lowered.js -text

@@ -184,6 +184,21 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}, nil
 }
 
+// ResolveCoverURL implements connectors.CoverURLResolver: the cover file name
+// is a relationship of the manga record, so the cover costs no feed request —
+// and no request at all while the record is cached.
+func (c *Connector) ResolveCoverURL(ctx context.Context, rawURL string) (string, error) {
+	titleID, err := c.parseTitleURL(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", err
+	}
+	payload, err := c.mangaRecord(ctx, titleID)
+	if err != nil {
+		return "", fmt.Errorf("fetch mangadex manga: %w", err)
+	}
+	return pickCoverImageURL(payload.Data.ID, payload.Data.Relationships), nil
+}
+
 // mangaRecord returns the title's manga record, from the day-long cache when it
 // holds one. A record that cannot be fetched is not cached, so a failure is
 // asked again on the next resolve.

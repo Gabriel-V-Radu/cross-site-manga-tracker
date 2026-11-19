@@ -63,22 +63,31 @@ func TestCoverCacheSurvivesRestart(t *testing.T) {
 }
 
 // TestNegativeCoverInvalidationClearsStore mirrors the in-memory behavior:
-// once a tracker's links change, remembered "no cover found" entries must not
-// survive anywhere, or a fresh link would look broken for a whole TTL.
+// once a tracker's links change, its remembered "no cover found" must not
+// survive anywhere, or a fresh link would look broken for a whole TTL — and
+// nobody else's entry is to go with it. The store used to lose every negative
+// it held on each such change, so a restart after one edit asked the sites
+// again about every card without art.
 func TestNegativeCoverInvalidationClearsStore(t *testing.T) {
 	db := openCoverPersistenceTestDB(t)
 
 	first := newPersistentCoverResolver(t, db)
 	negativeKey := coverCacheKey("mangafire", "https://mangafire.to/title/x", nil)
 	first.cacheResult(negativeKey, "", false, time.Hour)
+	otherNegativeKey := coverCacheKey("mangafire", "https://mangafire.to/title/other", nil)
+	first.cacheResult(otherNegativeKey, "", false, time.Hour)
 	positiveKey := coverCacheKey("comick", "https://comick.dev/comic/y", nil)
 	first.cacheResultFromSource(positiveKey, "https://cover", "comick", true, time.Hour)
 
-	first.InvalidateNegatives()
+	first.InvalidateNegative("mangafire", "https://mangafire.to/title/x", nil)
+	first.InvalidateNegative("comick", "https://comick.dev/comic/y", nil)
 
 	second := newPersistentCoverResolver(t, db)
 	if _, _, _, ok := second.cachedWithSource(negativeKey); ok {
 		t.Fatalf("negative entry must not survive invalidation")
+	}
+	if _, _, found, ok := second.cachedWithSource(otherNegativeKey); !ok || found {
+		t.Fatalf("another tracker's negative entry must survive the invalidation (ok=%v found=%v)", ok, found)
 	}
 	if _, _, found, ok := second.cachedWithSource(positiveKey); !ok || !found {
 		t.Fatalf("positive entry must survive invalidation")

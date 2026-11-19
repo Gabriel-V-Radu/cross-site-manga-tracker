@@ -244,6 +244,22 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	return &result, nil
 }
 
+// ResolveCoverURL implements connectors.CoverURLResolver: the poster is on the
+// title's detail record, so the cover costs no chapters request — and no
+// request at all while the record is cached, which also spares the signer the
+// token each one needs.
+func (c *Connector) ResolveCoverURL(ctx context.Context, rawURL string) (string, error) {
+	hid, _, err := c.parseTitleURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	detail, _, err := c.titleDetail(ctx, hid)
+	if err != nil {
+		return "", fmt.Errorf("fetch manga detail: %w", err)
+	}
+	return posterURL(detail.apiTitle), nil
+}
+
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
 	query, err := connectors.PrepareSearch(title, limit)
 	if err != nil {
@@ -498,14 +514,6 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		title = connectors.PrettifySlug(item.Slug)
 	}
 
-	coverImageURL := ""
-	if item.Poster != nil {
-		coverImageURL = strings.TrimSpace(item.Poster.Large)
-		if coverImageURL == "" {
-			coverImageURL = strings.TrimSpace(item.Poster.Medium)
-		}
-	}
-
 	// LatestChapter and LastUpdatedAt are deliberately left unset: the payload
 	// only offers cross-language values (see chapterLanguage). ResolveByURL
 	// fills them from the English listing; search results carry no chapter
@@ -516,8 +524,20 @@ func (c *Connector) resultFromAPITitle(item apiTitle) connectors.MangaResult {
 		Title:         title,
 		RelatedTitles: buildRelatedTitles(title, item.Slug, item.AltTitles),
 		URL:           c.HomeURL() + "/title/" + key,
-		CoverImageURL: coverImageURL,
+		CoverImageURL: posterURL(item),
 	}
+}
+
+// posterURL picks a title's cover: the large poster, or the medium one when
+// the payload lists no large.
+func posterURL(item apiTitle) string {
+	if item.Poster == nil {
+		return ""
+	}
+	if large := strings.TrimSpace(item.Poster.Large); large != "" {
+		return large
+	}
+	return strings.TrimSpace(item.Poster.Medium)
 }
 
 // pickChapterEntry finds a chapter by number. fetchChapters has already narrowed

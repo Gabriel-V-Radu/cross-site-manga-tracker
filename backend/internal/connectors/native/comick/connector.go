@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -87,8 +86,7 @@ type comicRecord struct {
 	// A record seeded from search results stays without it — the search row is
 	// slimmer — and a resolve served from such a record reports no metadata
 	// rather than spending the request the seeding exists to save.
-	metadata  *connectors.SeriesMetadata
-	fetchedAt time.Time
+	metadata *connectors.SeriesMetadata
 }
 
 // Connector reads ComicK through its JSON API. The embedded Site supplies Key,
@@ -101,8 +99,11 @@ type Connector struct {
 	httpClient *http.Client
 	breaker    *connectors.EscalatingBreaker
 
-	mu     sync.Mutex
-	comics map[string]comicRecord
+	// comics holds each slug's comic record for comicCacheTTL. A RecordCache
+	// rather than the plain map this was: the map had no bound, and a link
+	// scan searching every title of a library put a record in it for every
+	// row of every answer.
+	comics *connectors.RecordCache[comicRecord]
 }
 
 func NewConnector() *Connector {
@@ -111,7 +112,7 @@ func NewConnector() *Connector {
 		apiURL:     canonicalAPIURL,
 		httpClient: connectors.NewThrottledClient(),
 		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
-		comics:     map[string]comicRecord{},
+		comics:     connectors.NewRecordCache[comicRecord](comicCacheTTL),
 	}
 }
 
@@ -136,7 +137,7 @@ func NewConnectorWithOptions(siteURL string, apiURL string, allowedHost []string
 		apiURL:     strings.TrimRight(strings.TrimSpace(apiURL), "/"),
 		httpClient: client,
 		breaker:    connectors.NewEscalatingBreaker(cooldownRelapseWindow, maxCooldown),
-		comics:     map[string]comicRecord{},
+		comics:     connectors.NewRecordCache[comicRecord](comicCacheTTL),
 	}
 }
 
@@ -205,7 +206,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	if connectors.IsNotFound(err) {
 		// A stale cached hid (the comic moved or was merged) answers 404 here;
 		// refetching the record self-heals it.
-		c.forgetComic(slug)
+		c.comics.Forget(slug)
 		if record, err = c.comicRecordFor(ctx, slug); err != nil {
 			return nil, err
 		}
@@ -216,7 +217,7 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	}
 
 	result := c.resultFromRecord(slug, record)
-	result.Metadata = cloneMetadata(record.metadata)
+	result.Metadata = record.metadata.Clone()
 	if latest != nil {
 		result.LatestChapter = latest
 		result.LastUpdatedAt = publishedAt
@@ -225,14 +226,26 @@ func (c *Connector) ResolveByURL(ctx context.Context, rawURL string) (*connector
 	return &result, nil
 }
 
+// ResolveCoverURL implements connectors.CoverURLResolver: the cover key is on
+// the comic record, so the cover costs no chapters request — and no request at
+// all while the record is cached, a search row's seed included.
+func (c *Connector) ResolveCoverURL(ctx context.Context, rawURL string) (string, error) {
+	slug, err := c.parseSeriesURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	record, err := c.comicRecordFor(ctx, slug)
+	if err != nil {
+		return "", err
+	}
+	return record.coverURL, nil
+}
+
 // comicRecordFor returns the slug's comic record, fetching and caching it when
 // missing or expired. The cache is what keeps a steady-state resolve at one
 // API request instead of two.
 func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecord, error) {
-	c.mu.Lock()
-	record, ok := c.comics[slug]
-	c.mu.Unlock()
-	if ok && time.Since(record.fetchedAt) < comicCacheTTL {
+	if record, ok := c.comics.Get(slug); ok {
 		return record, nil
 	}
 
@@ -248,16 +261,10 @@ func (c *Connector) comicRecordFor(ctx context.Context, slug string) (comicRecor
 		return comicRecord{}, fmt.Errorf("comick comic %q not found: %w", slug, &connectors.HTTPStatusError{StatusCode: http.StatusNotFound, URL: endpoint})
 	}
 
-	record = recordFromComic(comic)
+	record := recordFromComic(comic)
 	record.metadata = comicResponse.metadata()
-	c.storeComic(slug, record)
+	c.comics.Put(slug, record)
 	return record, nil
-}
-
-func (c *Connector) storeComic(slug string, record comicRecord) {
-	c.mu.Lock()
-	c.comics[slug] = record
-	c.mu.Unlock()
 }
 
 // seedComic caches a record built from a search row, unless the cache already
@@ -267,18 +274,9 @@ func (c *Connector) storeComic(slug string, record comicRecord) {
 // cover slugs that were just resolved (the link scan searches by tracker
 // title).
 func (c *Connector) seedComic(slug string, record comicRecord) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if existing, ok := c.comics[slug]; ok && existing.metadata != nil && existing.hid == record.hid && time.Since(existing.fetchedAt) < comicCacheTTL {
-		return
-	}
-	c.comics[slug] = record
-}
-
-func (c *Connector) forgetComic(slug string) {
-	c.mu.Lock()
-	delete(c.comics, slug)
-	c.mu.Unlock()
+	c.comics.PutUnless(slug, record, func(existing comicRecord) bool {
+		return existing.metadata != nil && existing.hid == record.hid
+	})
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {
@@ -302,15 +300,18 @@ func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) 
 		if slug == "" || strings.TrimSpace(comic.HID) == "" {
 			continue
 		}
+		record := recordFromComic(comic)
+		if !query.Matches(append([]string{record.title, slug}, record.relatedTitles...)...) {
+			continue
+		}
 		// The search payload carries the comic record's identity (hid, title,
 		// cover), so it seeds the cache: a resolve right after a search costs
 		// one request. It does not carry the metadata in the form the comic
 		// endpoint does, so a resolve served from a seeded record reports none.
-		record := recordFromComic(comic)
+		// Only for a row the search returns: nothing resolves a row the caller
+		// never saw, and the API pads its answers with loosely related comics
+		// that used to be cached all the same.
 		c.seedComic(slug, record)
-		if !query.Matches(append([]string{record.title, slug}, record.relatedTitles...)...) {
-			continue
-		}
 		// The search payload's chapter count spans every language, so latest
 		// chapter is left unset; ResolveByURL fills in the English number.
 		mapped = append(mapped, c.resultFromRecord(slug, record))
@@ -402,7 +403,6 @@ func recordFromComic(comic apiComic) comicRecord {
 		hid:           strings.TrimSpace(comic.HID),
 		title:         title,
 		relatedTitles: searchutil.RelatedTitles(title, related),
-		fetchedAt:     time.Now(),
 	}
 	for _, cover := range comic.MDCovers {
 		if key := strings.TrimSpace(cover.B2Key); key != "" {

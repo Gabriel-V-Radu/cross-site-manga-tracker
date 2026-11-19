@@ -30,8 +30,8 @@ func (fakeCoverResolver) FetchImage(context.Context, string) ([]byte, string, bo
 	return nil, "", false
 }
 
-func (fakeCoverResolver) InvalidateNegatives() {}
-func (fakeCoverResolver) Close()               {}
+func (fakeCoverResolver) InvalidateNegative(string, string, *string) {}
+func (fakeCoverResolver) Close()                                     {}
 
 type fakeChapterAnswer struct {
 	url      string
@@ -53,8 +53,8 @@ func (f fakeChapterLinkResolver) Lookup(_ string, sourceURL string, chapter floa
 	return answer.url, answer.resolved, f.waiting
 }
 
-func (fakeChapterLinkResolver) Invalidate() {}
-func (fakeChapterLinkResolver) Close()      {}
+func (fakeChapterLinkResolver) InvalidateSource(string, string) {}
+func (fakeChapterLinkResolver) Close()                          {}
 
 // newCardTestHandler names the three collaborators the card builder actually
 // reads: the registry that attributes a resolved link to a site, and the two

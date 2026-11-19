@@ -138,6 +138,99 @@ func TestSearchByTitleDropsUnrelatedResults(t *testing.T) {
 	if results[0].SourceItemID != "10ZRNmsG" || results[1].SourceItemID != "altOnly" {
 		t.Fatalf("unexpected results %v", results)
 	}
+
+	// Only what the search returned is remembered. Every row of the answer
+	// used to seed the record cache before the filter ran, so a link scan
+	// searching a library's titles filled it with the API's padding — comics
+	// nobody was shown and nothing would ever resolve.
+	for _, returned := range []string{"kagura-bachi", "sword-saga"} {
+		if _, ok := connector.comics.Get(returned); !ok {
+			t.Fatalf("expected the returned row %q seeded for the resolve that follows a search", returned)
+		}
+	}
+	if record, ok := connector.comics.Get("one-piece"); ok {
+		t.Fatalf("a row the search dropped was cached: %+v", record)
+	}
+}
+
+// TestResolveCoverURLCostsNoChaptersRequest pins what the cover resolver gets
+// from connectors.CoverURLResolver: the cover is on the comic record, so asking
+// for it reads no chapter listing, and nothing at all once the record is
+// cached. Through ResolveByURL each cover cost a chapters request whose answer
+// was thrown away, on the host with the widest gap between requests.
+func TestResolveCoverURLCostsNoChaptersRequest(t *testing.T) {
+	comicHits, chapterHits := 0, 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/comic/kagura-bachi", func(w http.ResponseWriter, _ *http.Request) {
+		comicHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"comic":{"hid":"10ZRNmsG","slug":"kagura-bachi","title":"Kagurabachi","md_covers":[{"b2key":"KrNwor.jpg"}]}}`))
+	})
+	mux.HandleFunc("/comic/bare", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"comic":{"hid":"bareHID","slug":"bare","title":"Bare"}}`))
+	})
+	mux.HandleFunc("/comic/10ZRNmsG/chapters", func(w http.ResponseWriter, _ *http.Request) {
+		chapterHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"chapters":[{"hid":"3wxB57iv","chap":"128","lang":"en"}]}`))
+	})
+	connector := newTestConnector(t, mux)
+	var resolver connectors.CoverURLResolver = connector
+
+	for attempt := 0; attempt < 2; attempt++ {
+		cover, err := resolver.ResolveCoverURL(context.Background(), "https://comick.dev/comic/kagura-bachi")
+		if err != nil {
+			t.Fatalf("resolve cover: %v", err)
+		}
+		if cover != "https://meo.comick.pictures/KrNwor.jpg" {
+			t.Fatalf("unexpected cover %q", cover)
+		}
+	}
+	if comicHits != 1 || chapterHits != 0 {
+		t.Fatalf("expected one comic request and no chapters request, got %d and %d", comicHits, chapterHits)
+	}
+
+	// The record the cover was read from serves the resolve that follows.
+	if _, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if comicHits != 1 || chapterHits != 1 {
+		t.Fatalf("expected the resolve to reuse the record, got %d comic and %d chapters requests", comicHits, chapterHits)
+	}
+
+	// A comic that lists no cover is an answer, not a failure.
+	if cover, err := resolver.ResolveCoverURL(context.Background(), "https://comick.dev/comic/bare"); err != nil || cover != "" {
+		t.Fatalf("expected no cover and no error, got %q, %v", cover, err)
+	}
+	if _, err := resolver.ResolveCoverURL(context.Background(), "https://mangadex.org/title/x"); err == nil {
+		t.Fatal("expected another site's URL to be refused")
+	}
+}
+
+// TestSearchSeedDoesNotReplaceAFullRecord pins the rule the seed keeps now
+// that the cache is a connectors.RecordCache: a search row is the slimmer
+// record, and writing it over the comic endpoint's would cost every resolve
+// the metadata until the record lapsed.
+func TestSearchSeedDoesNotReplaceAFullRecord(t *testing.T) {
+	connector := newTestConnector(t, kagurabachiHandler(t))
+
+	if _, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi"); err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if _, err := connector.SearchByTitle(context.Background(), "kagurabachi", 5); err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	record, ok := connector.comics.Get("kagura-bachi")
+	if !ok || record.metadata == nil {
+		t.Fatalf("the search row replaced the full record (held=%v, metadata=%v)", ok, record.metadata)
+	}
+
+	// A row naming another comic under the slug is newer knowledge and wins.
+	connector.seedComic("kagura-bachi", comicRecord{hid: "movedHID", title: "Kagurabachi"})
+	if record, _ := connector.comics.Get("kagura-bachi"); record.hid != "movedHID" {
+		t.Fatalf("a row with another hid did not replace the record: %+v", record)
+	}
 }
 
 // TestCooldownIsReportedAsCoolingDown: while the breaker is open the connector
@@ -261,7 +354,7 @@ func TestResolveByURLHealsStaleCachedHid(t *testing.T) {
 		_, _ = w.Write([]byte(`{"chapters":[{"hid":"x","chap":"128","lang":"en"}]}`))
 	})
 	connector := newTestConnector(t, mux)
-	connector.storeComic("kagura-bachi", comicRecord{hid: "staleHID", title: "Kagurabachi", fetchedAt: time.Now()})
+	connector.comics.Put("kagura-bachi", comicRecord{hid: "staleHID", title: "Kagurabachi"})
 
 	result, err := connector.ResolveByURL(context.Background(), "https://comick.dev/comic/kagura-bachi")
 	if err != nil {

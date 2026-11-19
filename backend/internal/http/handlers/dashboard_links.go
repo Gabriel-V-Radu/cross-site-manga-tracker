@@ -650,7 +650,7 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	if accepted == nil {
 		return h.fail(c, fiber.StatusNotFound, staleSuggestionMessage, nil)
 	}
-	h.invalidateLinkLookups()
+	h.invalidateTrackerLookups(c.Context(), profile.ID, accepted.TrackerID)
 
 	return h.renderLinkCardResponse(c, profile.ID, accepted.SourceID, accepted.TrackerID)
 }
@@ -758,7 +758,7 @@ func (h *DashboardHandler) ManualLinkTracker(c *fiber.Ctx) error {
 		// instead of the card.
 		return h.fail(c, fiber.StatusInternalServerError, "Could not save that link; try again.", err)
 	}
-	h.invalidateLinkLookups()
+	h.invalidateTrackerLookups(c.Context(), profile.ID, trackerID)
 
 	return h.renderLinkCardResponse(c, profile.ID, source.ID, trackerID)
 }
@@ -864,7 +864,6 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load the review queue", err)
 	}
 
-	linked := false
 	for _, item := range queue {
 		if !isBulkAcceptable(item.Suggestions) {
 			continue
@@ -878,13 +877,15 @@ func (h *DashboardHandler) AcceptExactLinkMatches(c *fiber.Ctx) error {
 				if err != nil {
 					return h.fail(c, fiber.StatusInternalServerError, "Failed to accept the exact matches", err)
 				}
-				linked = linked || accepted != nil
+				// As each link lands rather than once at the end: a later
+				// accept that fails returns above, and the trackers linked
+				// before it were then left with their old answers.
+				if accepted != nil {
+					h.invalidateTrackerLookups(c.Context(), profile.ID, accepted.TrackerID)
+				}
 				break
 			}
 		}
-	}
-	if linked {
-		h.invalidateLinkLookups()
 	}
 
 	data, err := h.buildLinkQueue(c.Context(), profile.ID, source, scope)

@@ -76,14 +76,14 @@ type DashboardPaths struct {
 type coverResolver interface {
 	Lookup(sourceKey, sourceURL string, sourceItemID *string, alternates []repository.TrackerSourceRef, pageKey string) (coverURL string, servingSourceKey string, waiting bool)
 	FetchImage(ctx context.Context, coverURL string) (body []byte, ext string, ok bool)
-	InvalidateNegatives()
+	InvalidateNegative(sourceKey, sourceURL string, sourceItemID *string)
 	Close()
 }
 
 // chapterLinkResolver is the chapter-link half of the same service.
 type chapterLinkResolver interface {
 	Lookup(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool)
-	Invalidate()
+	InvalidateSource(sourceKey, sourceURL string)
 	Close()
 }
 

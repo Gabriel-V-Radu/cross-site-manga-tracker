@@ -502,3 +502,48 @@ func contains(values []string, target string) bool {
 	}
 	return false
 }
+
+// TestChromeClientStopsAtARedirectThatLeavesTheSite pins that this connector's
+// own client refuses what the shared one refuses. It had no redirect check, so
+// a hop to another site was followed — the foreign page requested with the
+// Chrome headers and the cookie jar — before FetchBytes threw the answer away.
+// The foreign server shares 127.0.0.1 with the site, so it is addressed as
+// "localhost" to give it a host of its own.
+func TestChromeClientStopsAtARedirectThatLeavesTheSite(t *testing.T) {
+	foreignHits := 0
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignHits++
+		_, _ = w.Write([]byte("<html>Somewhere else</html>"))
+	}))
+	defer foreign.Close()
+	foreignURL := strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)
+
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/novel/moved":
+			http.Redirect(w, r, foreignURL+"/landing", http.StatusFound)
+		case "/novel/renamed":
+			http.Redirect(w, r, "/novel/current", http.StatusMovedPermanently)
+		default:
+			_, _ = w.Write([]byte("<html>Chapter 12</html>"))
+		}
+	}))
+	defer site.Close()
+
+	client := newChromeHTTPClient(5 * time.Second)
+	defer client.CloseIdleConnections()
+
+	_, err := connectors.FetchHTML(context.Background(), client, site.URL+"/novel/moved")
+	var offSite *connectors.OffSiteRedirectError
+	if !errors.As(err, &offSite) {
+		t.Fatalf("err = %v, want an off-site redirect verdict", err)
+	}
+	if foreignHits != 0 {
+		t.Fatalf("the foreign host was requested %d times", foreignHits)
+	}
+
+	page, err := connectors.FetchHTML(context.Background(), client, site.URL+"/novel/renamed")
+	if err != nil || page != "<html>Chapter 12</html>" {
+		t.Fatalf("a redirect within the site must be followed, got %q, %v", page, err)
+	}
+}

@@ -8,6 +8,11 @@ services:
       - ./backend/.env.example
     environment:
       - SQLITE_PATH=/app/data/app.sqlite
+      # A label and nothing else: the server reads APP_ENV for the "env" field
+      # of its "api started" log line and for no decision. The env file above
+      # is the development example, so without this the deployed container
+      # introduced itself as env=development in the log kept on the Pi.
+      - APP_ENV=production
     ports:
       - "8080:8080"
     volumes:

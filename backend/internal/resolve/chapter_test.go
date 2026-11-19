@@ -26,7 +26,7 @@ func TestFetchChapterURLFallsBackToAlternate(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", 440.2, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedsource", "https://blocked.example/title/a", 440.2, alternates)
 	if err != nil {
 		t.Fatalf("expected the alternate to resolve the chapter: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestFetchChapterURLPrefersPrimary(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "primarysource", "https://primary.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "primarysource", "https://primary.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestFetchChapterURLNegativeCacheIsShortAfterAnAttempt(t *testing.T) {
 
 	resolver := newChapterTestResolver(t, registry)
 
-	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", 5, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), 0, "blockedsource", "https://blocked.example/title/a", 5, nil); err == nil {
 		t.Fatalf("expected an error when the only source is blocked")
 	}
 
@@ -88,7 +88,7 @@ func TestFetchChapterURLNegativeCacheIsShortAfterAnAttempt(t *testing.T) {
 func TestFetchChapterURLUnknownConnectorCachesLonger(t *testing.T) {
 	resolver := newChapterTestResolver(t, connectors.NewRegistry())
 
-	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "nosuchsource", "https://nowhere.example/title/a", 5, nil); err == nil {
+	if _, err := resolver.fetch(context.Background(), 0, "nosuchsource", "https://nowhere.example/title/a", 5, nil); err == nil {
 		t.Fatalf("expected an error for an unregistered connector")
 	}
 
@@ -115,7 +115,7 @@ func TestFetchChapterURLFallsBackToOfflineGuess(t *testing.T) {
 
 	resolver := newChapterTestResolver(t, registry)
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", 177, nil)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedsource", "https://blocked.example/title/a", 177, nil)
 	if err != nil {
 		t.Fatalf("expected the offline guess to be served: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestFetchChapterURLVerifiedReaderBeatsBlockedGuess(t *testing.T) {
 		{SourceKey: "mirrorsource", SourceURL: "https://mirror.example/series/a.ZD1"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("expected the verified mirror to be served: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestFetchChapterURLBlockedGuessBeatsInfoFloor(t *testing.T) {
 		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedsource", "https://blocked.example/title/a", 12, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedsource", "https://blocked.example/title/a", 12, alternates)
 	if err != nil {
 		t.Fatalf("expected the built url to be served: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestFetchChapterURLAnsweredNotFoundNeverBuildsTheGuess(t *testing.T) {
 		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "answeredsource", "https://answered.example/title/a", 82, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "answeredsource", "https://answered.example/title/a", 82, alternates)
 	if err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestFetchChapterURLOriginSiteOutranksAggregators(t *testing.T) {
 		{SourceKey: "asuracomic", SourceURL: "https://asura.example/comics/a"},
 	}
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedreader", "https://blocked.example/title/a", 82, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedreader", "https://blocked.example/title/a", 82, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -276,7 +276,7 @@ func newReaderPriorityResolver(t *testing.T, mangahubLatest float64) (*ChapterLi
 func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedreader", "https://blocked.example/title/a", 99, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedreader", "https://blocked.example/title/a", 99, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestFetchChapterURLPrefersFreshMangaHub(t *testing.T) {
 func TestFetchChapterURLStaleMangaHubFallsBackToBlockedGuess(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "blockedreader", "https://blocked.example/title/a", 101, alternates)
+	chapterURL, err := resolver.fetch(context.Background(), 0, "blockedreader", "https://blocked.example/title/a", 101, alternates)
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestFetchChapterURLWithoutBlockedGuessFallsBackToComicK(t *testing.T) {
 	resolver, alternates := newReaderPriorityResolver(t, 100)
 
 	// The tracker's primary is ComicK here — nothing buildable in the chain.
-	chapterURL, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", "https://comick.example/comic/a", 101, alternates[1:])
+	chapterURL, err := resolver.fetch(context.Background(), 0, "comick", "https://comick.example/comic/a", 101, alternates[1:])
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestFetchChapterURLFloorAnswerIsProvisional(t *testing.T) {
 
 	// ComicK primary, MangaHub the only alternate and one chapter behind.
 	const sourceURL = "https://comick.example/comic/a"
-	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", sourceURL, 101, alternates[1:]); err != nil {
+	if _, err := resolver.fetch(context.Background(), 0, "comick", sourceURL, 101, alternates[1:]); err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
 
@@ -350,7 +350,7 @@ func TestFetchChapterURLFloorOnlyChainKeepsTheVerifiedSpan(t *testing.T) {
 	resolver, _ := newReaderPriorityResolver(t, 100)
 
 	const sourceURL = "https://comick.example/comic/a"
-	if _, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", sourceURL, 101, nil); err != nil {
+	if _, err := resolver.fetch(context.Background(), 0, "comick", sourceURL, 101, nil); err != nil {
 		t.Fatalf("expected the floor to serve the chapter: %v", err)
 	}
 
@@ -480,7 +480,7 @@ func TestFetchChapterURLPinAndAutoChainAnswerSeparately(t *testing.T) {
 	const sourceURL = "https://comick.example/comic/a"
 	withMangaHub := alternates[1:]
 
-	pinned, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", sourceURL, 99, nil)
+	pinned, err := resolver.fetch(context.Background(), 0, "comick", sourceURL, 99, nil)
 	if err != nil {
 		t.Fatalf("pinned resolve failed: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestFetchChapterURLPinAndAutoChainAnswerSeparately(t *testing.T) {
 		t.Fatalf("expected the pin to open ComicK, got %q", pinned)
 	}
 
-	auto, err := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", sourceURL, 99, withMangaHub)
+	auto, err := resolver.fetch(context.Background(), 0, "comick", sourceURL, 99, withMangaHub)
 	if err != nil {
 		t.Fatalf("auto resolve failed: %v", err)
 	}
@@ -497,16 +497,17 @@ func TestFetchChapterURLPinAndAutoChainAnswerSeparately(t *testing.T) {
 	}
 
 	// Each answer stays cached under its own question.
-	if again, _ := resolver.fetch(context.Background(), resolver.cache.currentGeneration(), "comick", sourceURL, 99, nil); again != pinned {
+	if again, _ := resolver.fetch(context.Background(), 0, "comick", sourceURL, 99, nil); again != pinned {
 		t.Fatalf("expected the pin to keep opening ComicK, got %q", again)
 	}
 }
 
-// TestInvalidateVoidsAChapterResolveAlreadyInFlight pins the race Invalidate
-// used to lose: it reset the map, the resolve already in flight — computed from
-// the links as they were — wrote its answer straight after, and the queue
-// refused the fresh resolve the re-rendered card asked for while that one was
-// still running. The stale answer then held for up to 12 hours.
+// TestInvalidateVoidsAChapterResolveAlreadyInFlight pins the race an
+// invalidation used to lose: it dropped the entries, the resolve already in
+// flight — computed from the links as they were — wrote its answer straight
+// after, and the queue refused the fresh resolve the re-rendered card asked for
+// while that one was still running. The stale answer then held for up to 12
+// hours.
 func TestInvalidateVoidsAChapterResolveAlreadyInFlight(t *testing.T) {
 	registry := connectors.NewRegistry()
 	connector := newGatedConnector("gatedsource", false)
@@ -522,12 +523,14 @@ func TestInvalidateVoidsAChapterResolveAlreadyInFlight(t *testing.T) {
 	}
 	waitGateStarted(t, connector)
 
-	resolver.Invalidate()
+	// In another case and padded, as a stored key or a pasted URL may be: the
+	// link is the same one.
+	resolver.InvalidateSource(" GatedSource ", " "+sourceURL+" ")
 	close(connector.release)
 	waitQueueIdle(t, resolver.queue)
 
 	if entry, exists := resolver.cache.get(cacheKey); exists {
-		t.Fatalf("a resolve in flight across Invalidate wrote its answer after it: %+v", entry)
+		t.Fatalf("a resolve in flight across the invalidation wrote its answer after it: %+v", entry)
 	}
 
 	// The next render asks again, and that answer lands.
@@ -541,7 +544,7 @@ func TestInvalidateVoidsAChapterResolveAlreadyInFlight(t *testing.T) {
 }
 
 // TestInvalidateVoidsAChapterResolveStillQueued covers a resolve that was only
-// waiting for a slot when Invalidate ran. Its generation is the one captured
+// waiting for a slot when its link was invalidated. Its generation is the one captured
 // when it was queued, so it writes nothing — and since nothing could be
 // written, it does not spend a request on the site either.
 func TestInvalidateVoidsAChapterResolveStillQueued(t *testing.T) {
@@ -562,7 +565,7 @@ func TestInvalidateVoidsAChapterResolveStillQueued(t *testing.T) {
 		t.Fatal("expected a background resolve to be queued")
 	}
 
-	resolver.Invalidate()
+	resolver.InvalidateSource("gatedsource", sourceURL)
 	<-resolver.sem // one slot frees up after the invalidation
 	waitQueueIdle(t, resolver.queue)
 
@@ -572,6 +575,76 @@ func TestInvalidateVoidsAChapterResolveStillQueued(t *testing.T) {
 	default:
 	}
 	if entry, exists := resolver.cache.get(chapterCacheKey("gatedsource", sourceURL, 12, nil)); exists {
-		t.Fatalf("a resolve queued across Invalidate wrote its answer after it: %+v", entry)
+		t.Fatalf("a resolve queued across the invalidation wrote its answer after it: %+v", entry)
+	}
+}
+
+// TestInvalidateSourceLeavesEveryOtherLinkAlone pins what the invalidation is
+// scoped to. It used to be the whole cache: one tracker's links edited, and
+// every card in the library lost its chapter links and every resolve in flight
+// its answer, so the next render of the list sent two resolves per card back
+// to the sites. Only the lookups that start from the named link go — whichever
+// chapter and whichever alternates they were made with — and a resolve in
+// flight for another link still lands.
+func TestInvalidateSourceLeavesEveryOtherLinkAlone(t *testing.T) {
+	registry := connectors.NewRegistry()
+	connector := newGatedConnector("gatedsource", false)
+	if err := registry.Register(connector); err != nil {
+		t.Fatalf("register gated connector: %v", err)
+	}
+	resolver := newChapterTestResolver(t, registry)
+
+	const editedURL = "https://gated.example/title/edited"
+	// One character longer than the edited link, on the same site: sharing a
+	// prefix with it must not make it the same link.
+	const longerURL = editedURL + "2"
+	const otherURL = "https://gated.example/title/other"
+	const inFlightURL = "https://gated.example/title/in-flight"
+	mirror := []repository.TrackerSourceRef{{SourceID: 9, SourceKey: "mirror", SourceURL: "https://mirror.example/a"}}
+
+	edited := []string{
+		chapterCacheKey("gatedsource", editedURL, 12, nil),
+		chapterCacheKey("gatedsource", editedURL, 13, mirror),
+	}
+	kept := []string{
+		chapterCacheKey("gatedsource", longerURL, 12, nil),
+		chapterCacheKey("gatedsource", otherURL, 12, nil),
+		// The edited link as another tracker's alternate: that tracker's
+		// lookups start from its own link.
+		chapterCacheKey("mirror", "https://mirror.example/a", 12, []repository.TrackerSourceRef{{SourceID: 1, SourceKey: "gatedsource", SourceURL: editedURL}}),
+	}
+	for _, key := range append(append([]string{}, edited...), kept...) {
+		resolver.cache.put(key, chapterEntry{ChapterURL: "https://reader.example/c", Found: true, ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	}
+
+	if _, _, waiting := resolver.Lookup("gatedsource", inFlightURL, 12, nil, ""); !waiting {
+		t.Fatal("expected a background resolve to be queued")
+	}
+	waitGateStarted(t, connector)
+
+	resolver.InvalidateSource("gatedsource", editedURL)
+	close(connector.release)
+	waitQueueIdle(t, resolver.queue)
+
+	for _, key := range edited {
+		if _, exists := resolver.cache.get(key); exists {
+			t.Fatalf("the edited link's entry %q survived its invalidation", key)
+		}
+	}
+	for _, key := range kept {
+		if _, exists := resolver.cache.get(key); !exists {
+			t.Fatalf("another link's entry %q was dropped with the edited one", key)
+		}
+	}
+	inFlightKey := chapterCacheKey("gatedsource", inFlightURL, 12, nil)
+	if chapterURL, found, ok := resolver.cached(inFlightKey); !ok || !found || chapterURL != inFlightURL+"/chapter-12" {
+		t.Fatalf("another link's resolve in flight lost its answer: %q (found=%v ok=%v)", chapterURL, found, ok)
+	}
+
+	// A link that names nothing is no link: it must not read as "all of them".
+	resolver.InvalidateSource("", "")
+	resolver.InvalidateSource("gatedsource", " ")
+	if _, exists := resolver.cache.get(kept[1]); !exists {
+		t.Fatal("an empty link invalidated entries")
 	}
 }

@@ -177,8 +177,10 @@ func (h *DashboardHandler) CreateFromForm(c *fiber.Ctx) error {
 		c.Set("HX-Trigger", `{"trackersChanged":true}`)
 		return h.render(c, "empty_modal.html", nil)
 	}
+	// A new tracker can still meet an old answer: the same series tracked in
+	// the other profile, with no cover found on the site both start from.
 	if pastedLink != nil {
-		h.invalidateLinkLookups()
+		h.invalidateTrackerLookups(c.Context(), activeProfile.ID, created.ID)
 	}
 
 	c.Set("HX-Trigger", fmt.Sprintf(`{"trackerCreated":{"id":%d}}`, created.ID))
@@ -479,14 +481,21 @@ func (h *DashboardHandler) UpdateFromForm(c *fiber.Ctx) error {
 	// can have made them wrong. Dropping them on every save — a status or title
 	// edit included — cleared the whole library's chapter links, left this card
 	// pointing at its series page, and sent the next list render back to every
-	// site for every card.
+	// site for every card. And only this tracker's: the links it had before
+	// the save are named along with the ones it has now, since the save may
+	// have removed the one a lookup started from.
 	linksChanged := sourcesChanged ||
 		pastedLink != nil ||
 		tracker.SourceID != existingTracker.SourceID ||
 		tracker.SourceURL != existingTracker.SourceURL ||
 		!samePointedValue(readingSourceID, existingTracker.ReadingSourceID)
 	if linksChanged {
-		h.invalidateLinkLookups()
+		former := append([]models.TrackerSource{{
+			SourceID:     existingTracker.SourceID,
+			SourceItemID: existingTracker.SourceItemID,
+			SourceURL:    existingTracker.SourceURL,
+		}}, existingSources...)
+		h.invalidateTrackerLookups(c.Context(), activeProfile.ID, id, former...)
 	}
 
 	return h.renderSingleCardOOB(c, activeProfile.ID, id)

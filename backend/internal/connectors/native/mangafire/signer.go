@@ -8,18 +8,26 @@ import (
 	"sync"
 
 	"github.com/dop251/goja"
-	esbuild "github.com/evanw/esbuild/pkg/api"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
-// signerBundle is MangaFire's own obfuscated signer chunk. It defines
-// globalThis.getProtectionToken(path, paramsObject), which every /api/titles*
-// request must call to produce the mandatory `vrf` query token. See
-// signer_bundle.README.md for provenance and refresh instructions.
+// signerBundleLowered is MangaFire's own obfuscated signer chunk
+// (signer_bundle.js, kept beside it byte-for-byte as upstream serves it) after
+// esbuild lowered its modern syntax — async generators, an ESM export — to
+// what goja parses. It defines globalThis.getProtectionToken(path,
+// paramsObject), which every /api/titles* request must call to produce the
+// mandatory `vrf` query token. See signer_bundle.README.md for provenance and
+// refresh instructions.
 //
-//go:embed signer_bundle.js
-var signerBundle string
+// The lowering used to happen here, on the first request of every process,
+// which linked a JavaScript bundler into the server for one call on a file
+// that changes when MangaFire rotates its signer. It is done ahead of time
+// now, by the test that also checks this file against its source
+// (TestLoweredSignerBundleIsCurrent); never edit it by hand.
+//
+//go:embed signer_bundle.lowered.js
+var signerBundleLowered string
 
 // signerHostShim provides the minimal browser globals getProtectionToken touches.
 // The routine is deterministic and does not depend on any real DOM state (proven
@@ -113,8 +121,8 @@ TextDecoder.prototype.decode = function(buf){
 
 // signer runs MangaFire's getProtectionToken in an embedded JS runtime to mint
 // the `vrf` token required by the API. goja.Runtime is not safe for concurrent
-// use, so all access is serialized through mu. Initialization (esbuild transpile
-// + goja parse of the ~140 KB bundle) is deferred until the first Sign call.
+// use, so all access is serialized through mu. Initialization (goja's parse of
+// the ~190 KB lowered bundle) is deferred until the first Sign call.
 type signer struct {
 	once    sync.Once
 	initErr error
@@ -130,30 +138,14 @@ func newSigner() *signer {
 }
 
 func (s *signer) init() {
-	// esbuild lowers the bundle's modern syntax (async generators, ESM
-	// export) to a target goja can parse. The signer's crypto is pure JS, so
-	// no WebAssembly/WebCrypto is involved.
-	result := esbuild.Transform(signerBundle, esbuild.TransformOptions{
-		Loader: esbuild.LoaderJS,
-		Format: esbuild.FormatIIFE,
-		Target: esbuild.ES2017,
-	})
-	if len(result.Errors) > 0 {
-		msgs := make([]string, 0, len(result.Errors))
-		for _, e := range result.Errors {
-			msgs = append(msgs, e.Text)
-		}
-		s.initErr = fmt.Errorf("transpile mangafire signer: %s", strings.Join(msgs, "; "))
-		return
-	}
-
+	// The signer's crypto is pure JS, so no WebAssembly/WebCrypto is involved.
 	rt := goja.New()
 	shim := strings.ReplaceAll(signerHostShim, "__BROWSER_USER_AGENT__", connectors.BrowserUserAgent)
 	if _, err := rt.RunString(shim); err != nil {
 		s.initErr = fmt.Errorf("init mangafire signer host shim: %w", err)
 		return
 	}
-	if _, err := rt.RunString(string(result.Code)); err != nil {
+	if _, err := rt.RunString(signerBundleLowered); err != nil {
 		s.initErr = fmt.Errorf("load mangafire signer bundle: %w", err)
 		return
 	}

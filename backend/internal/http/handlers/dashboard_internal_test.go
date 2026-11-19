@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,13 +189,13 @@ func TestBuildTrackerCardsShowsChapterSeenAtAsApproximateRelease(t *testing.T) {
 }
 
 // countingChapterLinkResolver degrades every chapter link to the series page,
-// reports the lookup pending or not as the test chooses, and counts the cache
-// invalidations it is asked for. Guarded because the handler runs on fiber's
+// reports the lookup pending or not as the test chooses, and records which
+// links it is asked to invalidate. Guarded because the handler runs on fiber's
 // goroutine while the test flips and reads it between requests.
 type countingChapterLinkResolver struct {
-	mu            sync.Mutex
-	waiting       bool
-	invalidations int
+	mu          sync.Mutex
+	waiting     bool
+	invalidated []string
 }
 
 func (r *countingChapterLinkResolver) Lookup(_ string, sourceURL string, _ float64, _ []repository.TrackerSourceRef, _ string) (string, bool, bool) {
@@ -203,10 +204,10 @@ func (r *countingChapterLinkResolver) Lookup(_ string, sourceURL string, _ float
 	return sourceURL, false, r.waiting
 }
 
-func (r *countingChapterLinkResolver) Invalidate() {
+func (r *countingChapterLinkResolver) InvalidateSource(sourceKey, sourceURL string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.invalidations++
+	r.invalidated = append(r.invalidated, sourceKey+" "+sourceURL)
 }
 
 func (r *countingChapterLinkResolver) Close() {}
@@ -217,19 +218,44 @@ func (r *countingChapterLinkResolver) setWaiting(waiting bool) {
 	r.waiting = waiting
 }
 
-func (r *countingChapterLinkResolver) takeInvalidations() int {
+// takeInvalidations returns the links named since the last call, each once and
+// in order, as "source-key series-url".
+func (r *countingChapterLinkResolver) takeInvalidations() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	count := r.invalidations
-	r.invalidations = 0
-	return count
+	named := slices.Compact(slices.Sorted(slices.Values(r.invalidated)))
+	r.invalidated = nil
+	return named
+}
+
+// recordingCoverResolver answers every cover lookup with nothing and records
+// which covers' negatives it is asked to invalidate, as "source-key
+// series-url". Guarded for the same reason the chapter double is.
+type recordingCoverResolver struct {
+	fakeCoverResolver
+	mu          sync.Mutex
+	invalidated []string
+}
+
+func (r *recordingCoverResolver) InvalidateNegative(sourceKey, sourceURL string, _ *string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidated = append(r.invalidated, sourceKey+" "+sourceURL)
+}
+
+func (r *recordingCoverResolver) takeInvalidations() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	named := slices.Compact(slices.Sorted(slices.Values(r.invalidated)))
+	r.invalidated = nil
+	return named
 }
 
 // newEditTestHandler builds a real handler over a migrated database, with the
-// chapter-link resolver swapped for the counting double and the cover resolver
-// for a fixed answer, so a save's effect on the caches can be observed without
-// a connector or the network. Only the routes the tests drive are mounted.
-func newEditTestHandler(t *testing.T) (*sql.DB, *fiber.App, *countingChapterLinkResolver) {
+// two resolvers swapped for the recording doubles, so a save's effect on the
+// caches can be observed without a connector or the network. Only the routes
+// the tests drive are mounted.
+func newEditTestHandler(t *testing.T) (*sql.DB, *fiber.App, *countingChapterLinkResolver, *recordingCoverResolver) {
 	t.Helper()
 
 	db, err := database.Open(filepath.Join(t.TempDir(), "test.sqlite"))
@@ -256,14 +282,16 @@ func newEditTestHandler(t *testing.T) (*sql.DB, *fiber.App, *countingChapterLink
 	handler.covers.Close()
 	handler.chapterLinks.Close()
 	chapters := &countingChapterLinkResolver{}
-	handler.covers = fakeCoverResolver{}
+	covers := &recordingCoverResolver{}
+	handler.covers = covers
 	handler.chapterLinks = chapters
 	t.Cleanup(handler.Close)
 
 	app := fiber.New()
 	app.Post("/dashboard/trackers/:id", handler.UpdateFromForm)
 	app.Get("/dashboard/trackers/:id/card-fragment", handler.CardFragment)
-	return db, app, chapters
+	app.Post("/dashboard/links/suggestions/:id/accept", handler.AcceptLinkSuggestion)
+	return db, app, chapters, covers
 }
 
 // seedEditTracker stores a MangaDex tracker with a second, MangaFire link, the
@@ -320,32 +348,47 @@ func postEditForm(t *testing.T, app *fiber.App, trackerID int64, form url.Values
 }
 
 // TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged pins that a save drops
-// the chapter-link cache only when it changed what those links were worked out
-// against. Every save used to drop it — a status edit included — which emptied
-// the whole library's chapter links and left the saved card on its series page.
+// cached chapter links only when it changed what those links were worked out
+// against, and then only the saved tracker's. Every save used to drop the
+// whole cache — a status edit included — which emptied the library's chapter
+// links and left the saved card on its series page; and until the resolvers
+// could be told which links, a save that did change them still emptied it for
+// every other tracker. The second tracker seeded here is never to be named.
 func TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged(t *testing.T) {
-	db, app, chapters := newEditTestHandler(t)
+	db, app, chapters, covers := newEditTestHandler(t)
 	trackerID, mangafireID := seedEditTracker(t, db)
+	if _, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+		VALUES (1, 'Bystander', 1, 'https://mangadex.org/title/bystander', 'reading')
+	`); err != nil {
+		t.Fatalf("seed the second tracker: %v", err)
+	}
+
+	const mangadexLink = "mangadex https://mangadex.org/title/edited"
+	const mangafireLink = "mangafire https://mangafire.to/manga/edited.x1"
+	bothLinks := []string{mangadexLink, mangafireLink}
 
 	cases := []struct {
 		name  string
 		edit  func(url.Values)
-		wants int
+		wants []string
 	}{
 		{name: "status and title only", edit: func(form url.Values) {
 			form.Set("status", "on_hold")
 			form.Set("title", "Renamed Tracker")
-		}, wants: 0},
+		}},
 		{name: "chapter numbers only", edit: func(form url.Values) {
 			form.Set("latest_known_chapter", "11")
-		}, wants: 0},
+		}},
 		{name: "reading pin set", edit: func(form url.Values) {
 			form.Set("reading_source_id", strconv.FormatInt(mangafireID, 10))
-		}, wants: 1},
-		{name: "reading pin cleared", edit: func(url.Values) {}, wants: 1},
+		}, wants: bothLinks},
+		{name: "reading pin cleared", edit: func(url.Values) {}, wants: bothLinks},
+		// The link is gone from the tracker by the time the caches are told,
+		// and is named all the same: a pinned lookup started from it.
 		{name: "a linked site removed", edit: func(form url.Values) {
 			form.Set("linked_sources_json", `[{"sourceId":1,"sourceUrl":"https://mangadex.org/title/edited"}]`)
-		}, wants: 1},
+		}, wants: bothLinks},
 	}
 
 	// The cases run in order against one tracker: each starts from what the
@@ -354,9 +397,63 @@ func TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged(t *testing.T) {
 		form := editForm(mangafireID)
 		testCase.edit(form)
 		postEditForm(t, app, trackerID, form)
-		if got := chapters.takeInvalidations(); got != testCase.wants {
-			t.Fatalf("%s: %d invalidations, want %d", testCase.name, got, testCase.wants)
+		if got := chapters.takeInvalidations(); !slices.Equal(got, testCase.wants) {
+			t.Fatalf("%s: invalidated %q, want %q", testCase.name, got, testCase.wants)
 		}
+		// The same links' "no cover", and nobody else's: this used to drop
+		// every negative cover in memory and in the database.
+		if got := covers.takeInvalidations(); !slices.Equal(got, testCase.wants) {
+			t.Fatalf("%s: invalidated the covers of %q, want %q", testCase.name, got, testCase.wants)
+		}
+	}
+}
+
+// TestAcceptingALinkInvalidatesOnlyThatTrackersLookups pins the same scoping
+// for the link review's accept: the tracker's links are named — the one just
+// accepted among them, read back after the write — and the tracker beside it
+// is not. One accepted candidate used to cost every card its chapter links.
+func TestAcceptingALinkInvalidatesOnlyThatTrackersLookups(t *testing.T) {
+	db, app, chapters, covers := newEditTestHandler(t)
+	trackerID, _ := seedEditTracker(t, db)
+	if _, err := db.Exec(`
+		INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+		VALUES (1, 'Bystander', 1, 'https://mangadex.org/title/bystander', 'reading')
+	`); err != nil {
+		t.Fatalf("seed the second tracker: %v", err)
+	}
+	var comickID int64
+	if err := db.QueryRow(`SELECT id FROM sources WHERE key = 'comick'`).Scan(&comickID); err != nil {
+		t.Fatalf("look up comick source: %v", err)
+	}
+	result, err := db.Exec(`
+		INSERT INTO source_link_suggestions (tracker_id, source_id, candidate_url, candidate_title, score, status)
+		VALUES (?, ?, 'https://comick.dev/comic/edited', 'Edited Tracker', 1.0, 'pending')
+	`, trackerID, comickID)
+	if err != nil {
+		t.Fatalf("seed suggestion: %v", err)
+	}
+	suggestionID, _ := result.LastInsertId()
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/links/suggestions/"+strconv.FormatInt(suggestionID, 10)+"/accept", nil)
+	res, err := app.Test(req, 10000)
+	if err != nil {
+		t.Fatalf("accept request failed: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", res.StatusCode, string(body))
+	}
+
+	want := []string{
+		"comick https://comick.dev/comic/edited",
+		"mangadex https://mangadex.org/title/edited",
+		"mangafire https://mangafire.to/manga/edited.x1",
+	}
+	if got := chapters.takeInvalidations(); !slices.Equal(got, want) {
+		t.Fatalf("invalidated the chapter links of %q, want %q", got, want)
+	}
+	if got := covers.takeInvalidations(); !slices.Equal(got, want) {
+		t.Fatalf("invalidated the covers of %q, want %q", got, want)
 	}
 }
 
@@ -365,7 +462,7 @@ func TestUpdateFromFormInvalidatesLinksOnlyWhenTheyChanged(t *testing.T) {
 // of the card's fragment, and the fragment says whether to ask again. Nothing
 // re-rendered such a card before, so it kept its series-page links.
 func TestSingleCardRefreshFollowsPendingLookups(t *testing.T) {
-	db, app, chapters := newEditTestHandler(t)
+	db, app, chapters, _ := newEditTestHandler(t)
 	trackerID, mangafireID := seedEditTracker(t, db)
 	fragmentPath := "/dashboard/trackers/" + strconv.FormatInt(trackerID, 10) + "/card-fragment?view=grid&profile=profile1"
 

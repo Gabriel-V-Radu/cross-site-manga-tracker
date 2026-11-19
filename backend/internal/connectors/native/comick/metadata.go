@@ -98,32 +98,6 @@ func (response apiComicResponse) metadata() *connectors.SeriesMetadata {
 	return metadata
 }
 
-// cloneMetadata copies a cached record's metadata for a result, so a caller
-// that edits the result cannot reach into the cache every later resolve of
-// the slug reads from.
-func cloneMetadata(metadata *connectors.SeriesMetadata) *connectors.SeriesMetadata {
-	if metadata == nil {
-		return nil
-	}
-	clone := *metadata
-	clone.Genres = cloneStrings(metadata.Genres)
-	clone.Tags = cloneStrings(metadata.Tags)
-	clone.Authors = cloneStrings(metadata.Authors)
-	clone.Artists = cloneStrings(metadata.Artists)
-	if metadata.Rating != nil {
-		rating := *metadata.Rating
-		clone.Rating = &rating
-	}
-	return &clone
-}
-
-func cloneStrings(values []string) []string {
-	if values == nil {
-		return nil
-	}
-	return append([]string(nil), values...)
-}
-
 // comicGenre is one entry of md_comic_md_genres. group is "Genre", "Theme",
 // "Format" or "Content".
 type comicGenre struct {

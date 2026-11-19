@@ -59,7 +59,7 @@ type coverStore interface {
 	LoadFresh(ctx context.Context) ([]repository.CoverCacheRow, error)
 	Upsert(ctx context.Context, entry repository.CoverCacheRow) error
 	Delete(ctx context.Context, cacheKey string) error
-	DeleteNegatives(ctx context.Context) error
+	DeleteNegative(ctx context.Context, cacheKey string) error
 }
 
 // CoverConfig wires a CoverResolver. Everything it reaches — the connectors,
@@ -189,9 +189,9 @@ func (r *CoverResolver) Lookup(sourceKey, sourceURL string, sourceItemID *string
 	}
 
 	// Captured now rather than when the fetch gets its slot: an
-	// InvalidateNegatives that lands while it waits in the queue voids its "no
+	// InvalidateNegative that lands while it waits in the queue voids its "no
 	// cover" just the same.
-	generation := r.cache.currentGeneration()
+	generation := r.cache.currentGeneration(cacheKey)
 	r.queue.run(cacheKey, r.semFor(trimmedSourceKey), pageKey, func(ctx context.Context) {
 		_, _ = r.fetch(ctx, generation, trimmedSourceKey, sourceURL, sourceItemID, alternates)
 	})
@@ -214,19 +214,31 @@ func coverSourceStillLinked(servingKey, primaryKey string, alternates []reposito
 	return false
 }
 
-// InvalidateNegatives drops every remembered "no cover found". Called whenever
-// a tracker's linked sources change: an entry computed before a source was
-// attached would otherwise outlive the attachment by its whole TTL, which reads
-// as the new link not working. A fetch already queued or in flight tried the
-// links as they were, so its "no cover" is not written after this either (see
-// cacheNegative). Found covers stay — a new link cannot make a good cover
-// worse.
-func (r *CoverResolver) InvalidateNegatives() {
-	r.cache.invalidateWhere(func(entry coverEntry) bool { return !entry.Found })
-
+// InvalidateNegative drops a remembered "no cover found" for one tracker's
+// cover question — the same source, series URL and item id Lookup is asked
+// with. Called when the tracker's linked sources change: an entry computed
+// before a source was attached would otherwise outlive the attachment by its
+// whole TTL, which reads as the new link not working. A fetch already queued
+// or in flight for it tried the links as they were, so its "no cover" is not
+// written after this either (see cacheNegative). A found cover stays — a new
+// link cannot make a good cover worse.
+//
+// Every other tracker's entry stays as well. This used to drop every "no
+// cover" there was, in memory and in the database: one tracker edited, and
+// each card without art asked its sites again on the next render.
+func (r *CoverResolver) InvalidateNegative(sourceKey, sourceURL string, sourceItemID *string) {
+	if strings.TrimSpace(sourceKey) == "" {
+		return
+	}
+	cacheKey := coverCacheKey(sourceKey, sourceURL, sourceItemID)
+	r.cache.invalidateScope(cacheKey, func(key string, entry coverEntry) bool {
+		return key == cacheKey && !entry.Found
+	})
+	// The store's own condition decides, not what memory held a moment ago: a
+	// cover a fetch has stored under the key since is left where it is.
 	if r.store != nil {
-		if err := r.store.DeleteNegatives(r.queue.lifetime); err != nil {
-			slog.Debug("cover cache negative sweep failed", "error", err)
+		if err := r.store.DeleteNegative(r.queue.lifetime, cacheKey); err != nil {
+			slog.Debug("cover cache negative delete failed", "error", err)
 		}
 	}
 }
@@ -359,6 +371,17 @@ func (r *CoverResolver) resolveFromConnector(parent context.Context, sourceKey, 
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
+	// A site that can name the cover from its series record alone is asked
+	// only for that: a full resolve reads the chapter listing as well, a
+	// request per cover that nothing here looks at.
+	if coverResolver, ok := connector.(connectors.CoverURLResolver); ok {
+		coverURL, err := coverResolver.ResolveCoverURL(ctx, sourceURL)
+		if err != nil {
+			return "", true, err
+		}
+		return strings.TrimSpace(coverURL), true, nil
+	}
+
 	result, err := connector.ResolveByURL(ctx, sourceURL)
 	if err != nil {
 		return "", true, err
@@ -428,6 +451,17 @@ func (r *CoverResolver) cachedWithSource(cacheKey string) (coverURL string, sour
 	}
 
 	if entry.LocalPath != "" {
+		// Without a cover directory there is nowhere to look for the file, and
+		// that says nothing about the file. The directory is only ever missing
+		// because it could not be created when the process started; joined to
+		// "" the name was looked for in the working directory, never found,
+		// and every stored cover's entry was deleted from the database for it
+		// — the whole library's covers to resolve and download again on the
+		// next start, when the directory was back. The entry is left alone and
+		// the cover is served from the address it was downloaded from.
+		if r.dir == "" {
+			return entry.CoverURL, entry.SourceKey, entry.CoverURL != "", true
+		}
 		if _, err := os.Stat(filepath.Join(r.dir, entry.LocalPath)); err == nil {
 			return coverLocalURLPrefix + entry.LocalPath, entry.SourceKey, true, true
 		}
@@ -463,14 +497,15 @@ func (r *CoverResolver) cacheResult(cacheKey, coverURL string, found bool, ttl t
 }
 
 // cacheNegative remembers that a fetch found no cover, unless
-// InvalidateNegatives ran since the fetch was queued at generation. The fetch
-// tried the links as they were before it, and its "no cover" landing afterwards
-// hid the source attached in between for the negative's whole TTL — exactly
-// what the invalidation exists to prevent. Found covers are written regardless
-// (acceptCover): a new link cannot make a good cover worse.
+// InvalidateNegative ran for this cover since the fetch was queued at
+// generation. The fetch tried the links as they were before it, and its "no
+// cover" landing afterwards hid the source attached in between for the
+// negative's whole TTL — exactly what the invalidation exists to prevent.
+// Found covers are written regardless (acceptCover): a new link cannot make a
+// good cover worse.
 func (r *CoverResolver) cacheNegative(generation uint64, cacheKey string, ttl time.Duration) {
 	entry := coverEntry{ExpiresAt: time.Now().UTC().Add(ttl)}
-	if !r.cache.putIfGeneration(generation, cacheKey, entry) {
+	if !r.cache.putIfGeneration(generation, cacheKey, cacheKey, entry) {
 		return
 	}
 	r.persist(cacheKey, entry)
