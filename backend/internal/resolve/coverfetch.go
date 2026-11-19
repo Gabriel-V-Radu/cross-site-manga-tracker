@@ -172,17 +172,31 @@ const coverDownloadLimit = 8 << 20
 // the shapes run from 1.00 to 1.58 tall-over-wide, and the squarest files are
 // the real title art for their series. The guard only ever produced cards with
 // no art at all, which is worse than art of an unusual shape.
+//
+// What is stored is a copy sized for the card when the site's own is far
+// bigger than that (ShrinkCover), so the name's extension is the stored
+// copy's, not necessarily the download's.
 func (r *CoverResolver) storeLocally(parent context.Context, coverURL string) (string, bool) {
 	body, ext, ok := r.download(parent, coverURL)
 	if !ok {
 		return "", false
 	}
 
-	name := fmt.Sprintf("%x%s", sha1.Sum([]byte(coverURL)), ext)
-	target := filepath.Join(r.dir, name)
-	if _, statErr := os.Stat(target); statErr == nil {
-		return name, true
+	// A copy already stored for this URL is the cover, whichever of the two
+	// forms it is in; found first, it also spares the resize.
+	base := fmt.Sprintf("%x", sha1.Sum([]byte(coverURL)))
+	for _, stored := range []string{base + ".jpg", base + ext} {
+		if _, statErr := os.Stat(filepath.Join(r.dir, stored)); statErr == nil {
+			return stored, true
+		}
 	}
+
+	if smaller, smallerExt, shrunk := ShrinkCover(body); shrunk {
+		slog.Debug("cover stored smaller", "url", coverURL, "from", len(body), "to", len(smaller))
+		body, ext = smaller, smallerExt
+	}
+	name := base + ext
+	target := filepath.Join(r.dir, name)
 
 	// Write-then-rename so a concurrent fetch of the same URL never serves a
 	// half-written file. A rename that loses the race to an identical file is

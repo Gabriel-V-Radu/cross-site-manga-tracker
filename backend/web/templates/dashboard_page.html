@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,500;6..96,700&family=IBM+Plex+Sans+Condensed:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+    <link rel="icon" type="image/svg+xml" href="{{assetURL "favicon.svg"}}">
     <link rel="stylesheet" href="{{assetURL "dashboard.css"}}">
     <script src="{{assetURL "htmx.min.js"}}" defer></script>
     <script src="{{assetURL "dashboard-core.js"}}" defer></script>
@@ -194,9 +194,13 @@ two tabs on different profiles kept acting on each other's library.
                     Tags
                     <details id="filter-tags-dropdown" class="filter-multi-select" data-filter-name="tags">
                         <summary id="filter-tags-summary">Any</summary>
+                        {{/* No "load" trigger: the options below are the page's
+                             own render of this same list, and asking for it
+                             again as the page opened only swapped it for a
+                             copy. It is fetched when the tags change. */}}
                         <div class="filter-multi-select__menu"
                              hx-get="/dashboard/profile/filter-tags"
-                             hx-trigger="load, profileTagsChanged from:body"
+                             hx-trigger="profileTagsChanged from:body"
                              hx-target="this"
                              hx-swap="innerHTML"
                              hx-include="#profile-filter">
@@ -249,6 +253,12 @@ two tabs on different profiles kept acting on each other's library.
     </main>
 
     <div id="modal-zone"></div>
+    {{/* Where a card's own actions (Set last read, Delete) put their answer.
+         The answer is an out-of-band card and a script or two with nothing to
+         show, and it used to be swapped into #modal-zone for want of anywhere
+         else: an answer that came back after the reader had opened a modal
+         emptied it under them. Here it does its work and touches nothing. */}}
+    <div id="card-action-sink" hidden></div>
     {{/* The series info panel the card covers open; dashboard-info.js fills it
          and places it beside the card. Outside .shell so the modal's inert
          page does not swallow it, and so it can overflow the grid. */}}

@@ -145,13 +145,19 @@ opens the panel.
 
     {{/* The button sends the latest chapter this card was rendered with: a
          poll can store a newer one while the card sits on screen, and the
-         click means "I read up to the chapter I am looking at". */}}
+         click means "I read up to the chapter I am looking at".
+
+         Its answer, like Delete's below, goes to #card-action-sink
+         (dashboard_page.html) and not to #modal-zone, which it would empty.
+         Not hx-swap="none" as the rating form has: the answer carries scripts
+         — the list's quiet refresh after a delete, the card asking for itself
+         again while a lookup is pending — and htmx runs only what it swaps. */}}
     <div class="card-actions">
         <button type="button"
                 class="mini-btn"
                 hx-post="/dashboard/trackers/{{.ID}}/set-last-read"
                 {{if .LatestKnownChapterRaw}}hx-vals='{"shown_latest_chapter":"{{chapterInputValue .LatestKnownChapterRaw}}"}'{{end}}
-                hx-target="#modal-zone"
+                hx-target="#card-action-sink"
                 hx-swap="innerHTML">Set last read</button>
         <a class="mini-btn mini-btn--highlight"
            href="{{if .HighlightURL}}{{.HighlightURL}}{{else}}{{.SourceURL}}{{end}}"
@@ -168,7 +174,7 @@ opens the panel.
         <button type="button"
                 class="mini-btn mini-btn--danger"
                 hx-post="/dashboard/trackers/{{.ID}}/delete"
-                hx-target="#modal-zone"
+                hx-target="#card-action-sink"
                 hx-swap="innerHTML"
                 hx-confirm="Delete this tracker?">Delete</button>
     </div>

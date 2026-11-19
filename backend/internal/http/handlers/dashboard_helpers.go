@@ -336,16 +336,33 @@ func (h *DashboardHandler) invalidateLinkLookups() {
 // for days after a deploy, running old code against a new server. A URL that
 // changes when the file changes is what makes a deploy actually take effect.
 //
-// The mtimes are read once per name and remembered: the files cannot change
-// under a running process, and this is on the path of every page render.
+// A stamped URL is served as immutable (the /assets route), so the stamp has
+// to follow the file: a stamp that stayed the same after the file changed
+// would leave the browser on its cached copy for good. The mtimes used to be
+// read once per name and kept for the life of the process, on the grounds
+// that the files cannot change under it — which holds for the image and not
+// for a developer's server, where an edited script was then never fetched
+// again. A stamp is remembered for assetStampLife and read again after that:
+// this is on the path of every page render, and a couple of seconds of
+// memory spares it nearly every stat without outliving an edit.
 type assetVersions struct {
 	dir      string
+	now      func() time.Time
 	mu       sync.Mutex
-	versions map[string]string
+	versions map[string]assetStamp
 }
 
+type assetStamp struct {
+	version string
+	readAt  time.Time
+}
+
+// assetStampLife is how long a stamp is used before the file is looked at
+// again.
+const assetStampLife = 2 * time.Second
+
 func newAssetVersions(dir string) *assetVersions {
-	return &assetVersions{dir: dir, versions: map[string]string{}}
+	return &assetVersions{dir: dir, now: time.Now, versions: map[string]assetStamp{}}
 }
 
 func (a *assetVersions) url(name string) string {
@@ -354,15 +371,18 @@ func (a *assetVersions) url(name string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if version, cached := a.versions[name]; cached {
-		return "/assets/" + name + version
+	now := a.now()
+	if stamp, cached := a.versions[name]; cached && now.Sub(stamp.readAt) < assetStampLife {
+		return "/assets/" + name + stamp.version
 	}
 
 	version := ""
 	if info, err := os.Stat(filepath.Join(a.dir, filepath.FromSlash(name))); err == nil {
-		version = "?v=" + strconv.FormatInt(info.ModTime().Unix(), 10)
+		// To the nanosecond, where the filesystem keeps it: two saves within
+		// one second must not share a URL that is cached for good.
+		version = "?v=" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
 	}
-	a.versions[name] = version
+	a.versions[name] = assetStamp{version: version, readAt: now}
 	return "/assets/" + name + version
 }
 

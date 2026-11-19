@@ -65,7 +65,17 @@
             }
             return response.text();
         }).then(function (html) {
-            cache[url] = { html: html, at: Date.now() };
+            // What has expired goes as something new comes in: an entry was
+            // only ever replaced by a newer one for the same card, so a reader
+            // who hovered their way down a long list kept every panel's HTML
+            // for as long as the tab stayed open.
+            var now = Date.now();
+            Object.keys(cache).forEach(function (key) {
+                if ((now - cache[key].at) >= CACHE_MS) {
+                    delete cache[key];
+                }
+            });
+            cache[url] = { html: html, at: now };
             return html;
         });
     };
@@ -166,12 +176,18 @@
         place(node, trigger);
 
         fetchPanel(url).then(function (html) {
-            if (request !== current.request || current.trigger !== trigger) {
+            // Only a newer show or a hide makes this answer stale, and both
+            // move the request counter. The element is no test: a silent
+            // refresh of the list swaps the card for a new copy while the
+            // answer is on its way, the panel follows the copy (liveTrigger),
+            // and an answer dropped for arriving after that left the panel
+            // open on "Loading…" for good.
+            if (request !== current.request) {
                 return;
             }
             node.innerHTML = html;
             setUpDescription(node);
-            place(node, trigger);
+            place(node, liveTrigger() || trigger);
         }).catch(function () {
             if (request !== current.request) {
                 return;

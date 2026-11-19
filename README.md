@@ -114,12 +114,20 @@ in Docker and is used from any browser on the same network.
   one cycle failed several series. `poll-once` prints the same verdicts.
 
 ## Operational Tools
-Three commands ship in the image next to the server (`/usr/local/bin` in the
+Four commands ship in the image next to the server (`/usr/local/bin` in the
 container) and can also be run from `backend/` with `go run ./cmd/<name>`:
 - `cleanup-stale-sources`: see below.
 - `repair-latest-chapter --assign "28=271,167=199"`: sets a tracker's latest
   chapter to a hand-verified value after a source poisoned it with a junk
   number. `--dry-run` previews without writing or migrating.
+- `shrink-covers`: replaces the oversized covers already stored under
+  `data/covers` with the card-sized JPEG the server now stores for a new
+  cover (640px wide at most). Without `--apply` it only lists what it would
+  replace and how much that saves. **Run `--apply` with the server stopped**:
+  a cover that was not a JPEG changes its file name, and the server reads the
+  names once, when it starts. On the deployment host:
+  `docker compose stop api`, `docker compose run --rm api shrink-covers`
+  to preview (add `--apply` to replace), then `docker compose start api`.
 - `poll-once --db <copy-of-app.sqlite>` (not in the image): runs one full poll
   cycle against a database copy with the real connectors, for rehearsing
   poller changes. It writes to the copy, so never aim it at the live file.

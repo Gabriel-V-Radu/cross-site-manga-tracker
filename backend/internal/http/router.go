@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	connectordefaults "github.com/gabriel/cross-site-tracker/backend/internal/connectors/defaults"
 	"github.com/gabriel/cross-site-tracker/backend/internal/http/handlers"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
@@ -36,9 +38,25 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 		ErrorHandler: errorHandler,
 	})
 
-	// Default recover.New swallows panics without logging; the stack trace is
-	// the only way to debug a panicking handler from docker logs.
-	app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+	// Default recover.New swallows panics without logging, and its own stack
+	// trace goes to stderr only. The server's log is the one in the data
+	// volume (LOG_FILE), which outlives the container; a panic that is not in
+	// it is one nobody can look into after the next deploy.
+	app.Use(recover.New(recover.Config{EnableStackTrace: true, StackTraceHandler: logPanic}))
+
+	// Every page and partial is text that compresses to a fifth or less — a
+	// page of cards is some hundred kilobytes of HTML, the scripts and the
+	// stylesheet two hundred more — and all of it went out as it was. On the
+	// LAN that is nothing; on a phone reaching the Pi from outside it is most
+	// of the wait. Best speed, since the Pi does the compressing: it takes
+	// nearly all of the saving for a fraction of the default level's time.
+	//
+	// No route is exempted, and none needs to be: what gets compressed is
+	// decided by the answer's content type (fasthttp: text, application/*,
+	// SVG, fonts), so a JPEG, PNG or WebP cover goes out as it is from
+	// whichever route serves it, while an SVG logo under /uploads, which is
+	// text, is compressed like any other.
+	app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
 
 	// Every dashboard mutation is a plain form POST with no token, and the
 	// profile resolver falls back to the default profile when no cookie comes
@@ -79,15 +97,36 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	// its own freshness lifetime from the file's age — long enough that a script
 	// unchanged for months keeps being served from cache after a deploy, running
 	// old code against a new server. Templates stamp asset URLs with the file's
-	// mtime so the URL itself changes; this makes even an unversioned request
-	// revalidate, so the two together leave no way to run a stale script. The
-	// cost is a conditional request answered with 304.
+	// mtime (?v=), so the URL itself changes when the file does.
+	//
+	// A stamped URL therefore never serves different bytes and is cached for
+	// good: every page load used to ask about each script and stylesheet again,
+	// a conditional request apiece answered 304 before the page could run. An
+	// unstamped request still revalidates, so the two together leave no way to
+	// run a stale script. The no-cache is set ahead of the static handler so it
+	// also rides on a 404; the long lifetime only on a file actually served.
 	app.Use("/assets", func(c *fiber.Ctx) error {
 		c.Set(fiber.HeaderCacheControl, "no-cache")
 		return c.Next()
 	})
-	app.Static("/assets", cfg.AssetsDir())
-	app.Static("/uploads", cfg.UploadsDir())
+	app.Static("/assets", cfg.AssetsDir(), fiber.Static{
+		ModifyResponse: func(c *fiber.Ctx) error {
+			if c.Query("v") != "" && c.Response().StatusCode() < fiber.StatusBadRequest {
+				c.Set(fiber.HeaderCacheControl, immutableCacheControl)
+			}
+			return nil
+		},
+	})
+	// Uploaded site logos. Each upload is stored under a new name (the time
+	// of the upload is in it), so a name never serves different bytes either.
+	app.Static("/uploads", cfg.UploadsDir(), fiber.Static{
+		ModifyResponse: func(c *fiber.Ctx) error {
+			if c.Response().StatusCode() < fiber.StatusBadRequest {
+				c.Set(fiber.HeaderCacheControl, immutableCacheControl)
+			}
+			return nil
+		},
+	})
 	// Locally stored cover art. File names hash the remote URL, so a cover
 	// that changes upstream arrives as a new file — the old name never serves
 	// different bytes, which is what makes immutable safe and cover renders
@@ -98,14 +137,20 @@ func BuildServer(cfg config.Config, db *sql.DB, connectorRegistry *connectors.Re
 	app.Static("/covers", cfg.CoversDir(), fiber.Static{
 		ModifyResponse: func(c *fiber.Ctx) error {
 			if c.Response().StatusCode() < fiber.StatusBadRequest {
-				c.Set(fiber.HeaderCacheControl, "public, max-age=31536000, immutable")
+				c.Set(fiber.HeaderCacheControl, immutableCacheControl)
 			}
 			return nil
 		},
 	})
+	// What a browser asks for on its own, whatever the page's <link> says.
+	// The name is fixed, so it is cached for a day rather than for good.
 	faviconPath := filepath.Join(cfg.AssetsDir(), "favicon.svg")
 	app.Get("/favicon.ico", func(c *fiber.Ctx) error {
-		return c.SendFile(faviconPath)
+		if err := c.SendFile(faviconPath); err != nil {
+			return err
+		}
+		c.Set(fiber.HeaderCacheControl, "public, max-age=86400")
+		return nil
 	})
 	app.Get("/", dashboard.Page)
 	app.Get("/dashboard", dashboard.Page)
@@ -207,24 +252,49 @@ func rejectCrossSiteWrites(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+// immutableCacheControl is for a URL whose bytes never change: a year, and no
+// revalidation in between.
+const immutableCacheControl = "public, max-age=31536000, immutable"
+
+// logPanic records a recovered panic, with its stack, in the server's log.
+func logPanic(c *fiber.Ctx, recovered any) {
+	slog.Error("http handler panicked",
+		"method", c.Method(), "path", c.Path(),
+		"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+}
+
 // errorHandler answers the failures no handler wrote a response for — an
 // unknown route, a method the route does not take, a recovered panic. Under
 // /v1 they keep the API's JSON shape: an unknown endpoint used to answer
 // "Cannot GET /v1/…" as plain text, which a client decoding every answer as
-// {"message": …} could not read. Everywhere else fiber's own plain-text answer
-// stays, which is what the dashboard shows next to a form.
+// {"message": …} could not read. Everywhere else the answer is plain text,
+// which is what the dashboard shows next to a form.
+//
+// A fiber.Error carries a message written for whoever made the request and is
+// answered with it. Anything else is a defect — a panic, an error a handler
+// let through — and its text can name files, tables and hosts: outside /v1 it
+// used to be sent to the browser as it was (fiber's default handler) and
+// logged nowhere. It is logged here, as is every 5xx, and the browser is told
+// only that the server failed.
 func errorHandler(c *fiber.Ctx, err error) error {
-	if !isAPIPath(c.Path()) {
-		return fiber.DefaultErrorHandler(c, err)
+	status, message := fiber.StatusInternalServerError, "Internal Server Error"
+	var fiberErr *fiber.Error
+	isRequestError := errors.As(err, &fiberErr)
+	if isRequestError {
+		status, message = fiberErr.Code, fiberErr.Message
+	}
+	if status >= fiber.StatusInternalServerError {
+		slog.Error("http handler failed", "method", c.Method(), "path", c.Path(), "status", status, "error", err)
 	}
 
-	var fiberErr *fiber.Error
-	if errors.As(err, &fiberErr) {
-		return c.Status(fiberErr.Code).JSON(fiber.Map{"message": fiberErr.Message})
+	if isAPIPath(c.Path()) {
+		if !isRequestError {
+			message = "internal server error"
+		}
+		return c.Status(status).JSON(fiber.Map{"message": message})
 	}
-	// Anything else is a defect, and its text can name files and tables.
-	slog.Error("http handler failed", "method", c.Method(), "path", c.Path(), "error", err)
-	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "internal server error"})
+	c.Set(fiber.HeaderContentType, fiber.MIMETextPlainCharsetUTF8)
+	return c.Status(status).SendString(message)
 }
 
 func isAPIPath(path string) bool {

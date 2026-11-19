@@ -1058,8 +1058,13 @@ document.addEventListener('click', function (event) {
     });
 });
 
-var initializeVisibleRatingPopovers = function () {
-    var popovers = document.querySelectorAll('.tracker-rating__popover');
+// Sets up the rating popovers inside root. After a swap root is what was
+// swapped in, so only the cards that are new are gone over: every swap on the
+// page used to set up every card on it again, the source health pill's
+// refresh each minute included, which swaps no card at all.
+var initializeRatingPopovers = function (root) {
+    var scope = root && root.querySelectorAll ? root : document;
+    var popovers = scope.querySelectorAll('.tracker-rating__popover');
     if (!popovers || popovers.length === 0) {
         return;
     }
@@ -1076,9 +1081,16 @@ var initializeVisibleRatingPopovers = function () {
     });
 };
 
-document.addEventListener('DOMContentLoaded', initializeVisibleRatingPopovers);
-document.body.addEventListener('htmx:afterSwap', function () {
-    initializeVisibleRatingPopovers();
+document.addEventListener('DOMContentLoaded', function () {
+    initializeRatingPopovers(document);
+});
+// A card replaced or added on its own arrives out of band, which htmx reports
+// with its own event, on the new card; the request's swap target is then
+// something else (the rating form, the card action sink).
+['htmx:afterSwap', 'htmx:oobAfterSwap'].forEach(function (name) {
+    document.body.addEventListener(name, function (event) {
+        initializeRatingPopovers(event && event.target);
+    });
 });
 
 window.dismissModalZone = function () {

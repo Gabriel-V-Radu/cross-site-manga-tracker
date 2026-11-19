@@ -14,7 +14,8 @@ COPY backend/ .
 # writes to whatever database it is pointed at.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /cross-site-tracker-api ./cmd/api \
  && CGO_ENABLED=0 GOOS=linux go build -o /cleanup-stale-sources ./cmd/cleanup-stale-sources \
- && CGO_ENABLED=0 GOOS=linux go build -o /repair-latest-chapter ./cmd/repair-latest-chapter
+ && CGO_ENABLED=0 GOOS=linux go build -o /repair-latest-chapter ./cmd/repair-latest-chapter \
+ && CGO_ENABLED=0 GOOS=linux go build -o /shrink-covers ./cmd/shrink-covers
 
 FROM alpine:3.21
 WORKDIR /app
@@ -23,6 +24,7 @@ RUN adduser -D -g '' appuser
 COPY --from=builder /cross-site-tracker-api /usr/local/bin/cross-site-tracker-api
 COPY --from=builder /cleanup-stale-sources /usr/local/bin/cleanup-stale-sources
 COPY --from=builder /repair-latest-chapter /usr/local/bin/repair-latest-chapter
+COPY --from=builder /shrink-covers /usr/local/bin/shrink-covers
 COPY backend/web ./web
 
 RUN mkdir -p /app/data && chown -R appuser:appuser /app

@@ -70,56 +70,101 @@ window.safeHttpUrl = function (value) {
     return raw;
 };
 
-window.syncTrackerCardHoverState = function (clientX, clientY) {
-    if (!document) {
+// The card under the pointer carries tracker-card--hovered. It is a class and
+// not :hover because a card swapped in under a pointer that is not moving is
+// not :hover until the pointer moves.
+//
+// While the pointer moves, the card is read off the event itself and
+// remembered, so a move within the same card does nothing at all. Every move
+// used to ask the browser what was under the pointer (elementFromPoint, which
+// makes it finish any pending layout first) and search the page for marked
+// cards — on each of the dozens of pointermove events a second a mouse sends.
+var hoveredTrackerCard = null;
+
+var setHoveredTrackerCard = function (card) {
+    // The remembered card is believed only while it still carries the class:
+    // htmx, settling a swap, puts a swapped-in element's attributes back to
+    // what the server sent, which takes the class off a card marked a moment
+    // before. Reading a class list costs nothing; the card is marked again.
+    if (card === hoveredTrackerCard && (!card || card.classList.contains('tracker-card--hovered'))) {
         return;
     }
+    if (card === hoveredTrackerCard) {
+        card.classList.add('tracker-card--hovered');
+        return;
+    }
+    if (hoveredTrackerCard) {
+        hoveredTrackerCard.classList.remove('tracker-card--hovered');
+    }
+    hoveredTrackerCard = card;
+    if (card) {
+        card.classList.add('tracker-card--hovered');
+    }
+};
 
-    var hasCoordinates = typeof clientX === 'number' && typeof clientY === 'number';
-    if (hasCoordinates) {
-        window.__lastPointerClientX = clientX;
-        window.__lastPointerClientY = clientY;
+// For after the page changed under a pointer that may not have moved: a list
+// or a card swapped in. No event says which card the pointer is over now, so
+// here, and only here, the browser is asked.
+window.syncTrackerCardHoverState = function () {
+    if (!document) {
+        return;
     }
 
     var activeX = window.__lastPointerClientX;
     var activeY = window.__lastPointerClientY;
     var hasActivePointer = typeof activeX === 'number' && typeof activeY === 'number';
-    var hoveredCard = null;
+    var cardUnderPointer = null;
 
     if (hasActivePointer && typeof document.elementFromPoint === 'function') {
         var elementUnderPointer = document.elementFromPoint(activeX, activeY);
-        hoveredCard = elementUnderPointer && elementUnderPointer.closest
+        cardUnderPointer = elementUnderPointer && elementUnderPointer.closest
             ? elementUnderPointer.closest('.tracker-card')
             : null;
     }
 
-    var cards = document.querySelectorAll('.tracker-card--hovered');
-    Array.prototype.forEach.call(cards, function (card) {
-        if (card !== hoveredCard) {
+    // The card remembered may have left the page with the swap, and a copy can
+    // have come in carrying the class; both are put right from the page.
+    var marked = document.querySelectorAll('.tracker-card--hovered');
+    Array.prototype.forEach.call(marked, function (card) {
+        if (card !== cardUnderPointer) {
             card.classList.remove('tracker-card--hovered');
         }
     });
-
-    if (!hoveredCard) {
-        return;
-    }
-
-    hoveredCard.classList.add('tracker-card--hovered');
+    hoveredTrackerCard = null;
+    setHoveredTrackerCard(cardUnderPointer);
 };
+
+// Once more when a swap has settled, which is when htmx takes the class off
+// the card it was just given (see setHoveredTrackerCard). Without this the
+// card under a pointer at rest lost its highlight on every refresh of the
+// list and stayed without it until the pointer moved.
+document.body.addEventListener('htmx:afterSettle', function () {
+    window.syncTrackerCardHoverState();
+});
 
 document.addEventListener('pointermove', function (event) {
     if (!event || event.pointerType === 'touch') {
         return;
     }
 
-    window.syncTrackerCardHoverState(event.clientX, event.clientY);
+    window.__lastPointerClientX = event.clientX;
+    window.__lastPointerClientY = event.clientY;
+    var target = event.target;
+    setHoveredTrackerCard(target && target.closest ? target.closest('.tracker-card') : null);
 });
 
-document.addEventListener('pointerleave', function () {
+// The pointer left the page altogether: nothing is under it. Leaving one
+// element for another is not that — the next move says where it went — and a
+// capturing pointerleave listener, which hears every element being left, used
+// to clear and re-mark the card at each of those crossings.
+document.addEventListener('pointerout', function (event) {
+    if (!event || event.relatedTarget) {
+        return;
+    }
     window.__lastPointerClientX = null;
     window.__lastPointerClientY = null;
-    window.syncTrackerCardHoverState();
-}, true);
+    setHoveredTrackerCard(null);
+});
 
 // "user" is the reader asking for another list; "silent" is the page bringing
 // the list it already shows up to date (covers, a count after a delete), which

@@ -92,6 +92,25 @@ func (r *CoverCacheRepository) Delete(ctx context.Context, cacheKey string) erro
 	return nil
 }
 
+// RenameLocalPath points every entry stored under one local file name at
+// another, and reports how many it moved. It is for the shrink-covers tool,
+// which replaces an oversized stored cover with a smaller copy under a new
+// name; the server reads these names once, at startup, so it is for a
+// database no server has open.
+func (r *CoverCacheRepository) RenameLocalPath(ctx context.Context, oldName string, newName string) (int64, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE cover_cache SET local_path = ?, updated_at = CURRENT_TIMESTAMP WHERE local_path = ?
+	`, newName, oldName)
+	if err != nil {
+		return 0, fmt.Errorf("rename cover local path: %w", err)
+	}
+	moved, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("cover local path rows affected: %w", err)
+	}
+	return moved, nil
+}
+
 // DeleteNegatives drops every "no cover found" entry, mirroring the in-memory
 // invalidation that runs when a tracker's linked sources change.
 func (r *CoverCacheRepository) DeleteNegatives(ctx context.Context) error {
