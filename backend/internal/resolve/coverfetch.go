@@ -69,6 +69,10 @@ func publicAddressTransport() *http.Transport {
 	// No proxy: with HTTPS_PROXY set the dialer would vet the proxy's address
 	// and the proxy would then fetch whatever target the cover URL named.
 	transport.Proxy = nil
+	// An image host that accepts the request and then says nothing is a
+	// failure of the host's, for the shared breaker to count, not thirty
+	// seconds of a cover slot (connectors.ResponseHeaderTimeout).
+	transport.ResponseHeaderTimeout = connectors.ResponseHeaderTimeout
 	transport.DialContext = (&net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,

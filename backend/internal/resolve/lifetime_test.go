@@ -3,6 +3,8 @@ package resolve
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,6 +152,48 @@ func TestFetchQueueCloseReleasesFetchesWaitingForASlot(t *testing.T) {
 	case <-ran:
 		t.Fatal("work must not run after close")
 	default:
+	}
+}
+
+// Close racing a burst of lookups: every fetch is either counted before close
+// starts waiting or never started. run used to check the lifetime context and
+// only then join the WaitGroup, outside any lock, so a run that passed the
+// check just before close could call wg.Add while close sat in wg.Wait — a
+// WaitGroup misuse the race detector reports and the runtime may panic on —
+// and then start a fetch the shutdown was no longer waiting for.
+//
+// The window was a few instructions wide, so without the race detector this
+// test passed against the old code too (4,000 rounds of it did); it is CI's
+// -race run that makes it bite. What it checks on any run is the property
+// itself: nothing starts once close has returned.
+func TestFetchQueueCloseRacingRunStartsNothingAfterwards(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		queue := newFetchQueue(nil)
+		sem := make(chan struct{}, 4)
+		var started atomic.Int64
+
+		begin := make(chan struct{})
+		var callers sync.WaitGroup
+		for caller := 0; caller < 4; caller++ {
+			callers.Add(1)
+			go func(caller int) {
+				defer callers.Done()
+				<-begin
+				for i := 0; i < 50; i++ {
+					queue.run(fmt.Sprintf("%d/%d", caller, i), sem, "", func(context.Context) { started.Add(1) })
+				}
+			}(caller)
+		}
+		close(begin)
+		queue.close()
+		atClose := started.Load()
+
+		callers.Wait()
+		// Room for a fetch started behind close's back to show itself.
+		time.Sleep(2 * time.Millisecond)
+		if after := started.Load(); after != atClose {
+			t.Fatalf("round %d: %d fetches started after close returned", round, after-atClose)
+		}
 	}
 }
 

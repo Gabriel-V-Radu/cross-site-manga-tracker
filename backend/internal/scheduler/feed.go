@@ -2,7 +2,7 @@ package scheduler
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -56,51 +56,48 @@ const (
 	feedMissMemory = 30 * 24 * time.Hour
 )
 
+// feedsSweep reports whether the feeds are read and a sweep interval is set,
+// without both of which no tracker is ever covered.
+func (p *Poller) feedsSweep() bool {
+	return p.feedInterval > 0 && p.feedSweepInterval > 0
+}
+
 // feedCovered reports whether the update feeds watch every site the tracker
-// takes turns on, so that a cycle need only sweep behind them.
-func (p *Poller) feedCovered(tracker repository.PollingTracker, now time.Time) bool {
-	if p.feedInterval <= 0 || p.feedSweepInterval <= 0 {
+// takes turns on, so that a cycle need only sweep behind them. rotation is
+// those sites (rotationOf): the primary and the alternates under the cap.
+//
+// A linked site that never takes a turn does not count against the tracker —
+// one with no connector, a trailing feed, and an alternate past the cap. The
+// last used to: a tracker linked to three sites with feeds and a fourth
+// without was asked every cycle on account of a site the cycle never asked.
+func (p *Poller) feedCovered(tracker repository.PollingTracker, rotation []pollCandidate, now time.Time) bool {
+	if !p.feedsSweep() || len(rotation) == 0 {
 		return false
 	}
 	if tracker.FeedMissedAt != nil && now.Sub(*tracker.FeedMissedAt) < feedMissMemory {
 		return false
 	}
-	if !p.feedWatches(tracker.SourceKey, tracker.SourceURL, true) {
-		return false
-	}
-	for _, alternate := range tracker.AlternateSources {
-		if strings.TrimSpace(alternate.SourceURL) == "" {
-			continue
-		}
-		if !p.feedWatches(alternate.SourceKey, alternate.SourceURL, false) {
+	for _, member := range rotation {
+		if !p.feedWatches(member) {
 			return false
 		}
 	}
 	return true
 }
 
-// feedWatches reports whether one linked site leaves the tracker covered: it
-// publishes a feed that is being read and names this link's series. A site
-// the poller never gives a turn — one with no connector, or a trailing feed —
-// does not count against the tracker, except as its primary, which the poll
-// cannot do without.
-func (p *Poller) feedWatches(sourceKey string, sourceURL string, primary bool) bool {
-	connector, ok := p.registry.Get(sourceKey)
-	if !ok {
-		return !primary
-	}
-	if !primary && trailingFeed(connector) {
-		return true
-	}
-	feed, ok := connector.(connectors.UpdateFeed)
+// feedWatches reports whether one site of the rotation leaves the tracker
+// covered: it publishes a feed that is being read and names this link's
+// series.
+func (p *Poller) feedWatches(member pollCandidate) bool {
+	feed, ok := member.connector.(connectors.UpdateFeed)
 	if !ok {
 		return false
 	}
-	if _, ok := feed.FeedKey(sourceURL); !ok {
+	if _, ok := feed.FeedKey(member.ref.SourceURL); !ok {
 		return false
 	}
 	// A feed that keeps failing watches nothing until it is read again.
-	return p.feedFailures[connector.Key()] < feedFailuresWorthAWarning
+	return p.feedFailures[member.connector.Key()] < feedFailuresWorthAWarning
 }
 
 // feedFetchTimeout bounds one site's feed read, pacing wait included.
@@ -133,19 +130,47 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 	var (
 		reports  []FeedSiteReport
 		trackers []repository.PollingTracker
-		// loaded says trackers reflects the database: false at first and
-		// again after any poll of this tick wrote to it, so a chapter one
-		// site's feed just found is not polled for again on the next site's.
+		// loaded says trackers has been read from the database this tick.
 		loaded bool
+		// stale are the trackers whose row no longer holds what trackers
+		// says of them, because a poll of this tick changed it. One of them
+		// coming up again — the next site's feed listing the chapter this
+		// site's just found — is what sends the tick back to the database.
+		//
+		// Every poll used to, whatever it wrote: the whole library was read
+		// again, and the site's index rebuilt, before the next row was even
+		// looked at, though most rows are about series nobody tracks and
+		// which trackers are linked to which series does not change in the
+		// course of a tick.
+		stale = map[int64]struct{}{}
 	)
+	load := func() bool {
+		fresh, err := p.repo.ListForPolling(ctx)
+		if err != nil {
+			p.logger.Warn("feed tick could not load trackers", "error", err)
+			return false
+		}
+		trackers, loaded = fresh, true
+		clear(stale)
+		return true
+	}
 
 	for _, connector := range p.registry.Connectors() {
 		if ctx.Err() != nil {
 			break
 		}
 		feed, ok := connector.(connectors.UpdateFeed)
-		if !ok || coolingDown(connector) {
+		if !ok {
 			continue
+		}
+		// Asked of the connector's own breaker only, not of the shared
+		// circuits (coolingDown): those are per host, and the transport
+		// refuses the read at once and for nothing if the host it needs is
+		// the one cooling down — which the error then says, below.
+		if reporter, ok := connector.(connectors.CooldownReporter); ok {
+			if remaining, _ := reporter.CooldownRemaining(); remaining > 0 {
+				continue
+			}
 		}
 		report := FeedSiteReport{SourceKey: connector.Key()}
 
@@ -154,6 +179,20 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 		cancel()
 		if ctx.Err() != nil {
 			break
+		}
+		var refused *connectors.SourceCoolingDownError
+		if errors.As(err, &refused) {
+			// Refused locally: the site is cooling down, or this process has
+			// too much queued for it. The feed was not read, which is not the
+			// feed failing. Counted as that, the ten minutes of a cooldown
+			// were two or three "failures" in a row — enough to declare the
+			// feed broken and put every tracker linked to the site back on
+			// every cycle, which is the last thing a site that has just rate
+			// limited us needs (MangaHub, Pi log, 2026-11-18).
+			p.logger.Debug("feed not read: refused locally", "sourceKey", connector.Key(), "error", err)
+			report.Err = err
+			reports = append(reports, report)
+			continue
 		}
 		if err != nil {
 			// One failed read only means this tick learned nothing from the
@@ -178,28 +217,28 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 		delete(p.feedFailures, connector.Key())
 		report.Rows = len(rows)
 
-		news := p.feedNews(connector.Key(), rows)
+		news, listing := p.feedNews(connector.Key(), rows)
 		report.News = len(news)
-		if len(news) == 0 {
-			reports = append(reports, report)
-			continue
-		}
 
 		var index map[string][]repository.PollingTracker
 		for _, row := range news {
 			if ctx.Err() != nil {
 				break
 			}
-			if !loaded {
-				trackers, err = p.repo.ListForPolling(ctx)
-				if err != nil {
-					p.logger.Warn("feed tick could not load trackers", "error", err)
-					return append(reports, report)
-				}
-				loaded = true
-				index = nil
+			// A tick that cannot read the trackers stops here, and leaves
+			// the listing unremembered: remembered, these rows would be old
+			// news on the next tick and the chapters behind them would wait
+			// for a cycle, for want of one database read.
+			if !loaded && !load() {
+				return append(reports, report)
 			}
 			if index == nil {
+				index = feedIndex(trackers, connector.Key(), feed)
+			}
+			if anyStale(index[row.Key], stale) {
+				if !load() {
+					return append(reports, report)
+				}
 				index = feedIndex(trackers, connector.Key(), feed)
 			}
 			for _, tracker := range index[row.Key] {
@@ -212,11 +251,19 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 					continue
 				}
 				report.Polled++
-				if p.pollTracker(ctx, tracker, plan, &cycleStats{}) {
+				result := p.pollTracker(ctx, tracker, plan, &cycleStats{})
+				if result.found {
 					report.Found++
 				}
-				loaded = false
+				if result.stale {
+					stale[tracker.ID] = struct{}{}
+				}
 			}
+		}
+		// Not when shutdown cut the rows short: the ones it never reached
+		// would be remembered as acted on.
+		if ctx.Err() == nil {
+			p.feedSeen[connector.Key()] = listing
 		}
 		if report.Polled > 0 {
 			p.logger.Debug("feed prompted polls",
@@ -228,8 +275,23 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 	return reports
 }
 
+// anyStale reports whether a poll of this tick has changed any of trackers
+// since they were read.
+func anyStale(trackers []repository.PollingTracker, stale map[int64]struct{}) bool {
+	if len(stale) == 0 {
+		return false
+	}
+	for _, tracker := range trackers {
+		if _, ok := stale[tracker.ID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // feedNews returns the rows a site's feed did not carry, with that chapter,
-// the last time it was read, and remembers this reading for the next one.
+// the last time it was read, and the reading itself — series key to chapter —
+// for the caller to remember (feedSeen) once it has acted on the news.
 //
 // What is remembered is the feed as it stood, not everything ever seen. A
 // series still in the listing with the same chapter is old news and is not
@@ -242,19 +304,18 @@ func (p *Poller) RunFeeds(ctx context.Context) []FeedSiteReport {
 // The first reading after a start has nothing to compare with: every row is
 // news, which polls each tracker the feed shows ahead of its stored chapter
 // once.
-func (p *Poller) feedNews(sourceKey string, rows []connectors.SeriesUpdate) []connectors.SeriesUpdate {
+func (p *Poller) feedNews(sourceKey string, rows []connectors.SeriesUpdate) (news []connectors.SeriesUpdate, listing map[string]float64) {
 	previous := p.feedSeen[sourceKey]
-	current := make(map[string]float64, len(rows))
-	news := make([]connectors.SeriesUpdate, 0, len(rows))
+	listing = make(map[string]float64, len(rows))
+	news = make([]connectors.SeriesUpdate, 0, len(rows))
 	for _, row := range rows {
-		current[row.Key] = row.Chapter
+		listing[row.Key] = row.Chapter
 		if chapter, seen := previous[row.Key]; seen && sameChapterNumber(chapter, row.Chapter) {
 			continue
 		}
 		news = append(news, row)
 	}
-	p.feedSeen[sourceKey] = current
-	return news
+	return news, listing
 }
 
 // feedIndex groups the trackers linked to a site by the key its feed names
@@ -308,5 +369,5 @@ func (p *Poller) planFeedPoll(tracker repository.PollingTracker, sourceKey strin
 	if len(ordered) == 0 {
 		return pollPlan{}, false
 	}
-	return pollPlan{candidates: append(ordered, rest...), feed: sourceKey, feedCovered: plan.feedCovered}, true
+	return pollPlan{candidates: append(ordered, rest...), feed: sourceKey, feedSwept: plan.feedSwept}, true
 }

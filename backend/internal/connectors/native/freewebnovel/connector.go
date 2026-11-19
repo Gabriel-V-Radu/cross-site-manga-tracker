@@ -148,6 +148,9 @@ func newChromeHTTPClient(timeout time.Duration) *http.Client {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   12 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// This transport is its own, so it has to be given the bound the
+		// shared one carries or a hung freewebnovel never opens its circuit.
+		ResponseHeaderTimeout: connectors.ResponseHeaderTimeout,
 	}
 	return &http.Client{Timeout: timeout, Jar: jar, Transport: connectors.ThrottleTransport(transport)}
 }

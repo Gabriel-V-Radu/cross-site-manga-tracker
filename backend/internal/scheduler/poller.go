@@ -217,8 +217,28 @@ func (p *Poller) StopWait(timeout time.Duration) {
 // cycleStats accumulates one cycle's summary counters across the per-source
 // shard goroutines.
 type cycleStats struct {
-	skippedIdle     atomic.Int64
+	skippedIdle atomic.Int64
+	// coolingResolves are resolves refused because the site is cooling down,
+	// and busyResolves the ones refused because this process already had too
+	// many requests queued for the host. Both are refused locally, by the
+	// same error type, and both used to be counted and logged as "cooling
+	// down" — which told whoever read the log that a site was failing when
+	// the only thing wrong was the length of our own queue.
 	coolingResolves atomic.Int64
+	busyResolves    atomic.Int64
+}
+
+// pollResult is what one poll did, as far as its caller needs to know.
+type pollResult struct {
+	// found: the poll moved the tracker's chapter up and the write went
+	// through, which is how a feed tick counts what it found.
+	found bool
+	// stale: the tracker's row no longer holds what the poll was planned
+	// from — its chapter or its primary link changed, or the write was
+	// refused or failed and what the row holds is not known. Anything else a
+	// poll writes (when it checked, which sites it reached) leaves the
+	// snapshot good for another poll, the stale-write guard included.
+	stale bool
 }
 
 // plannedPoll is one tracker due this cycle, with the order its poll asks its
@@ -318,6 +338,9 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	if cooling := stats.coolingResolves.Load(); cooling > 0 {
 		p.logger.Info("poll cycle hit cooling-down sources", "resolvesRefused", cooling)
 	}
+	if busy := stats.busyResolves.Load(); busy > 0 {
+		p.logger.Info("poll cycle found its own request queue full", "resolvesRefused", busy)
+	}
 
 	return nil
 }
@@ -351,9 +374,9 @@ type pollAnswer struct {
 // the same number; otherwise it is held, and stands only if no site after it
 // answers at all.
 //
-// It reports whether the poll moved the tracker's chapter up and the write
-// went through, which is how a feed tick counts what it found.
-func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) bool {
+// It reports what the poll did (pollResult): a cycle has no use for it, a feed
+// tick counts what it found by it and learns which trackers to read again.
+func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTracker, plan pollPlan, stats *cycleStats) pollResult {
 	board := p.registry.HealthBoard()
 
 	var (
@@ -390,7 +413,7 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// last_checked_at with a dead context only adds a warning per
 		// in-flight tracker to the shutdown log.
 		if ctx.Err() != nil {
-			return false
+			return pollResult{}
 		}
 		if err == nil && result == nil {
 			err = errors.New("source returned no result")
@@ -405,7 +428,11 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			if errors.As(err, &cooling) {
 				// Refused locally: the site was never reached, so this does
 				// not use up its turn.
-				stats.coolingResolves.Add(1)
+				if cooling.QueueFull {
+					stats.busyResolves.Add(1)
+				} else {
+					stats.coolingResolves.Add(1)
+				}
 			} else {
 				failed = append(failed, candidate)
 			}
@@ -472,11 +499,13 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	}
 
 	series := seriesOf(tracker)
-	var turnCooling *connectors.SourceCoolingDownError
-	turnWasCooling := errors.As(turnErr, &turnCooling)
+	// turnWasRefused: the site whose turn it was was never asked — cooling
+	// down, or our own queue for it full.
+	var turnRefusal *connectors.SourceCoolingDownError
+	turnWasRefused := errors.As(turnErr, &turnRefusal)
 	if turnErr != nil {
 		board.RecordTurnFailure(turn.ref.SourceKey, series, firstAnswer != nil)
-		if firstAnswer != nil && !turnWasCooling {
+		if firstAnswer != nil && !turnWasRefused {
 			p.logger.Info("poll fell back to another source",
 				"trackerId", tracker.ID,
 				"turnSourceKey", turn.ref.SourceKey,
@@ -490,8 +519,12 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// A cooling-down source is a known, already-logged outage; one Warn
 		// per tracker per cycle for it is noise, and the cycle summary
 		// reports the count. Anything else is worth a line of its own.
-		if turnWasCooling {
-			p.logger.Debug("poll resolve skipped: source cooling down", "trackerId", tracker.ID, "sourceKey", turn.ref.SourceKey, "error", turnErr)
+		if turnWasRefused {
+			reason := "poll resolve skipped: source cooling down"
+			if turnRefusal.QueueFull {
+				reason = "poll resolve skipped: local request queue full"
+			}
+			p.logger.Debug(reason, "trackerId", tracker.ID, "sourceKey", turn.ref.SourceKey, "error", turnErr)
 		} else {
 			p.logger.Warn("poll resolve failed", "trackerId", tracker.ID, "sourceKey", turn.ref.SourceKey, "error", turnErr, "sitesTried", len(plan.candidates))
 		}
@@ -507,12 +540,12 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 		// comes round again next cycle, which costs a refusal until the site is
 		// back.
 		if len(failed) == 0 {
-			return false
+			return pollResult{}
 		}
 		if err := p.repo.MarkPollCheckedAt(ctx, tracker.ID, now, sourcePolls(nil, failed, nil)); err != nil {
 			p.logger.Warn("poll mark checked failed", "trackerId", tracker.ID, "error", err)
 		}
-		return false
+		return pollResult{}
 	}
 
 	var reported *float64
@@ -629,8 +662,16 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	// it came out, is one they missed. The tracker is then asked every cycle
 	// again for a while (feedCovered), so a title the feeds cannot see is late
 	// once and not on every chapter.
+	//
+	// Only for a tracker the feeds' watch had actually slowed (feedSwept). One
+	// whose own cadence is longer than the sweep — dropped, on hold, finished,
+	// dormant — is asked just as rarely with the feeds or without, so a
+	// chapter it finds late is late because of that cadence: marking it
+	// changed nothing about how often it is asked, and the log line below
+	// said it was back on every cycle when it was still on every twelve hours
+	// (#636, #659 and #660 on the Pi, all dropped).
 	feedMissedBy := time.Duration(0)
-	if found && plan.feed == "" && plan.feedCovered && reportedReleaseAt != nil {
+	if found && plan.feed == "" && plan.feedSwept && reportedReleaseAt != nil {
 		if late := now.Sub(*reportedReleaseAt); late > feedMissGrace && late < feedMissHorizon {
 			feedMissedBy = late
 		}
@@ -661,11 +702,11 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 	})
 	if err != nil {
 		p.logger.Warn("poll update state failed", "trackerId", tracker.ID, "error", err)
-		return false
+		return pollResult{stale: true}
 	}
 	if !applied {
 		p.logger.Debug("poll update skipped: tracker changed mid-cycle", "trackerId", tracker.ID, "snapshotSourceId", tracker.SourceID)
-		return false
+		return pollResult{stale: true}
 	}
 
 	if found {
@@ -691,7 +732,10 @@ func (p *Poller) pollTracker(ctx context.Context, tracker repository.PollingTrac
 			"sourceKey", answer.candidate.ref.SourceKey,
 			"foundAfter", feedMissedBy.Round(time.Minute).String())
 	}
-	return found
+	// The two things the stale-write guard holds a later poll's snapshot to,
+	// besides the source itself, which no poll changes.
+	primaryLinkMoved := canonicalSourceURL != "" && canonicalSourceURL != tracker.SourceURL
+	return pollResult{found: found, stale: chapterMoved || primaryLinkMoved}
 }
 
 // sourcePolls turns the sites one poll reached into the rotation's memory: a
@@ -984,15 +1028,28 @@ func (p *Poller) shouldSkipIdle(tracker repository.PollingTracker) bool {
 	return now.Sub(*tracker.LastCheckedAt) < interval
 }
 
-// cadence is the least time between two polls of the tracker (pollEvery), and
-// whether that reckons with the update feeds watching it.
+// cadence is the least time between two polls of the tracker, and whether the
+// update feeds watching it are what made it that long (see cadenceOf).
 func (p *Poller) cadence(tracker repository.PollingTracker, now time.Time) (time.Duration, bool) {
-	covered := p.feedCovered(tracker, now)
-	sweep := time.Duration(0)
-	if covered {
-		sweep = p.feedSweepInterval
+	if !p.feedsSweep() {
+		return pollEvery(tracker, p.idleInterval, 0, now), false
 	}
-	return pollEvery(tracker, p.idleInterval, sweep, now), covered
+	rotation, _, _ := p.rotationOf(tracker)
+	return p.cadenceOf(tracker, rotation, now)
+}
+
+// cadenceOf is cadence for a tracker whose rotation (rotationOf) the caller
+// already has. swept is true only when the feeds watch the tracker and it is
+// asked less often for it: a tracker whose own cadence is already longer than
+// the sweep is watched by the feeds too, but nothing about how often a cycle
+// asks it follows from that.
+func (p *Poller) cadenceOf(tracker repository.PollingTracker, rotation []pollCandidate, now time.Time) (every time.Duration, swept bool) {
+	unwatched := pollEvery(tracker, p.idleInterval, 0, now)
+	if !p.feedCovered(tracker, rotation, now) {
+		return unwatched, false
+	}
+	every = pollEvery(tracker, p.idleInterval, p.feedSweepInterval, now)
+	return every, every > unwatched
 }
 
 // sameChapterNumber compares two chapter numbers with a tolerance. The pending

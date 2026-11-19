@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"net/url"
 	"testing"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
 )
 
 // The address guard behind the cover downloader. netip's own predicates cover
@@ -75,5 +77,15 @@ func TestCheckCoverTargetVetsSchemeAndLiterals(t *testing.T) {
 func TestPublicAddressTransportIgnoresProxy(t *testing.T) {
 	if publicAddressTransport().Proxy != nil {
 		t.Fatal("the cover transport must not use a proxy")
+	}
+}
+
+// The cover transport is its own, not the connectors' shared one, so it has to
+// carry the same bound on a host that accepts a request and never answers:
+// without it such an image host fails only on the download's own deadline,
+// which the shared breaker rightly reads as the caller giving up.
+func TestPublicAddressTransportBoundsTheWaitForAnAnswer(t *testing.T) {
+	if got := publicAddressTransport().ResponseHeaderTimeout; got != connectors.ResponseHeaderTimeout || got <= 0 {
+		t.Fatalf("cover transport ResponseHeaderTimeout = %s, want the shared %s", got, connectors.ResponseHeaderTimeout)
 	}
 }

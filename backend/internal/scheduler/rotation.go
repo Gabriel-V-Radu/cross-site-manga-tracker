@@ -62,10 +62,11 @@ type pollPlan struct {
 	// feed names the site whose update feed prompted this poll, "" for a
 	// tracker's ordinary turn in a cycle (see planFeedPoll).
 	feed string
-	// feedCovered says the tracker was, when this poll was planned, one the
-	// update feeds watch (Poller.feedCovered): a chapter a cycle then finds
-	// long after it came out is one the feeds missed.
-	feedCovered bool
+	// feedSwept says the tracker was, when this poll was planned, asked about
+	// less often because the update feeds watch it (Poller.cadenceOf): a
+	// chapter a cycle then finds long after it came out is one the feeds
+	// missed, and one the tracker would have had sooner without them.
+	feedSwept bool
 }
 
 // shardKey is the source this poll's first request should go to, which is
@@ -84,12 +85,21 @@ func (plan pollPlan) shardKey() string {
 	return plan.candidates[0].ref.SourceKey
 }
 
+// coolingDown reports whether a request to the connector's site would be
+// refused locally right now, by the connector's own breaker or by the shared
+// throttle's circuit for one of its hosts. Only ComicK and MangaFire keep a
+// breaker of their own; asking the connector alone, a site stopped by the
+// shared circuit — MangaHub after a rate limit — still read as available, and
+// every tracker whose turn it was kept its place on that site's shard, to be
+// refused there one after another and fall back onto hosts other shards were
+// already queuing on.
+//
+// The shared circuits are per host and a connector may claim several, so this
+// can say yes while the host the next request needs is fine (an image host
+// under the site's domain). It therefore only ever picks a shard; whether a
+// request goes out is the transport's decision, host by host.
 func coolingDown(connector connectors.Connector) bool {
-	reporter, ok := connector.(connectors.CooldownReporter)
-	if !ok {
-		return false
-	}
-	remaining, _ := reporter.CooldownRemaining()
+	remaining, _ := connectors.CooldownOf(connector, time.Now())
 	return remaining > 0
 }
 
@@ -102,12 +112,35 @@ func trailingFeed(connector connectors.Connector) bool {
 // reports false when the primary has no connector: such a tracker is reported
 // on the health board for the reader to relink rather than polled.
 func (p *Poller) planPoll(tracker repository.PollingTracker, cycle uint64) (pollPlan, bool) {
-	primaryConnector, ok := p.registry.Get(tracker.SourceKey)
+	rotation, fallbackOnly, ok := p.rotationOf(tracker)
 	if !ok {
 		return pollPlan{}, false
 	}
 
-	rotation := []pollCandidate{{
+	every, swept := p.cadenceOf(tracker, rotation, p.now())
+	if every == 0 {
+		slotRotation(rotation, tracker.ID, cycle)
+	} else {
+		orderRotation(rotation, tracker.ID)
+	}
+	return pollPlan{candidates: append(rotation, fallbackOnly...), feedSwept: swept}, true
+}
+
+// rotationOf splits a tracker's linked sites into the ones that take turns
+// being asked — the primary and the alternates that fit under the cap, in no
+// particular order yet — and the ones asked only as fallbacks. It reports
+// false when the primary has no connector.
+//
+// It is its own function because two things must agree on who takes turns:
+// the plan, and whether the update feeds watch the tracker (feedCovered),
+// which is a question about exactly these sites.
+func (p *Poller) rotationOf(tracker repository.PollingTracker) (rotation []pollCandidate, fallbackOnly []pollCandidate, ok bool) {
+	primaryConnector, ok := p.registry.Get(tracker.SourceKey)
+	if !ok {
+		return nil, nil, false
+	}
+
+	rotation = []pollCandidate{{
 		ref: repository.TrackerSourceRef{
 			SourceID:     tracker.SourceID,
 			SourceKey:    tracker.SourceKey,
@@ -120,7 +153,7 @@ func (p *Poller) planPoll(tracker repository.PollingTracker, cycle uint64) (poll
 		trusted:   true,
 	}}
 
-	var eligible, fallbackOnly []pollCandidate
+	var eligible []pollCandidate
 	for _, ref := range tracker.AlternateSources {
 		if strings.TrimSpace(ref.SourceURL) == "" {
 			continue
@@ -147,14 +180,7 @@ func (p *Poller) planPoll(tracker repository.PollingTracker, cycle uint64) (poll
 		}
 		fallbackOnly = append(fallbackOnly, candidate)
 	}
-
-	every, covered := p.cadence(tracker, p.now())
-	if every == 0 {
-		slotRotation(rotation, tracker.ID, cycle)
-	} else {
-		orderRotation(rotation, tracker.ID)
-	}
-	return pollPlan{candidates: append(rotation, fallbackOnly...), feedCovered: covered}, true
+	return rotation, fallbackOnly, true
 }
 
 // slotRotation orders the rotation of a tracker that is asked every cycle: the

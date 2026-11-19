@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,6 +456,230 @@ func TestSweepFindingALateChapterPutsTheTrackerBackOnEveryCycle(t *testing.T) {
 			t.Fatalf("a find the feed prompted is not a miss, got %v", repo.items[0].FeedMissedAt)
 		}
 	})
+}
+
+// A feed read refused locally — the site cooling down, or our own queue for it
+// full — is the feed not being read, not the feed failing. Counted as
+// failures, the two or three ticks inside one ten-minute cooldown declared
+// the feed broken and put every tracker linked to the site back on every
+// cycle, just as the site had asked for fewer requests (MangaHub on the Pi,
+// 2026-11-18).
+func TestFeedReadRefusedLocallyIsNotAFeedFailure(t *testing.T) {
+	now := time.Date(2026, 11, 18, 2, 0, 0, 0, time.UTC)
+
+	for name, refusal := range map[string]*connectors.SourceCoolingDownError{
+		"cooling down": {Host: "beta", RetryAfter: 8 * time.Minute},
+		"queue full":   {Host: "beta", RetryAfter: 70 * time.Second, QueueFull: true},
+	} {
+		tracker := feedTracker(1, "one", 10)
+		checked := now.Add(-30 * time.Minute)
+		tracker.LastCheckedAt = &checked
+		repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+		alpha, beta := newFeedSite("alpha", 10), newFeedSite("beta", 10)
+		beta.feedErr = fmt.Errorf("read updates: %w", refusal)
+		poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+		setNow(now)
+
+		for tick := 0; tick <= feedFailuresWorthAWarning; tick++ {
+			report := reportFor(t, poller.RunFeeds(context.Background()), "beta")
+			if report.Err == nil {
+				t.Fatalf("%s: the tick must still say the feed was not read: %+v", name, report)
+			}
+		}
+		if got := poller.feedFailures["beta"]; got != 0 {
+			t.Fatalf("%s: a local refusal counted as %d feed failures", name, got)
+		}
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("%s: run once: %v", name, err)
+		}
+		if resolves := alpha.calls.Load() + beta.calls.Load(); resolves != 0 {
+			t.Fatalf("%s: the tracker must still be left to the feeds, got %d resolves", name, resolves)
+		}
+	}
+
+	// A read that really fails still counts, as before.
+	tracker := feedTracker(1, "one", 10)
+	repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+	alpha, beta := newFeedSite("alpha", 10), newFeedSite("beta", 10)
+	beta.feedErr = errors.New("listing moved")
+	poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+	setNow(now)
+	for tick := 0; tick < feedFailuresWorthAWarning; tick++ {
+		poller.RunFeeds(context.Background())
+	}
+	if got := poller.feedFailures["beta"]; got != feedFailuresWorthAWarning {
+		t.Fatalf("a failing read must count, got %d", got)
+	}
+}
+
+// flakyRepo is a statefulRepo that counts how often the trackers are read and
+// can fail the next reads.
+type flakyRepo struct {
+	*statefulRepo
+	loads     atomic.Int32
+	failLoads atomic.Int32
+}
+
+func (r *flakyRepo) ListForPolling(ctx context.Context) ([]repository.PollingTracker, error) {
+	r.loads.Add(1)
+	if r.failLoads.Load() > 0 {
+		r.failLoads.Add(-1)
+		return nil, errors.New("database is locked")
+	}
+	return r.statefulRepo.ListForPolling(ctx)
+}
+
+// A tick that cannot read the trackers must leave the feed's news news. The
+// listing used to be remembered the moment it was read, so one failed
+// database read turned every chapter in it into old news and left them all to
+// the next cycle.
+func TestFeedTickThatCannotLoadTrackersKeepsItsNews(t *testing.T) {
+	repo := &flakyRepo{statefulRepo: &statefulRepo{items: []*repository.PollingTracker{feedTracker(1, "one", 10)}}}
+	alpha, beta := newSite("alpha", 10), newFeedSite("beta", 11)
+	beta.list(feedRow("https://beta/one", 11))
+	poller, _ := cyclingPoller(repo, registryOf(t, alpha, beta))
+
+	repo.failLoads.Store(1)
+	report := reportFor(t, poller.RunFeeds(context.Background()), "beta")
+	if report.News != 1 || report.Polled != 0 {
+		t.Fatalf("the tick that could not load: %+v, want the news seen and nothing polled", report)
+	}
+
+	report = reportFor(t, poller.RunFeeds(context.Background()), "beta")
+	if report.News != 1 || report.Polled != 1 || report.Found != 1 {
+		t.Fatalf("the next tick must still find the row new and act on it: %+v", report)
+	}
+	if got := *repo.items[0].LatestKnownChapter; got != 11 {
+		t.Fatalf("tracker reads %.0f, want the chapter the feed pointed at", got)
+	}
+
+	if report = reportFor(t, poller.RunFeeds(context.Background()), "beta"); report.News != 0 {
+		t.Fatalf("acted on, the listing is old news: %+v", report)
+	}
+}
+
+// A tick reads the trackers once, however many chapters it finds: which
+// trackers are linked to which series does not change between its polls. It
+// goes back to the database only when a tracker a poll of this tick changed
+// comes up again, which is what keeps the next site's feed from polling for a
+// chapter this site's just found. Every poll used to send it back, before the
+// next row — most often about a series nobody tracks — was even looked at.
+func TestFeedTickReadsTheTrackersAgainOnlyForOneItChanged(t *testing.T) {
+	repo := &flakyRepo{statefulRepo: &statefulRepo{items: []*repository.PollingTracker{
+		feedTracker(1, "one", 10),
+		feedTracker(2, "two", 10),
+		feedTracker(3, "three", 10),
+	}}}
+	alpha, beta := newFeedSite("alpha", 11), newFeedSite("beta", 11)
+	beta.list(
+		feedRow("https://beta/one", 11), feedRow("https://beta/untracked", 3),
+		feedRow("https://beta/two", 11), feedRow("https://beta/elsewhere", 7),
+		feedRow("https://beta/three", 11),
+	)
+	poller, _ := cyclingPoller(repo, registryOf(t, alpha, beta))
+
+	report := reportFor(t, poller.RunFeeds(context.Background()), "beta")
+	if report.Polled != 3 || report.Found != 3 {
+		t.Fatalf("beta's feed must reach all three trackers: %+v", report)
+	}
+	if got := repo.loads.Load(); got != 1 {
+		t.Fatalf("three chapters on three different trackers took %d reads of the trackers, want 1", got)
+	}
+
+	// Next tick both sites list a new chapter of series one. Alpha is read
+	// first and finds it; beta's row then names a tracker this tick changed.
+	repo.loads.Store(0)
+	alpha.setChapter(12)
+	beta.setChapter(12)
+	alpha.list(feedRow("https://alpha/one", 12))
+	beta.list(
+		feedRow("https://beta/one", 12), feedRow("https://beta/untracked", 3),
+		feedRow("https://beta/two", 11), feedRow("https://beta/elsewhere", 7),
+		feedRow("https://beta/three", 11),
+	)
+	reports := poller.RunFeeds(context.Background())
+	if report := reportFor(t, reports, "alpha"); report.Polled != 1 || report.Found != 1 {
+		t.Fatalf("alpha's feed finds chapter 12: %+v", report)
+	}
+	if report := reportFor(t, reports, "beta"); report.News != 1 || report.Polled != 0 {
+		t.Fatalf("beta's feed shows nothing the tracker does not have by now: %+v", report)
+	}
+	if got := repo.loads.Load(); got != 2 {
+		t.Fatalf("expected the one extra read for the tracker that changed, got %d reads", got)
+	}
+}
+
+// Only the sites a tracker takes turns on decide whether the feeds watch it.
+// An alternate past the rotation's cap is never asked in a cycle unless
+// everything else fails, so its having no feed takes nothing away — but it
+// used to put the tracker back on every cycle.
+func TestFeedCoverageIsDecidedByTheSitesThatTakeTurns(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	polled := func(t *testing.T, prepare func(tracker *repository.PollingTracker)) bool {
+		t.Helper()
+		tracker := feedTracker(1, "one", 10)
+		tracker.AlternateSources = append(tracker.AlternateSources,
+			repository.TrackerSourceRef{SourceID: 3, SourceKey: "gamma", SourceURL: "https://gamma/one", InStep: true},
+			repository.TrackerSourceRef{SourceID: 4, SourceKey: "delta", SourceURL: "https://delta/one", InStep: true},
+		)
+		checked := now.Add(-30 * time.Minute)
+		tracker.LastCheckedAt = &checked
+		if prepare != nil {
+			prepare(tracker)
+		}
+		repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+		alpha, beta, gamma := newFeedSite("alpha", 10), newFeedSite("beta", 10), newFeedSite("gamma", 10)
+		delta := newSite("delta", 10) // publishes no feed
+		poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta, gamma, delta))
+		setNow(now)
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run once: %v", err)
+		}
+		return alpha.calls.Load()+beta.calls.Load()+gamma.calls.Load()+delta.calls.Load() > 0
+	}
+
+	if polled(t, nil) {
+		t.Fatal("a fourth site that never takes a turn must not cost the tracker its coverage")
+	}
+	// Gamma falls out of step, so the feedless delta takes its seat: now a
+	// site the tracker does take turns on has no feed.
+	if !polled(t, func(tracker *repository.PollingTracker) { tracker.AlternateSources[1].InStep = false }) {
+		t.Fatal("a site in the rotation without a feed leaves the tracker to the cycle")
+	}
+}
+
+// A late chapter counts against the feeds only for a tracker their watch had
+// slowed down. One whose own cadence is longer than the sweep is asked as
+// rarely with the feeds as without them, so marking it changed nothing but
+// the log, which announced it was "asked every cycle again" while it stayed
+// on every twelve hours (#636, #659 and #660 on the Pi, all dropped).
+func TestLateChapterOnATrackerTheFeedsDidNotSlowIsNoFeedMiss(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	for _, status := range []string{"dropped", "on_hold", "completed", "plan_to_read"} {
+		tracker := feedTracker(1, "one", 10)
+		tracker.Status = status
+		checked := now.Add(-13 * time.Hour)
+		tracker.LastCheckedAt = &checked
+		repo := &statefulRepo{items: []*repository.PollingTracker{tracker}}
+		alpha, beta := newFeedSite("alpha", 11), newFeedSite("beta", 11)
+		releasedAt := now.Add(-2 * time.Hour)
+		alpha.releasedAt, beta.releasedAt = &releasedAt, &releasedAt
+		poller, setNow := sweepingPoller(repo, registryOf(t, alpha, beta))
+		setNow(now)
+
+		if err := poller.RunOnce(context.Background()); err != nil {
+			t.Fatalf("%s: run once: %v", status, err)
+		}
+		if got := *repo.items[0].LatestKnownChapter; got != 11 {
+			t.Fatalf("%s: the cycle must find chapter 11, tracker reads %.0f", status, got)
+		}
+		if repo.items[0].FeedMissedAt != nil {
+			t.Fatalf("%s: a tracker on its own slow cadence must not be marked as missed by the feeds, got %v",
+				status, repo.items[0].FeedMissedAt)
+		}
+	}
 }
 
 // The rest between two cycles is where the feeds are read: every feed

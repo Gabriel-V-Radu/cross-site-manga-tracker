@@ -203,7 +203,15 @@ const closeGrace = 2 * time.Second
 type fetchQueue struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
-	gate     *PageGate
+	// closed is set by close, under mu, before it waits. run reads it and
+	// joins the WaitGroup under the same lock, so a fetch is either counted
+	// before close starts waiting or never started. Checked through the
+	// lifetime context instead, a run that passed the check just before
+	// close could call wg.Add while close was in wg.Wait — a use of
+	// WaitGroup that Go documents as a race and may panic on — and then
+	// start a fetch the shutdown had already stopped waiting for.
+	closed bool
+	gate   *PageGate
 
 	lifetime context.Context
 	cancel   context.CancelFunc
@@ -225,19 +233,15 @@ func newFetchQueue(gate *PageGate) *fetchQueue {
 // handed to work is the queue's lifetime: cancelled by close, never by the
 // request that queued it.
 func (q *fetchQueue) run(key string, sem chan struct{}, pageKey string, work func(ctx context.Context)) {
-	if q.lifetime.Err() != nil {
-		return
-	}
-
 	q.mu.Lock()
-	if q.inFlight[key] {
+	if q.closed || q.inFlight[key] {
 		q.mu.Unlock()
 		return
 	}
 	q.inFlight[key] = true
+	q.wg.Add(1)
 	q.mu.Unlock()
 
-	q.wg.Add(1)
 	go func() {
 		defer q.wg.Done()
 		defer func() {
@@ -267,6 +271,9 @@ func (q *fetchQueue) run(key string, sem chan struct{}, pageKey string, work fun
 // Idempotent, for the same reason the sweeper's Close is.
 func (q *fetchQueue) close() {
 	q.once.Do(func() {
+		q.mu.Lock()
+		q.closed = true
+		q.mu.Unlock()
 		q.cancel()
 		done := make(chan struct{})
 		go func() {

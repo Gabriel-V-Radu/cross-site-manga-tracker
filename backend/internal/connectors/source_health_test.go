@@ -269,6 +269,73 @@ func TestSourceHealthBoardCoverageAndOrphans(t *testing.T) {
 	}
 }
 
+// A tracker on a retired source that has since been relinked or deleted must
+// leave the panel with the next cycle. The list used to stay until a restart:
+// only a cycle that reported the source again could replace it, and with the
+// last such tracker gone no cycle ever did.
+func TestSourceHealthBoardDropsOrphansThatAreGone(t *testing.T) {
+	board, _ := testBoard()
+	chapter := 1.0
+	runCycle(board, func() {
+		board.RecordMissingConnector("mangabuddy", TrackedSeries{ID: 3, Title: "C", ProfileID: 1})
+		board.RecordMissingConnector("weebcentral", TrackedSeries{ID: 4, Title: "D", ProfileID: 1})
+		board.RecordResolve("comick", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil)
+	})
+	if orphans := board.view().report.Orphans; len(orphans) != 2 {
+		t.Fatalf("precondition: both retired sources reported, got %+v", orphans)
+	}
+
+	// Tracker 3 was relinked; tracker 4 is still on its retired source.
+	runCycle(board, func() {
+		board.RecordMissingConnector("weebcentral", TrackedSeries{ID: 4, Title: "D", ProfileID: 1})
+	})
+	orphans := board.view().report.Orphans
+	if len(orphans) != 1 || orphans[0].Key != "weebcentral" || orphans[0].Count != 1 {
+		t.Fatalf("only the source still reported keeps its orphans, got %+v", orphans)
+	}
+	// A source the cycle merely had no reason to ask keeps its verdict.
+	if row := boardRow(t, board, "comick"); row.State != SourceStateOK || row.Answered != 1 {
+		t.Fatalf("an unasked source keeps what the last cycle that asked it said: %+v", row)
+	}
+}
+
+// The poller also resolves between cycles, when an update feed prompts a poll.
+// Those resolves are not part of any cycle's sample and must not be folded
+// into the next one's verdict: a single feed-prompted failure followed by a
+// cycle that never asked the site read as "nothing got through".
+func TestSourceHealthBoardKeepsResolvesBetweenCyclesOutOfTheVerdict(t *testing.T) {
+	board, now := testBoard()
+	chapter := 1.0
+	runCycle(board, func() { board.RecordResolve("mangahub", RoleTurn, &MangaResult{LatestChapter: &chapter}, nil) })
+
+	*now = now.Add(5 * time.Minute)
+	failedAt := *now
+	board.RecordResolve("mangahub", RoleTurn, nil, &HTTPStatusError{StatusCode: 503})
+	board.RecordTurnFailure("mangahub", TrackedSeries{ID: 1, Title: "A", ProfileID: 1}, false)
+	board.RecordMissingConnector("mangabuddy", TrackedSeries{ID: 2, Title: "B", ProfileID: 1})
+
+	*now = now.Add(25 * time.Minute)
+	runCycle(board, func() {})
+	row := boardRow(t, board, "mangahub")
+	if row.State != SourceStateOK || row.Failed != 0 || row.UncheckedCount != 0 || row.Answered != 1 {
+		t.Fatalf("a resolve between cycles must not reach the next cycle's verdict: %+v", row)
+	}
+	// What it does leave is true whenever it happened.
+	if !row.LastFailureAt.Equal(failedAt) || !row.LastAskedAt.Equal(failedAt) || row.LastError == "" {
+		t.Fatalf("when the site last failed, and how, is still recorded: %+v", row)
+	}
+	if orphans := board.view().report.Orphans; len(orphans) != 0 {
+		t.Fatalf("nothing is filed outside a cycle, got orphans %+v", orphans)
+	}
+
+	// And a cycle's own failure still counts.
+	*now = now.Add(30 * time.Minute)
+	runCycle(board, func() { board.RecordResolve("mangahub", RoleTurn, nil, &HTTPStatusError{StatusCode: 503}) })
+	if row := boardRow(t, board, "mangahub"); row.State != SourceStateDegraded || row.Failed != 1 {
+		t.Fatalf("a failure during a cycle marks the source: %+v", row)
+	}
+}
+
 func TestSourceHealthBoardLifecycle(t *testing.T) {
 	board, now := testBoard()
 	if report := board.view().report; report.PollerStarted {

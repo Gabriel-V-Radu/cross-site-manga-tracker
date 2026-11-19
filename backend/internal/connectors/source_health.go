@@ -271,8 +271,8 @@ func (b *SourceHealthBoard) PollerStarted(interval time.Duration) {
 	b.interval = interval
 }
 
-// BeginCycle opens a cycle. Outcomes recorded before it (none, normally) are
-// kept and folded with it.
+// BeginCycle opens a cycle. Only what is recorded from here to EndCycle counts
+// toward the verdicts (see RecordResolve).
 func (b *SourceHealthBoard) BeginCycle() {
 	if b == nil {
 		return
@@ -312,6 +312,16 @@ func (b *SourceHealthBoard) AbortCycle() {
 }
 
 // RecordResolve files one resolve against sourceKey.
+//
+// Only a resolve made during a cycle counts toward the source's verdict. The
+// poller also resolves between cycles, when an update feed prompts a poll, and
+// those used to pile up in the tally the next cycle then folded as its own:
+// one feed-prompted timeout, followed by a cycle that had no reason to ask
+// that site at all, read as "nothing got through" and marked the site
+// degraded. The verdict's thresholds are a cycle's — a whole library asked
+// once — and a handful of resolves from the half hour before it are not that
+// sample. What such a resolve does leave is when the site was last asked,
+// last answered and last failed, which is true whenever it happened.
 func (b *SourceHealthBoard) RecordResolve(sourceKey string, role ResolveRole, result *MangaResult, err error) {
 	if b == nil || sourceKey == "" {
 		return
@@ -323,13 +333,25 @@ func (b *SourceHealthBoard) RecordResolve(sourceKey string, role ResolveRole, re
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	tally := b.tallyLocked(sourceKey)
 	record := b.recordLocked(sourceKey)
 	now := b.now()
+	switch outcome.Kind {
+	case OutcomeOK, OutcomeNoChapter, OutcomeNotFound:
+		record.lastAskedAt = now
+		record.lastSuccessAt = now
+	case OutcomeFailed:
+		record.lastAskedAt = now
+		record.lastFailureAt = now
+		record.lastError = truncateError(err)
+	}
+	if !b.cycleRunning {
+		return
+	}
+
+	tally := b.tallyLocked(sourceKey)
 	if role == RoleFallback {
 		tally.asFallback++
 	}
-
 	switch outcome.Kind {
 	case OutcomeOK:
 		tally.ok++
@@ -345,16 +367,6 @@ func (b *SourceHealthBoard) RecordResolve(sourceKey string, role ResolveRole, re
 		tally.refused++
 	case OutcomeFailed:
 		tally.failed++
-	}
-
-	switch outcome.Kind {
-	case OutcomeOK, OutcomeNoChapter, OutcomeNotFound:
-		record.lastAskedAt = now
-		record.lastSuccessAt = now
-	case OutcomeFailed:
-		record.lastAskedAt = now
-		record.lastFailureAt = now
-		record.lastError = truncateError(err)
 		tally.lastFailLabel = outcome.Label
 		tally.lastError = record.lastError
 	}
@@ -362,12 +374,16 @@ func (b *SourceHealthBoard) RecordResolve(sourceKey string, role ResolveRole, re
 
 // RecordTurnFailure files a tracker whose turn this cycle went to sourceKey,
 // which failed it; covered says whether another linked site answered instead.
+// Like a resolve, it counts only during a cycle.
 func (b *SourceHealthBoard) RecordTurnFailure(sourceKey string, series TrackedSeries, covered bool) {
 	if b == nil || sourceKey == "" {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.cycleRunning {
+		return
+	}
 	tally := b.tallyLocked(sourceKey)
 	if covered {
 		tally.covered++
@@ -387,6 +403,9 @@ func (b *SourceHealthBoard) RecordMissingConnector(sourceKey string, series Trac
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.cycleRunning {
+		return
+	}
 	tally := b.tallyLocked(sourceKey)
 	tally.orphanedCount++
 	if len(tally.orphaned) < maxListedSeries {
@@ -415,6 +434,13 @@ func (b *SourceHealthBoard) recordLocked(key string) *sourceRecord {
 // EndCycle folds the cycle's outcomes into each source's verdict. A source
 // the cycle never asked keeps the verdict it had: not being needed (only idle
 // trackers point at it) is not evidence either way.
+//
+// Its orphans are another matter. A tracker on a source with no connector is
+// reported by every cycle once it is due, and it stays due, since nothing can
+// ever stamp it as checked. A source key this cycle did not report therefore
+// has no such tracker left — it was relinked or deleted — and the list is
+// dropped. It used to stay on the panel until the next restart, asking for a
+// relink that had already been done.
 func (b *SourceHealthBoard) EndCycle() {
 	if b == nil {
 		return
@@ -443,6 +469,12 @@ func (b *SourceHealthBoard) EndCycle() {
 		}
 		record.evaluated = true
 		foldVerdict(record, tally, startedAt)
+	}
+	for key, record := range b.sources {
+		if _, reported := b.current[key]; !reported {
+			record.last.orphanedCount = 0
+			record.last.orphaned = nil
+		}
 	}
 	b.current = map[string]*sourceTally{}
 }
@@ -679,12 +711,6 @@ func (r *Registry) SourceHealthReport(now time.Time) SourceHealthReport {
 	for _, connector := range r.connectors {
 		list = append(list, connector)
 	}
-	hostOwner := map[string]string{}
-	for _, circuit := range circuits {
-		if connector, ok := r.findByHostLocked(strings.ToLower(circuit.Host)); ok {
-			hostOwner[circuit.Host] = connector.Key()
-		}
-	}
 	r.mu.RUnlock()
 
 	for _, connector := range list {
@@ -694,19 +720,9 @@ func (r *Registry) SourceHealthReport(now time.Time) SourceHealthReport {
 		}
 		row.Name = connector.Name()
 
-		if reporter, isReporter := connector.(CooldownReporter); isReporter {
-			if remaining, reason := reporter.CooldownRemaining(); remaining > 0 {
-				row.CooldownLeft = remaining
-				row.CooldownReason = reason
-			}
-		}
-		for _, circuit := range circuits {
-			if hostOwner[circuit.Host] != connector.Key() || circuit.BlockedFor <= row.CooldownLeft {
-				continue
-			}
-			row.CooldownLeft = circuit.BlockedFor
-			row.CooldownReason = circuit.Host + " failed repeatedly"
-		}
+		// The same reckoning the poller skips a cooling site by (CooldownOf),
+		// so the panel and the poller cannot disagree about who is cooling.
+		row.CooldownLeft, row.CooldownReason = cooldownAmong(connector, circuits)
 		if row.CooldownLeft > 0 && (row.State == SourceStateOK || row.State == SourceStateUnknown) {
 			row.State = SourceStateDegraded
 			if row.Reason == "" {

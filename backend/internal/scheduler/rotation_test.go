@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -629,6 +630,98 @@ func TestPollRefusedEverywhereIsNotRecordedAsACheck(t *testing.T) {
 	}
 	if len(failed.markedChecked) != 1 {
 		t.Fatalf("a site that was asked and failed is a check, got marked=%v", failed.markedChecked)
+	}
+}
+
+// hostedSite is a siteDouble that claims hosts, as every real connector does,
+// which is what ties it to the shared throttle's per-host circuits.
+type hostedSite struct {
+	*siteDouble
+	hosts []string
+}
+
+func (h hostedSite) Hosts() []string { return h.hosts }
+func (h hostedSite) HomeURL() string { return "https://" + h.hosts[0] }
+func (h hostedSite) ReaderRank() int { return connectors.ReaderRankDefault }
+
+// A site the shared throttle has stopped is passed over when a poll is given
+// its shard, like one that reports its own cooldown. Only two connectors keep
+// a breaker of their own, so asking the connector alone missed most cooldowns:
+// with MangaHub's circuit open after a rate limit, every tracker whose turn it
+// was stayed on MangaHub's shard to be refused there one by one.
+func TestShardKeyPassesOverASiteTheSharedCircuitHasStopped(t *testing.T) {
+	// The shared throttle is the process's own and keeps a circuit open for
+	// ten minutes, so the hosts are this run's alone: a repeated run
+	// (-count) must not find the previous one's circuit still open.
+	run := time.Now().UnixNano()
+	alphaHost := fmt.Sprintf("shard-key-alpha-%d.example", run)
+	alpha := hostedSite{siteDouble: newSite("alpha", 10), hosts: []string{alphaHost}}
+	beta := hostedSite{siteDouble: newSite("beta", 10), hosts: []string{fmt.Sprintf("shard-key-beta-%d.example", run)}}
+	tracker := rotatingTracker(1, 10, "beta")
+	poller, _ := cyclingPoller(&statefulRepo{items: []*repository.PollingTracker{tracker}}, registryOf(t, alpha, beta))
+
+	// Tracker 1 on cycle 0 starts its rotation on the primary.
+	plan, ok := poller.planPoll(*tracker, 0)
+	if !ok || plan.candidates[0].ref.SourceKey != "alpha" {
+		t.Fatalf("precondition: the plan starts on alpha, got %+v ok=%v", plan.candidates, ok)
+	}
+	if coolingDown(alpha) || plan.shardKey() != "alpha" {
+		t.Fatalf("precondition: nothing is cooling down, shard %q", plan.shardKey())
+	}
+
+	// The circuit opens for alpha's API host, which the connector claims as a
+	// subdomain of its site.
+	connectors.NoteHostRateLimited("api." + alphaHost)
+	if !coolingDown(alpha) {
+		t.Fatal("a connector whose host the shared circuit has stopped is cooling down")
+	}
+	if coolingDown(beta) {
+		t.Fatal("another site's circuit must not stop this one")
+	}
+	if got := plan.shardKey(); got != "beta" {
+		t.Fatalf("the poll must run on the shard of the first site that can be asked, got %q", got)
+	}
+}
+
+// A resolve refused because this process had too many requests queued for the
+// host is not a site cooling down, and is counted apart: the cycle summary
+// used to report both as "cooling-down sources".
+func TestPollCountsAFullLocalQueueApartFromACooldown(t *testing.T) {
+	cases := []struct {
+		name                  string
+		refusal               *connectors.SourceCoolingDownError
+		wantCooling, wantBusy int64
+	}{
+		{"cooling down", &connectors.SourceCoolingDownError{Host: "alpha", RetryAfter: 5 * time.Minute}, 1, 0},
+		{"queue full", &connectors.SourceCoolingDownError{Host: "alpha", RetryAfter: 70 * time.Second, QueueFull: true}, 0, 1},
+	}
+	for _, testCase := range cases {
+		tracker := rotatingTracker(1, 10, "beta")
+		repo := &fakeRepo{items: []repository.PollingTracker{*tracker}}
+		alpha, beta := newSite("alpha", 10), newSite("beta", 10)
+		alpha.fail(fmt.Errorf("resolve: %w", testCase.refusal))
+		poller := NewPoller(repo, registryOf(t, alpha, beta), PollerConfig{Interval: time.Minute}, nil)
+
+		plan, ok := poller.planPoll(*tracker, 0)
+		if !ok || plan.candidates[0].ref.SourceKey != "alpha" {
+			t.Fatalf("%s: precondition: the plan starts on alpha, got %+v", testCase.name, plan.candidates)
+		}
+		var stats cycleStats
+		poller.pollTracker(context.Background(), *tracker, plan, &stats)
+
+		if cooling, busy := stats.coolingResolves.Load(), stats.busyResolves.Load(); cooling != testCase.wantCooling || busy != testCase.wantBusy {
+			t.Fatalf("%s: counted cooling=%d busy=%d, want %d and %d", testCase.name, cooling, busy, testCase.wantCooling, testCase.wantBusy)
+		}
+		// Either way the site was never reached: it keeps its turn, and the
+		// poll goes on to the next one.
+		for _, poll := range repo.sourcePolls {
+			if poll.Primary {
+				t.Fatalf("%s: a site refused locally must not be stamped as asked: %+v", testCase.name, repo.sourcePolls)
+			}
+		}
+		if beta.calls.Load() != 1 || repo.updatedCount != 1 {
+			t.Fatalf("%s: the next site must answer in its place, beta=%d updates=%d", testCase.name, beta.calls.Load(), repo.updatedCount)
+		}
 	}
 }
 
