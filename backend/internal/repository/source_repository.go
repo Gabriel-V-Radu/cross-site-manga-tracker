@@ -6,19 +6,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
 
 type SourceRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 func NewSourceRepository(db *sql.DB) *SourceRepository {
-	return &SourceRepository{db: db}
+	return &SourceRepository{db: db, rdb: database.Reader(db)}
 }
 
 func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE enabled = 1
@@ -46,7 +48,7 @@ func (r *SourceRepository) ListEnabled(ctx context.Context) ([]models.Source, er
 }
 
 func (r *SourceRepository) GetByID(ctx context.Context, id int64) (*models.Source, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE id = ?
@@ -56,7 +58,7 @@ func (r *SourceRepository) GetByID(ctx context.Context, id int64) (*models.Sourc
 }
 
 func (r *SourceRepository) GetByKey(ctx context.Context, key string) (*models.Source, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, key, name, connector_kind, enabled, created_at, updated_at
 		FROM sources
 		WHERE key = ?
@@ -92,7 +94,7 @@ func scanSource(row rowScanner, operation string) (*models.Source, error) {
 // ListSourceLogoURLs is the uploaded logo of every source that has one, keyed
 // by source id. Logos are not per-profile: one upload shows on every profile.
 func (r *SourceRepository) ListSourceLogoURLs(ctx context.Context) (map[int64]string, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT source_id, logo_url
 		FROM source_logos
 	`)

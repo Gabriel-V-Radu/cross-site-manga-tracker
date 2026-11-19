@@ -86,19 +86,21 @@ func (h *DashboardHandler) TrackersPartial(c *fiber.Ctx) error {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked site logos", err)
 	}
 
-	sources, err := h.sourceRepo.ListEnabled(c.Context())
-	if err != nil {
-		return h.fail(c, fiber.StatusInternalServerError, "Failed to load sources", err)
-	}
-
-	sourceByID := make(map[int64]models.Source, len(sources))
-	for _, source := range sources {
+	// The linked sites are the enabled sources, already loaded above; they
+	// used to be read a second time here to build this map.
+	sourceByID := make(map[int64]models.Source, len(linkedSites))
+	for _, source := range linkedSites {
 		sourceByID[source.ID] = source
 	}
 
 	// Covers and chapter links resolve against a tracker's primary source; these
-	// let them fall back when that source is unreadable.
-	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTracker(c.Context(), activeProfile.ID)
+	// let them fall back when that source is unreadable. Only this page's
+	// trackers are asked for, not the profile's whole library.
+	pageTrackerIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		pageTrackerIDs = append(pageTrackerIDs, item.ID)
+	}
+	alternatesByTracker, err := h.trackerRepo.ListAlternateSourcesByTrackerIDs(c.Context(), activeProfile.ID, pageTrackerIDs)
 	if err != nil {
 		return h.fail(c, fiber.StatusInternalServerError, "Failed to load linked sources", err)
 	}

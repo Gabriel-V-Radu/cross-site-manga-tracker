@@ -1,0 +1,22 @@
+-- A profile's trackers in one reading status, which is what every page of the
+-- dashboard lists and counts. The two single-column indexes each narrowed by
+-- half of that and left the other half to a scan of what remained; this one
+-- leads straight to the rows. Idempotent, like the baseline.
+CREATE INDEX IF NOT EXISTS idx_trackers_profile_status ON trackers(profile_id, status);
+
+-- Two more were considered and measured on a library-sized database (320
+-- trackers, 960 links, 2.4 KB payloads) before being left out:
+--
+--   source_metadata(source_id, source_url, fetched_at), to read a site's
+--   stamp without its payload. The planner takes it only once the database
+--   has statistics, never for the single-row lookup (the primary key's own
+--   index wins there), and the listing it was meant for ran in 3.7 ms with it
+--   and 3.9 ms without.
+--
+--   tracker_metadata(tracker_id, series_type, series_status, genres,
+--   signature), to read a view without its payload. Every read that filters
+--   or joins on a view reaches it by rowid, where those columns sit ahead of
+--   the payload already; the one full listing took 0.1 ms either way, and
+--   with statistics the planner scans the table in preference to the index.
+--
+-- An index nothing reads is only something every write has to keep up.

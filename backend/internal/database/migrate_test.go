@@ -15,6 +15,16 @@ const baselineFile = "0001_baseline_2026-11.sql"
 var laterFiles = []string{
 	"0002_series_metadata.sql",
 	"0003_feed_missed.sql",
+	"0004_indexes.sql",
+}
+
+func indexExists(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&count); err != nil {
+		t.Fatalf("look up index %s: %v", name, err)
+	}
+	return count == 1
 }
 
 // expectCurrentLedger fails unless the ledger names exactly the baseline and
@@ -145,6 +155,9 @@ func TestApplyMigrationsFreshDatabaseAndRerun(t *testing.T) {
 	}
 	if !columnExists(t, db, "tracker_sources", "last_polled_at") || !columnExists(t, db, "tracker_sources", "in_step") {
 		t.Fatal("expected the poll rotation's columns on tracker_sources")
+	}
+	if !indexExists(t, db, "idx_trackers_profile_status") {
+		t.Fatal("expected the index of migration 0004")
 	}
 
 	before := schemaSignature(t, db)

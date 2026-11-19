@@ -96,6 +96,51 @@ func TestListFiltersBySeriesMetadata(t *testing.T) {
 	}
 }
 
+// The filter menus count one profile's views in one pass. Blank values offer
+// no option, another profile's trackers are not counted, and a genres column
+// that is not a list of names counts for no genre instead of failing the
+// menus, which is what expanding it in SQL did.
+func TestMetadataFacetsCountOneProfilesViews(t *testing.T) {
+	db := openPollingTestDB(t)
+	views := repository.NewMetadataRepository(db)
+
+	alpha := seedMetadataTracker(t, db, "alpha", 1, 10)
+	beta := seedMetadataTracker(t, db, "beta", 1, 10)
+	untyped := seedMetadataTracker(t, db, "untyped", 1, 10)
+	broken := seedMetadataTracker(t, db, "broken", 1, 10)
+	foreign := seedMetadataTracker(t, db, "foreign", 1, 10)
+	if _, err := db.Exec(`UPDATE trackers SET profile_id = 2 WHERE id = ?`, foreign); err != nil {
+		t.Fatal(err)
+	}
+	saveView(t, views, alpha, "manhwa", "ongoing", `["Action","Romance"]`)
+	saveView(t, views, beta, "manhwa", "completed", `["Action"]`)
+	saveView(t, views, untyped, "", "", `[]`)
+	saveView(t, views, broken, "manga", "ongoing", `{"not":"a list"}`)
+	saveView(t, views, foreign, "novel", "hiatus", `["Horror"]`)
+
+	facets, err := views.ListMetadataFacets(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("facets: %v", err)
+	}
+	if len(facets.Types) != 2 || facets.Types["manhwa"] != 2 || facets.Types["manga"] != 1 {
+		t.Fatalf("type facets = %v", facets.Types)
+	}
+	if len(facets.Statuses) != 2 || facets.Statuses["ongoing"] != 2 || facets.Statuses["completed"] != 1 {
+		t.Fatalf("status facets = %v", facets.Statuses)
+	}
+	if len(facets.Genres) != 2 || facets.Genres["Action"] != 2 || facets.Genres["Romance"] != 1 {
+		t.Fatalf("genre facets = %v", facets.Genres)
+	}
+
+	other, err := views.ListMetadataFacets(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("the other profile's facets: %v", err)
+	}
+	if len(other.Types) != 1 || other.Types["novel"] != 1 || other.Genres["Horror"] != 1 {
+		t.Fatalf("the other profile's facets = %+v", other)
+	}
+}
+
 func TestReadingKeepsCaughtUpTrackersWhenNarrowed(t *testing.T) {
 	db := openPollingTestDB(t)
 	trackers := repository.NewTrackerRepository(db)

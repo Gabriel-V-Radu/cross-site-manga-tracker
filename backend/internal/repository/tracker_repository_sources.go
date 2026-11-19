@@ -13,7 +13,7 @@ import (
 // serves, counting a tracker once per source whether it is the primary or a
 // linked alternate. The dashboard uses it to rank the connector shortcuts.
 func (r *TrackerRepository) CountTrackersBySource(ctx context.Context, profileID int64) (map[int64]int, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT source_id, COUNT(1)
 		FROM (
 			SELECT id AS tracker_id, source_id FROM trackers WHERE profile_id = ?
@@ -47,7 +47,7 @@ func (r *TrackerRepository) CountTrackersBySource(ctx context.Context, profileID
 }
 
 func (r *TrackerRepository) ListTrackerSources(ctx context.Context, profileID int64, trackerID int64) ([]models.TrackerSource, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT
 			ts.id,
 			ts.tracker_id,
@@ -179,7 +179,25 @@ func replaceTrackerSourcesInTx(ctx context.Context, tx *sql.Tx, profileID int64,
 // item id the entry knows (an entry without one keeps the stored id), and
 // nothing else of it is touched — its created_at and the rotation's memory
 // stay as they were. updated_at moves only when the row actually changed.
+//
+// It is the one way a link row is written, whoever writes it — a replaced
+// list, a single link added, the poller's mirror of the primary. The others
+// used to upsert on the table's unique key, which is the URL to the letter:
+// the same link spelled with another capital or a trailing space became a
+// second row, a mirror of the primary that then counted as an alternate, and
+// a write that knew no item id replaced a stored one with NULL.
 func keepOrInsertTrackerSourceTx(ctx context.Context, tx *sql.Tx, trackerID int64, sourceID int64, sourceItemID *string, sourceURL string) (int64, error) {
+	sourceURL = strings.TrimSpace(sourceURL)
+	// A blank item id is no item id: bound as text it would not be NULL, and
+	// COALESCE below would store it over the one the row has.
+	if sourceItemID != nil {
+		if trimmed := strings.TrimSpace(*sourceItemID); trimmed == "" {
+			sourceItemID = nil
+		} else {
+			sourceItemID = &trimmed
+		}
+	}
+
 	// Rows that differ only in case or padding can both be stored. The one
 	// spelled exactly as submitted is preferred, so rewriting the URL below
 	// can never collide with it on the table's unique key.
@@ -221,30 +239,34 @@ func keepOrInsertTrackerSourceTx(ctx context.Context, tx *sql.Tx, trackerID int6
 	return rowID, nil
 }
 
+// UpsertTrackerSource links a tracker to a source, or refreshes the link it
+// already has to that URL (keepOrInsertTrackerSourceTx). A tracker that is not
+// the profile's is left alone. The ownership check and the write are one
+// transaction: they used to be two statements, and a tracker deleted between
+// them failed the insert on its foreign key instead of being left alone.
 func (r *TrackerRepository) UpsertTrackerSource(ctx context.Context, profileID int64, trackerID int64, source models.TrackerSource) error {
 	if source.SourceID <= 0 || strings.TrimSpace(source.SourceURL) == "" {
 		return nil
 	}
 
-	var exists int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM trackers WHERE id = ? AND profile_id = ?`, trackerID, profileID).Scan(&exists); err != nil {
-		return fmt.Errorf("check tracker ownership: %w", err)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin upsert tracker source tx: %w", err)
 	}
-	if exists == 0 {
+	defer tx.Rollback()
+
+	owned, err := trackerOwnedByProfileTx(ctx, tx, trackerID, profileID)
+	if err != nil {
+		return err
+	}
+	if !owned {
 		return nil
 	}
-
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(tracker_id, source_id, source_url)
-		DO UPDATE SET
-			source_item_id = excluded.source_item_id,
-			updated_at = CURRENT_TIMESTAMP
-	`, trackerID, source.SourceID, source.SourceItemID, strings.TrimSpace(source.SourceURL))
-	if err != nil {
-		return fmt.Errorf("upsert tracker source: %w", err)
+	if err := upsertTrackerSourceTx(ctx, tx, trackerID, source); err != nil {
+		return err
 	}
-
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upsert tracker source tx: %w", err)
+	}
 	return nil
 }

@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -75,11 +76,33 @@ type Service struct {
 
 	dirty atomic.Bool
 
-	mu             sync.Mutex
-	backfillFailed map[int64]time.Time
+	mu sync.Mutex
+	// backfillFailed is when the backfill last came back empty-handed from
+	// each link it asked, so that link is left alone for BackfillRetryAfter.
+	// It is kept per link and not per tracker: per tracker, one site with
+	// nothing to say about a series shut the tracker out for the whole window
+	// while its other linked sites, which might have answered, were never
+	// asked.
+	backfillFailed map[backfillLinkKey]time.Time
 
 	stopped chan struct{}
 	started atomic.Bool
+}
+
+// backfillLinkKey names one link of one tracker the way the stored rows are
+// matched: by site and LOWER(TRIM(url)).
+type backfillLinkKey struct {
+	trackerID int64
+	sourceID  int64
+	url       string
+}
+
+func backfillKeyOf(link repository.MetadataLink) backfillLinkKey {
+	return backfillLinkKey{
+		trackerID: link.TrackerID,
+		sourceID:  link.SourceID,
+		url:       strings.ToLower(strings.TrimSpace(link.SourceURL)),
+	}
 }
 
 func NewService(store Store, resolver Resolver, cfg Config, logger *slog.Logger) *Service {
@@ -101,7 +124,7 @@ func NewService(store Store, resolver Resolver, cfg Config, logger *slog.Logger)
 		logger:         logger,
 		cfg:            cfg,
 		now:            time.Now,
-		backfillFailed: map[int64]time.Time{},
+		backfillFailed: map[backfillLinkKey]time.Time{},
 		stopped:        make(chan struct{}),
 	}
 }
@@ -150,15 +173,20 @@ func (s *Service) Start(ctx context.Context) {
 		defer dirtyTicker.Stop()
 
 		s.reconcileLogged(ctx)
+		backfill := backfillSchedule{base: s.cfg.ReconcileEvery}
+		s.backfillIfDue(ctx, &backfill)
 		for {
-			if s.cfg.Backfill {
-				s.backfillPass(ctx)
-			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-reconcileTicker.C:
 				s.reconcileLogged(ctx)
+				// The backfill rides the reconcile tick and no other. It used
+				// to run at the top of this loop, which the dirty ticker also
+				// comes round to every minute whether or not anything is
+				// dirty: some eighty listings an hour to learn, nearly every
+				// time, that no tracker lacks metadata.
+				s.backfillIfDue(ctx, &backfill)
 			case <-dirtyTicker.C:
 				if s.dirty.Load() {
 					s.reconcileLogged(ctx)
@@ -166,6 +194,52 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// backfillIdleMax is the longest the backfill waits between two passes while
+// it keeps finding nobody to ask. A tracker added in that time is not left
+// waiting for it: the poller's next cycle resolves a new tracker and brings
+// its metadata along.
+const backfillIdleMax = 30 * time.Minute
+
+// backfillSchedule spaces the backfill's passes: every base while there is
+// work, and twice as far apart after each pass that asked nobody, up to
+// backfillIdleMax. One pass that asks somebody brings it back to base.
+type backfillSchedule struct {
+	base time.Duration
+	wait time.Duration
+	next time.Time
+}
+
+// ran records a pass, finished at now, that asked that many sites.
+func (b *backfillSchedule) ran(asked int, now time.Time) {
+	switch {
+	case asked >= maxBackfillPerPass:
+		// It stopped at its bound with more to do — a fresh library — and
+		// goes on at the next tick.
+		b.wait, b.next = b.base, now
+		return
+	case asked > 0 || b.wait <= 0:
+		b.wait = b.base
+	default:
+		b.wait = min(b.wait*2, max(backfillIdleMax, b.base))
+	}
+	b.next = now.Add(b.wait)
+}
+
+// due reports whether the next pass may run at now. A tick that falls a
+// moment short of the mark still counts: the passes are driven by a ticker
+// of the same period, and a strict comparison would skip every other one.
+func (b *backfillSchedule) due(now time.Time) bool {
+	return !now.Before(b.next.Add(-b.base / 2))
+}
+
+func (s *Service) backfillIfDue(ctx context.Context, schedule *backfillSchedule) {
+	if !s.cfg.Backfill || !schedule.due(time.Now()) {
+		return
+	}
+	asked := s.backfillPass(ctx)
+	schedule.ran(asked, time.Now())
 }
 
 // StopWait waits for the loop to end after its context was cancelled.
@@ -347,57 +421,73 @@ const maxBackfillPerPass = 40
 // linked to. After the first days it finds nothing to do: the poller keeps
 // every tracker's rows fresh, and new trackers get theirs from it or from here
 // within minutes.
-func (s *Service) backfillPass(ctx context.Context) {
+//
+// A tracker gets one site asked per pass: the best of its linked sites that
+// did not come back empty within BackfillRetryAfter. A site that has nothing
+// for the series is therefore passed over next time and the following one
+// asked, where it used to be the whole tracker that sat out the window.
+//
+// It reports how many sites it asked, which is what paces the passes
+// (backfillSchedule).
+func (s *Service) backfillPass(ctx context.Context) int {
 	if s.resolver == nil {
-		return
+		return 0
 	}
-	// Only the trackers with no metadata at all, and no payloads: the loop
-	// runs this every minute, and it used to read the whole library's stored
-	// metadata each time to find, almost always, nobody to ask about.
+	// Only the trackers with no metadata at all, and no payloads: it used to
+	// read the whole library's stored metadata each time to find, almost
+	// always, nobody to ask about.
 	links, err := s.store.ListMetadataBackfillLinks(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Debug("metadata backfill could not list links", "error", err)
 		}
-		return
+		return 0
 	}
 	byTracker, order := groupLinks(links)
 	now := s.now()
-	done := 0
+	s.forgetOldFailures(now)
+	asked := 0
 	for _, trackerID := range order {
-		if ctx.Err() != nil || done >= maxBackfillPerPass {
-			return
+		if ctx.Err() != nil || asked >= maxBackfillPerPass {
+			return asked
 		}
-		trackerLinks := byTracker[trackerID]
-		if s.recentlyFailed(trackerID, now) {
-			continue
-		}
-		link, connector, ok := s.pickBackfillLink(trackerLinks)
+		link, connector, ok := s.pickBackfillLink(byTracker[trackerID], now)
 		if !ok {
 			continue
 		}
-		done++
+		asked++
 		resolveCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		result, err := connector.ResolveByURL(resolveCtx, link.SourceURL)
 		cancel()
 		if ctx.Err() != nil {
-			return
+			return asked
 		}
-		if err != nil || result == nil || result.Metadata.Empty() {
-			s.markFailed(trackerID, now)
+		var refused *connectors.SourceCoolingDownError
+		switch {
+		case errors.As(err, &refused):
+			// Refused locally — the site cooling down, our own queue full. It
+			// was not asked, so there is nothing to hold against the link: a
+			// ten-minute cooldown must not cost it the retry window.
+			s.logger.Debug("metadata backfill not asked: refused locally", "trackerId", trackerID, "sourceKey", link.SourceKey, "error", err)
+		case err != nil || result == nil || result.Metadata.Empty():
+			s.markFailed(link, now)
 			s.logger.Debug("metadata backfill found nothing", "trackerId", trackerID, "sourceKey", link.SourceKey, "error", err)
-		} else {
+		default:
 			s.Record(ctx, link.SourceID, link.SourceURL, result.Metadata)
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return asked
 		case <-time.After(s.cfg.BackfillGap):
 		}
 	}
+	return asked
 }
 
-func (s *Service) pickBackfillLink(links []repository.MetadataLink) (repository.MetadataLink, connectors.Connector, bool) {
+// pickBackfillLink is the best of a tracker's links the backfill can ask
+// right now: by backfillOrder, leaving out a site with no connector, one that
+// is cooling down, and a link that came back empty within the retry window.
+func (s *Service) pickBackfillLink(links []repository.MetadataLink, now time.Time) (repository.MetadataLink, connectors.Connector, bool) {
 	for _, key := range backfillOrder {
 		for _, link := range links {
 			if !strings.EqualFold(link.SourceKey, key) {
@@ -407,10 +497,13 @@ func (s *Service) pickBackfillLink(links []repository.MetadataLink) (repository.
 			if !ok {
 				continue
 			}
-			if reporter, cooling := connector.(connectors.CooldownReporter); cooling {
-				if remaining, _ := reporter.CooldownRemaining(); remaining > 0 {
-					continue
-				}
+			// The connector's own breaker and the shared circuit of its hosts
+			// alike: only two connectors have the first.
+			if remaining, _ := connectors.CooldownOf(connector, time.Now()); remaining > 0 {
+				continue
+			}
+			if s.recentlyFailed(link, now) {
+				continue
 			}
 			return link, connector, true
 		}
@@ -418,15 +511,28 @@ func (s *Service) pickBackfillLink(links []repository.MetadataLink) (repository.
 	return repository.MetadataLink{}, nil, false
 }
 
-func (s *Service) recentlyFailed(trackerID int64, now time.Time) bool {
+func (s *Service) recentlyFailed(link repository.MetadataLink, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	failedAt, ok := s.backfillFailed[trackerID]
+	failedAt, ok := s.backfillFailed[backfillKeyOf(link)]
 	return ok && now.Sub(failedAt) < s.cfg.BackfillRetryAfter
 }
 
-func (s *Service) markFailed(trackerID int64, now time.Time) {
+func (s *Service) markFailed(link repository.MetadataLink, now time.Time) {
 	s.mu.Lock()
-	s.backfillFailed[trackerID] = now
+	s.backfillFailed[backfillKeyOf(link)] = now
 	s.mu.Unlock()
+}
+
+// forgetOldFailures drops the failures whose retry window has passed. Nothing
+// else ever removed an entry — not the window passing, not the tracker being
+// deleted — so on a server that runs for months the map only grew.
+func (s *Service) forgetOldFailures(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, failedAt := range s.backfillFailed {
+		if now.Sub(failedAt) >= s.cfg.BackfillRetryAfter {
+			delete(s.backfillFailed, key)
+		}
+	}
 }

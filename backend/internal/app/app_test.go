@@ -1,8 +1,11 @@
 package app
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 func pointAtTempDatabase(t *testing.T) string {
@@ -58,6 +61,71 @@ func TestOpenWithoutMigrateLeavesTheSchemaAlone(t *testing.T) {
 	if got := countMigrations(t, rt); got != 0 {
 		t.Fatalf("a non-migrating open applied %d migrations", got)
 	}
+}
+
+// statisticsRows reopens the database at path and counts the planner
+// statistics it holds; a database nobody analyzed has no sqlite_stat1 at all.
+func statisticsRows(t *testing.T, path string) int {
+	t.Helper()
+	db, err := database.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_stat1`).Scan(&rows); err != nil {
+		return 0
+	}
+	return rows
+}
+
+// The server leaves the query planner its statistics when it closes the
+// database; a run that did not ask for that — every tool, and a preview above
+// all — closes it without writing anything.
+func TestCloseLeavesStatisticsOnlyWhenAsked(t *testing.T) {
+	work := func(t *testing.T, rt *Runtime) {
+		t.Helper()
+		for index := 0; index < 50; index++ {
+			if _, err := rt.DB.Exec(`
+				INSERT INTO trackers (profile_id, title, source_id, source_url, status)
+				VALUES (1, ?, 1, ?, 'reading')
+			`, fmt.Sprintf("Series %d", index), fmt.Sprintf("https://mangadex.org/title/%d", index)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+		// The dashboard's own question, through an index statistics would
+		// inform.
+		var reading int
+		if err := rt.DB.QueryRow(`SELECT COUNT(1) FROM trackers WHERE profile_id = 1 AND status = 'reading'`).Scan(&reading); err != nil || reading != 50 {
+			t.Fatalf("query: %d, %v", reading, err)
+		}
+	}
+
+	t.Run("asked", func(t *testing.T) {
+		path := pointAtTempDatabase(t)
+		rt, err := Open(Options{Migrate: true, OptimizeOnClose: true})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		work(t, rt)
+		rt.Close()
+		if got := statisticsRows(t, path); got == 0 {
+			t.Fatal("the server closed the database without leaving the planner any statistics")
+		}
+	})
+
+	t.Run("not asked", func(t *testing.T) {
+		path := pointAtTempDatabase(t)
+		rt, err := Open(Options{Migrate: true})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		work(t, rt)
+		rt.Close()
+		if got := statisticsRows(t, path); got != 0 {
+			t.Fatalf("a run that did not ask for statistics wrote %d rows of them on close", got)
+		}
+	})
 }
 
 func TestRuntimeCloseIsNilSafe(t *testing.T) {

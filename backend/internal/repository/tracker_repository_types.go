@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 type TrackerListOptions struct {
@@ -77,8 +79,14 @@ func distinctTrimmed(values []string) []string {
 	return out
 }
 
+// TrackerRepository, like every repository here, holds the database's two
+// handles (database.Open): db is the writer, the single connection every
+// write and every transaction goes through, and rdb the read-only pool its
+// plain reads go to, so a listing never waits behind a write. A statement
+// inside a transaction uses neither — it uses the transaction's own handle.
 type TrackerRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 type PollingTracker struct {
@@ -226,5 +234,5 @@ type PollingUpdate struct {
 }
 
 func NewTrackerRepository(db *sql.DB) *TrackerRepository {
-	return &TrackerRepository{db: db}
+	return &TrackerRepository{db: db, rdb: database.Reader(db)}
 }

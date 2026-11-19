@@ -143,7 +143,7 @@ func insertTrackerTx(ctx context.Context, tx *sql.Tx, tracker *models.Tracker) (
 			profile_id, title, related_titles, source_id, source_item_id, source_url, status, last_read_chapter, rating, latest_known_chapter, latest_release_at, latest_chapter_seen_at, last_checked_at, last_read_at
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, ?, CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
-	`, tracker.ProfileID, tracker.Title, relatedTitlesJSON, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, tracker.LatestReleaseAt, tracker.LatestKnownChapter, tracker.LastCheckedAt, tracker.LastReadChapter)
+	`, tracker.ProfileID, tracker.Title, relatedTitlesJSON, tracker.SourceID, tracker.SourceItemID, tracker.SourceURL, tracker.Status, tracker.LastReadChapter, tracker.Rating, tracker.LatestKnownChapter, dbTimeArg(tracker.LatestReleaseAt), tracker.LatestKnownChapter, dbTimeArg(tracker.LastCheckedAt), tracker.LastReadChapter)
 	if err != nil {
 		return 0, fmt.Errorf("insert tracker: %w", err)
 	}
@@ -159,11 +159,68 @@ func insertTrackerTx(ctx context.Context, tx *sql.Tx, tracker *models.Tracker) (
 // of them changed. Every expression is evaluated against the row as it stands,
 // which is what lets last_read_at and latest_chapter_seen_at restamp only when
 // their value moved.
+//
+// A hand-set chapter, or a primary moved to another link, also clears what
+// the poller had noted about the number and the link it replaces: a lower
+// chapter awaiting confirmation (it was lower than the old number, reported
+// about the old link) and which source supplied the stored number (nobody
+// supplied this one; left in place, that source alone could have taken a
+// hand repair back — scheduler.decideChapter). A primary moved also clears
+// the memory of a chapter the feeds missed, which was about the sites the
+// tracker was on; a chapter set by hand does not, since it says nothing
+// about whether the feeds can see the title. An edit that touches neither
+// leaves all of it as it is.
 func updateTrackerRowTx(ctx context.Context, tx *sql.Tx, profileID int64, id int64, tracker *models.Tracker) (bool, error) {
 	relatedTitlesJSON := encodeRelatedTitlesJSON(tracker.RelatedTitles)
+	latestReleaseAt, lastCheckedAt := dbTimeArg(tracker.LatestReleaseAt), dbTimeArg(tracker.LastCheckedAt)
+	// The two conditions are spelled out in each CASE that uses them, and
+	// bound once per use, in the order the statement has them.
+	const primaryMoved = `(source_id IS NOT ? OR source_url IS NOT ?)`
+	const chapterOrPrimaryMoved = `(latest_known_chapter IS NOT ? OR source_id IS NOT ? OR source_url IS NOT ?)`
+
+	args := make([]any, 0, 48)
+	for range 3 {
+		args = append(args, tracker.LatestKnownChapter, tracker.SourceID, tracker.SourceURL)
+	}
+	args = append(args, tracker.SourceID, tracker.SourceURL)
+	args = append(args,
+		tracker.Title,
+		relatedTitlesJSON,
+		tracker.SourceID,
+		tracker.SourceItemID,
+		tracker.SourceURL,
+		tracker.Status,
+		tracker.LastReadChapter,
+		tracker.Rating,
+		tracker.LastReadChapter,
+		tracker.LatestKnownChapter,
+		tracker.LatestKnownChapter,
+		tracker.LatestKnownChapter,
+		tracker.LatestKnownChapter,
+		latestReleaseAt,
+		lastCheckedAt,
+		id,
+		profileID,
+		tracker.Title,
+		relatedTitlesJSON,
+		tracker.SourceID,
+		tracker.SourceItemID,
+		tracker.SourceURL,
+		tracker.Status,
+		tracker.LastReadChapter,
+		tracker.Rating,
+		tracker.LatestKnownChapter,
+		latestReleaseAt,
+		lastCheckedAt,
+	)
+
 	result, err := tx.ExecContext(ctx, `
 		UPDATE trackers
 		SET
+			pending_lower_chapter = CASE WHEN `+chapterOrPrimaryMoved+` THEN NULL ELSE pending_lower_chapter END,
+			pending_lower_first_seen_at = CASE WHEN `+chapterOrPrimaryMoved+` THEN NULL ELSE pending_lower_first_seen_at END,
+			latest_chapter_source_id = CASE WHEN `+chapterOrPrimaryMoved+` THEN NULL ELSE latest_chapter_source_id END,
+			feed_missed_at = CASE WHEN `+primaryMoved+` THEN NULL ELSE feed_missed_at END,
 			title = ?,
 			related_titles = ?,
 			source_id = ?,
@@ -203,36 +260,7 @@ func updateTrackerRowTx(ctx context.Context, tx *sql.Tx, profileID int64, id int
 			OR latest_release_at IS NOT ?
 			OR last_checked_at IS NOT ?
 		  )
-	`,
-		tracker.Title,
-		relatedTitlesJSON,
-		tracker.SourceID,
-		tracker.SourceItemID,
-		tracker.SourceURL,
-		tracker.Status,
-		tracker.LastReadChapter,
-		tracker.Rating,
-		tracker.LastReadChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestKnownChapter,
-		tracker.LatestReleaseAt,
-		tracker.LastCheckedAt,
-		id,
-		profileID,
-		tracker.Title,
-		relatedTitlesJSON,
-		tracker.SourceID,
-		tracker.SourceItemID,
-		tracker.SourceURL,
-		tracker.Status,
-		tracker.LastReadChapter,
-		tracker.Rating,
-		tracker.LatestKnownChapter,
-		tracker.LatestReleaseAt,
-		tracker.LastCheckedAt,
-	)
+	`, args...)
 	if err != nil {
 		return false, fmt.Errorf("update tracker: %w", err)
 	}

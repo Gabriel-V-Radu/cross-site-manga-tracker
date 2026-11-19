@@ -5,17 +5,20 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 // CoverCacheRepository persists the dashboard's cover cache. The in-memory
 // map stays the hot path; this store only has to survive restarts, so writes
 // are write-through and the whole fresh set is loaded once at construction.
 type CoverCacheRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 func NewCoverCacheRepository(db *sql.DB) *CoverCacheRepository {
-	return &CoverCacheRepository{db: db}
+	return &CoverCacheRepository{db: db, rdb: database.Reader(db)}
 }
 
 type CoverCacheRow struct {
@@ -35,12 +38,12 @@ type CoverCacheRow struct {
 // turning the next dashboard render into a resolve storm. Entries with a
 // local copy never expire — the file on disk is the cache.
 func (r *CoverCacheRepository) LoadFresh(ctx context.Context) ([]CoverCacheRow, error) {
-	now := time.Now().UTC()
+	now := dbTime(time.Now())
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM cover_cache WHERE expires_at <= ? AND local_path = ''`, now); err != nil {
 		return nil, fmt.Errorf("sweep expired covers: %w", err)
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT cache_key, cover_url, source_key, found, expires_at, local_path
 		FROM cover_cache
 		WHERE expires_at > ? OR local_path <> ''
@@ -75,7 +78,7 @@ func (r *CoverCacheRepository) Upsert(ctx context.Context, entry CoverCacheRow) 
 			expires_at = excluded.expires_at,
 			local_path = excluded.local_path,
 			updated_at = CURRENT_TIMESTAMP
-	`, entry.CacheKey, entry.CoverURL, entry.SourceKey, entry.Found, entry.ExpiresAt.UTC(), entry.LocalPath)
+	`, entry.CacheKey, entry.CoverURL, entry.SourceKey, entry.Found, dbTime(entry.ExpiresAt), entry.LocalPath)
 	if err != nil {
 		return fmt.Errorf("upsert cover cache entry: %w", err)
 	}

@@ -3,21 +3,25 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 )
 
 // MetadataRepository stores what sites say about series (source_metadata) and
 // each tracker's consolidated view of it (tracker_metadata). See migration
 // 0002 for the tables and internal/metadata for the policy.
 type MetadataRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 func NewMetadataRepository(db *sql.DB) *MetadataRepository {
-	return &MetadataRepository{db: db}
+	return &MetadataRepository{db: db, rdb: database.Reader(db)}
 }
 
 // metadataURLKey is the normalisation source_metadata.source_url is stored
@@ -30,7 +34,7 @@ func metadataURLKey(rawURL string) string {
 // last stored, nil when it never was.
 func (r *MetadataRepository) SourceMetadataFetchedAt(ctx context.Context, sourceID int64, sourceURL string) (*time.Time, error) {
 	var fetchedAt time.Time
-	err := r.db.QueryRowContext(ctx, `
+	err := r.rdb.QueryRowContext(ctx, `
 		SELECT fetched_at FROM source_metadata WHERE source_id = ? AND source_url = ?
 	`, sourceID, metadataURLKey(sourceURL)).Scan(&fetchedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -61,7 +65,7 @@ func (r *MetadataRepository) UpsertSourceMetadata(ctx context.Context, sourceID 
 		ON CONFLICT(source_id, source_url) DO UPDATE SET
 			payload = excluded.payload,
 			fetched_at = excluded.fetched_at
-	`, sourceID, key, payload, fetchedAt.UTC()); err != nil {
+	`, sourceID, key, payload, dbTime(fetchedAt)); err != nil {
 		return fmt.Errorf("upsert source metadata: %w", err)
 	}
 	return nil
@@ -183,7 +187,7 @@ const metadataBackfillLinksQuery = `
 // queryMetadataLinks runs one of the link queries and reads it to the end, so
 // the connection is free again when it returns.
 func (r *MetadataRepository) queryMetadataLinks(ctx context.Context, what string, query string, args ...any) ([]MetadataLink, error) {
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", what, err)
 	}
@@ -236,7 +240,7 @@ type TrackerMetadataRow struct {
 // TrackerMetadataSignatures returns the signature each stored view was built
 // from, by tracker id.
 func (r *MetadataRepository) TrackerMetadataSignatures(ctx context.Context) (map[int64]string, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT tracker_id, signature FROM tracker_metadata`)
+	rows, err := r.rdb.QueryContext(ctx, `SELECT tracker_id, signature FROM tracker_metadata`)
 	if err != nil {
 		return nil, fmt.Errorf("list tracker metadata signatures: %w", err)
 	}
@@ -284,7 +288,7 @@ func (r *MetadataRepository) SaveTrackerMetadata(ctx context.Context, rowsToSave
 				payload = excluded.payload,
 				signature = excluded.signature,
 				updated_at = excluded.updated_at
-		`, row.SeriesType, row.SeriesStatus, genres, row.Payload, row.Signature, row.UpdatedAt.UTC(), row.TrackerID); err != nil {
+		`, row.SeriesType, row.SeriesStatus, genres, row.Payload, row.Signature, dbTime(row.UpdatedAt), row.TrackerID); err != nil {
 			return fmt.Errorf("save tracker metadata %d: %w", row.TrackerID, err)
 		}
 	}
@@ -298,7 +302,7 @@ func (r *MetadataRepository) SaveTrackerMetadata(ctx context.Context, rowsToSave
 // has been built (or the tracker is not the profile's).
 func (r *MetadataRepository) GetTrackerMetadata(ctx context.Context, profileID int64, trackerID int64) (*TrackerMetadataRow, error) {
 	var row TrackerMetadataRow
-	err := r.db.QueryRowContext(ctx, `
+	err := r.rdb.QueryRowContext(ctx, `
 		SELECT tm.tracker_id, tm.series_type, tm.series_status, tm.genres, tm.payload, tm.signature, tm.updated_at
 		FROM tracker_metadata tm
 		INNER JOIN trackers t ON t.id = tm.tracker_id
@@ -322,48 +326,51 @@ type MetadataFacets struct {
 	Genres   map[string]int
 }
 
+// ListMetadataFacets reads the three columns of the profile's views once and
+// counts them here. It used to be three statements, each joining the
+// profile's trackers to their views over again and the third expanding every
+// genre array in SQL, every time the filter menus were built — for three maps
+// that one pass over a few hundred short rows fills.
 func (r *MetadataRepository) ListMetadataFacets(ctx context.Context, profileID int64) (MetadataFacets, error) {
 	facets := MetadataFacets{Types: map[string]int{}, Statuses: map[string]int{}, Genres: map[string]int{}}
 
-	count := func(query string, into map[string]int) error {
-		rows, err := r.db.QueryContext(ctx, query, profileID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var value string
-			var total int
-			if err := rows.Scan(&value, &total); err != nil {
-				return err
-			}
-			if strings.TrimSpace(value) != "" {
-				into[value] = total
-			}
-		}
-		return rows.Err()
+	rows, err := r.rdb.QueryContext(ctx, `
+		SELECT tm.series_type, tm.series_status, tm.genres
+		FROM tracker_metadata tm
+		INNER JOIN trackers t ON t.id = tm.tracker_id
+		WHERE t.profile_id = ?
+	`, profileID)
+	if err != nil {
+		return facets, fmt.Errorf("list metadata facets: %w", err)
 	}
+	defer rows.Close()
 
-	if err := count(`
-		SELECT tm.series_type, COUNT(1) FROM tracker_metadata tm
-		INNER JOIN trackers t ON t.id = tm.tracker_id
-		WHERE t.profile_id = ? GROUP BY tm.series_type
-	`, facets.Types); err != nil {
-		return facets, fmt.Errorf("count trackers by type: %w", err)
+	for rows.Next() {
+		var seriesType, seriesStatus, genresJSON string
+		if err := rows.Scan(&seriesType, &seriesStatus, &genresJSON); err != nil {
+			return facets, fmt.Errorf("scan metadata facets: %w", err)
+		}
+		if strings.TrimSpace(seriesType) != "" {
+			facets.Types[seriesType]++
+		}
+		if strings.TrimSpace(seriesStatus) != "" {
+			facets.Statuses[seriesStatus]++
+		}
+		// A genres column that is not a JSON array of strings counts for no
+		// genre and does not fail the menus; json_each would have failed the
+		// whole statement on it.
+		var genres []string
+		if err := json.Unmarshal([]byte(genresJSON), &genres); err != nil {
+			continue
+		}
+		for _, genre := range genres {
+			if strings.TrimSpace(genre) != "" {
+				facets.Genres[genre]++
+			}
+		}
 	}
-	if err := count(`
-		SELECT tm.series_status, COUNT(1) FROM tracker_metadata tm
-		INNER JOIN trackers t ON t.id = tm.tracker_id
-		WHERE t.profile_id = ? GROUP BY tm.series_status
-	`, facets.Statuses); err != nil {
-		return facets, fmt.Errorf("count trackers by publication status: %w", err)
-	}
-	if err := count(`
-		SELECT genre.value, COUNT(1) FROM tracker_metadata tm
-		INNER JOIN trackers t ON t.id = tm.tracker_id, json_each(tm.genres) genre
-		WHERE t.profile_id = ? GROUP BY genre.value
-	`, facets.Genres); err != nil {
-		return facets, fmt.Errorf("count trackers by genre: %w", err)
+	if err := rows.Err(); err != nil {
+		return facets, fmt.Errorf("iterate metadata facets: %w", err)
 	}
 	return facets, nil
 }

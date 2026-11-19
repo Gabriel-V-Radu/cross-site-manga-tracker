@@ -222,6 +222,59 @@ func TestApplyManualLinkSettlesTheReview(t *testing.T) {
 	}
 }
 
+// TestApplyManualLinkOfACandidateAcceptsIt covers pasting, into the manual
+// field, the address of one of the candidates on offer. That candidate was
+// rejected along with its siblings, so the record said the reader had turned
+// down the very link the tracker ended up with. However the URL is spelled,
+// it is that candidate accepted; the others are rejected as before.
+func TestApplyManualLinkOfACandidateAcceptsIt(t *testing.T) {
+	db := openLinkSuggestionTestDB(t)
+	repo := repository.NewLinkSuggestionRepository(db)
+	comick := sourceIDByKey(t, db, "comick")
+	trackerID := seedLinkTracker(t, db, "series")
+	seedTwoCandidates(t, db, trackerID, comick)
+
+	pasted := "  " + strings.ToUpper(bestCandidateURL[:14]) + bestCandidateURL[14:] + " "
+	if err := repo.ApplyManualLink(context.Background(), 1, trackerID, models.TrackerSource{
+		SourceID:  comick,
+		SourceURL: pasted,
+	}, comick); err != nil {
+		t.Fatalf("apply manual link: %v", err)
+	}
+
+	if got := countLinkRows(t, db, trackerID, comick); got != 1 {
+		t.Fatalf("comick link rows = %d, want 1", got)
+	}
+	if got := suggestionStatusByURL(t, db, bestCandidateURL); got != repository.LinkSuggestionAccepted {
+		t.Fatalf("the pasted candidate's status = %q, want accepted", got)
+	}
+	if got := suggestionStatusByURL(t, db, siblingCandidateURL); got != repository.LinkSuggestionRejected {
+		t.Fatalf("the other candidate's status = %q, want rejected", got)
+	}
+	// The tracker is linked, not dismissed: no marker row was written.
+	var markers int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM source_link_suggestions WHERE tracker_id = ? AND candidate_url = ''`, trackerID).Scan(&markers); err != nil || markers != 0 {
+		t.Fatalf("dismissal markers = %d, %v; a link on the reviewed source is not a dismissal", markers, err)
+	}
+
+	// A pasted link that is none of the candidates still rejects them all.
+	other := seedLinkTracker(t, db, "other")
+	if err := repo.ReplacePendingSuggestions(context.Background(), other, comick, []repository.LinkSuggestion{
+		pendingSuggestion(other, comick, "https://comick.io/comic/01ABCDEFGHJKMNPQRSTVWXYZ09", "Other", 1.0),
+	}); err != nil {
+		t.Fatalf("store the other tracker's candidate: %v", err)
+	}
+	if err := repo.ApplyManualLink(context.Background(), 1, other, models.TrackerSource{
+		SourceID:  comick,
+		SourceURL: "https://comick.io/comic/01ABCDEFGHJKMNPQRSTVWXYZ10",
+	}, comick); err != nil {
+		t.Fatalf("apply the unrelated link: %v", err)
+	}
+	if got := suggestionStatusByURL(t, db, "https://comick.io/comic/01ABCDEFGHJKMNPQRSTVWXYZ09"); got != repository.LinkSuggestionRejected {
+		t.Fatalf("a candidate the reader bypassed has status %q, want rejected", got)
+	}
+}
+
 // TestApplyManualLinkRefusesTheTrackersOwnPrimary covers pasting the
 // tracker's own address: it used to settle the review as if a fallback had
 // been found — candidates rejected, the tracker marked dismissed for the

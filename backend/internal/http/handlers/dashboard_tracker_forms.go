@@ -680,7 +680,7 @@ func (h *DashboardHandler) loadTrackerCardView(ctx context.Context, profileID in
 		[]models.Tracker{*tracker},
 		sourceByID,
 		sourceLogoBySourceID,
-		h.trackerAlternatesForProfile(ctx, profileID),
+		h.trackerAlternatesFor(ctx, profileID, tracker.ID),
 		"",
 	)
 	if len(cards) == 0 {

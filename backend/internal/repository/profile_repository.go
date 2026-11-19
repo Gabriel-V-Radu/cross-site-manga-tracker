@@ -5,19 +5,21 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 )
 
 type ProfileRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 func NewProfileRepository(db *sql.DB) *ProfileRepository {
-	return &ProfileRepository{db: db}
+	return &ProfileRepository{db: db, rdb: database.Reader(db)}
 }
 
 func (r *ProfileRepository) List(ctx context.Context) ([]models.Profile, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		ORDER BY id ASC
@@ -44,7 +46,7 @@ func (r *ProfileRepository) List(ctx context.Context) ([]models.Profile, error) 
 }
 
 func (r *ProfileRepository) GetByID(ctx context.Context, id int64) (*models.Profile, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		WHERE id = ?
@@ -54,7 +56,7 @@ func (r *ProfileRepository) GetByID(ctx context.Context, id int64) (*models.Prof
 }
 
 func (r *ProfileRepository) GetByKey(ctx context.Context, key string) (*models.Profile, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		WHERE key = ?
@@ -64,7 +66,7 @@ func (r *ProfileRepository) GetByKey(ctx context.Context, key string) (*models.P
 }
 
 func (r *ProfileRepository) GetDefault(ctx context.Context) (*models.Profile, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, key, name, created_at, updated_at
 		FROM profiles
 		ORDER BY id ASC

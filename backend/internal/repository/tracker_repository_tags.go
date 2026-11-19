@@ -10,7 +10,7 @@ import (
 )
 
 func (r *TrackerRepository) ListProfileTags(ctx context.Context, profileID int64) ([]models.CustomTag, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE profile_id = ?
@@ -77,7 +77,7 @@ func (r *TrackerRepository) CreateProfileTag(ctx context.Context, profileID int6
 		return nil, fmt.Errorf("get created profile tag id: %w", err)
 	}
 
-	row := r.db.QueryRowContext(ctx, `
+	row := r.rdb.QueryRowContext(ctx, `
 		SELECT id, profile_id, name, icon_key, created_at, updated_at
 		FROM custom_tags
 		WHERE id = ? AND profile_id = ?
@@ -232,7 +232,7 @@ func (r *TrackerRepository) ListTagsByTrackerIDs(ctx context.Context, profileID 
 		ORDER BY tt.tracker_id ASC, ct.name ASC, ct.id ASC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list tags by tracker ids: %w", err)
 	}

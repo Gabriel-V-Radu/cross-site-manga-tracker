@@ -107,7 +107,7 @@ func (r *TrackerRepository) List(ctx context.Context, options TrackerListOptions
 // single-connection pool, so it must not start while this cursor still holds
 // the connection.
 func (r *TrackerRepository) queryTrackers(ctx context.Context, query string, args []any) ([]models.Tracker, error) {
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers: %w", err)
 	}
@@ -137,7 +137,7 @@ func (r *TrackerRepository) Count(ctx context.Context, options TrackerListOption
 	}
 
 	var total int
-	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
+	if err := r.rdb.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("count trackers: %w", err)
 	}
 
@@ -157,17 +157,21 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 		// than SQLite's ASCII-only LOWER(): with LOWER() a title starting with
 		// a non-ASCII capital ('Ōkami') stayed as it was and 'ōkami' could
 		// never find it.
+		//
+		// What the reader typed is looked for as text (likePattern): a "%" or
+		// a "_" in it is that character, not LIKE's wildcard.
+		const titleMatches = `(unicode_lower(trackers.title) LIKE ? ESCAPE '\' OR unicode_lower(COALESCE(trackers.related_titles, '')) LIKE ? ESCAPE '\')`
 		normalizedQuery := searchutil.Normalize(options.Query)
 		if normalizedQuery != "" {
 			queryTokens := searchutil.TokenizeNormalized(normalizedQuery)
 			if len(queryTokens) == 0 {
-				whereClauses = append(whereClauses, `(unicode_lower(trackers.title) LIKE ? OR unicode_lower(COALESCE(trackers.related_titles, '')) LIKE ?)`)
-				queryLike := "%" + normalizedQuery + "%"
+				whereClauses = append(whereClauses, titleMatches)
+				queryLike := likePattern(normalizedQuery)
 				args = append(args, queryLike, queryLike)
 			} else {
 				for _, token := range queryTokens {
-					tokenLike := "%" + token + "%"
-					whereClauses = append(whereClauses, `(unicode_lower(trackers.title) LIKE ? OR unicode_lower(COALESCE(trackers.related_titles, '')) LIKE ?)`)
+					tokenLike := likePattern(token)
+					whereClauses = append(whereClauses, titleMatches)
 					args = append(args, tokenLike, tokenLike)
 				}
 			}
@@ -192,7 +196,10 @@ func buildTrackerListFilters(options TrackerListOptions) ([]string, []any) {
 			if normalizedStatus == "reading" {
 				hasReading = true
 			}
-			statuses = append(statuses, status)
+			// The lowered form is what goes into the statement: the column
+			// only ever holds lower case (its CHECK), so "Reading" bound as
+			// it was passed in matched no tracker at all.
+			statuses = append(statuses, normalizedStatus)
 		}
 
 		if len(statuses) > 0 {
@@ -335,9 +342,11 @@ func (r *TrackerRepository) ListForPolling(ctx context.Context) ([]PollingTracke
 // so walked every link of the tracker's site, hundreds of rows, per tracker.
 // With the term disqualified the only index left for the subquery is the
 // UNIQUE(tracker_id, source_id, source_url) one, entered by tracker_id: the
-// tracker's own one to five links, filtered and sorted in passing. The
-// database has no sqlite_stat tables and nothing runs ANALYZE, so the choice
-// cannot be left to statistics; INDEXED BY would pin it too, but by an
+// tracker's own one to five links, filtered and sorted in passing. A fresh
+// database has no sqlite_stat tables — the server only leaves statistics when
+// it shuts down (database.Optimize) — so the choice cannot be left to them,
+// and the plan is pinned to hold with them and without (the plan tests run it
+// both ways); INDEXED BY would pin it too, but by an
 // auto-generated index name that turns every poll into an error the day the
 // table is rebuilt, where the plus merely stops helping.
 const pollingTrackersQuery = `
@@ -367,7 +376,7 @@ const pollingTrackersQuery = `
 // because an aggregate loses the column's DATETIME type, and the driver then
 // hands back a string that will not scan into a time.
 func (r *TrackerRepository) listPollingTrackers(ctx context.Context) ([]PollingTracker, error) {
-	rows, err := r.db.QueryContext(ctx, pollingTrackersQuery)
+	rows, err := r.rdb.QueryContext(ctx, pollingTrackersQuery)
 	if err != nil {
 		return nil, fmt.Errorf("list trackers for polling: %w", err)
 	}
@@ -468,23 +477,52 @@ const alternateSourcesOrder = ` ORDER BY ts.tracker_id ASC, s.name ASC, ts.id AS
 // keyed by tracker id. Loaded in one query rather than per tracker to keep polling
 // a two-query operation regardless of library size.
 func (r *TrackerRepository) listPollingAlternateSources(ctx context.Context) (map[int64][]TrackerSourceRef, error) {
-	rows, err := r.db.QueryContext(ctx, alternateSourcesQuery+alternateSourcesOrder)
+	rows, err := r.rdb.QueryContext(ctx, alternateSourcesQuery+alternateSourcesOrder)
 	if err != nil {
 		return nil, fmt.Errorf("list polling alternate sources: %w", err)
 	}
 	return scanAlternateSources(rows)
 }
 
-// ListAlternateSourcesByTracker loads one profile's alternates, keyed by tracker
-// id. The dashboard resolves covers and chapter links against a tracker's primary
-// source; when that source is unreadable it falls back to these, so a blocked site
-// does not leave the whole library without cover art or working chapter links.
-func (r *TrackerRepository) ListAlternateSourcesByTracker(ctx context.Context, profileID int64) (map[int64][]TrackerSourceRef, error) {
-	rows, err := r.db.QueryContext(ctx, alternateSourcesQuery+` AND t.profile_id = ?`+alternateSourcesOrder, profileID)
-	if err != nil {
-		return nil, fmt.Errorf("list alternate sources by tracker: %w", err)
+// maxAlternateSourceTrackers bounds one statement's IN list, well under
+// SQLite's bound-parameter limit.
+const maxAlternateSourceTrackers = 500
+
+// ListAlternateSourcesByTrackerIDs loads the alternates of the given trackers
+// of one profile, keyed by tracker id. The dashboard resolves covers and
+// chapter links against a tracker's primary source; when that source is
+// unreadable it falls back to these, so a blocked site does not leave the
+// cards without cover art or working chapter links.
+//
+// It is asked for the trackers a page is about to show. A page is two dozen
+// cards and a re-rendered card is one; both used to load the alternates of
+// the profile's whole library to pick theirs out. Trackers that are not the
+// profile's are left out.
+func (r *TrackerRepository) ListAlternateSourcesByTrackerIDs(ctx context.Context, profileID int64, trackerIDs []int64) (map[int64][]TrackerSourceRef, error) {
+	alternates := map[int64][]TrackerSourceRef{}
+	ids := dedupePositiveInt64(trackerIDs)
+	for start := 0; start < len(ids); start += maxAlternateSourceTrackers {
+		batch := ids[start:min(start+maxAlternateSourceTrackers, len(ids))]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, profileID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := r.rdb.QueryContext(ctx, alternateSourcesQuery+
+			` AND t.profile_id = ? AND ts.tracker_id IN (`+sqlPlaceholders(len(batch))+`)`+
+			alternateSourcesOrder, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list alternate sources by tracker ids: %w", err)
+		}
+		batchAlternates, err := scanAlternateSources(rows)
+		if err != nil {
+			return nil, err
+		}
+		for trackerID, sources := range batchAlternates {
+			alternates[trackerID] = sources
+		}
 	}
-	return scanAlternateSources(rows)
+	return alternates, nil
 }
 
 func scanAlternateSources(rows *sql.Rows) (map[int64][]TrackerSourceRef, error) {
@@ -532,7 +570,7 @@ func (r *TrackerRepository) MarkPollCheckedAt(ctx context.Context, trackerID int
 	// Every statement goes through tx: see UpdatePollingState.
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, checkedAt.UTC(), trackerID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE trackers SET last_checked_at = ? WHERE id = ?`, dbTime(checkedAt), trackerID); err != nil {
 		return fmt.Errorf("mark poll checked: %w", err)
 	}
 	if err := recordSourcePolls(ctx, tx, trackerID, checkedAt, polls); err != nil {
@@ -567,7 +605,7 @@ func recordSourcePolls(ctx context.Context, tx *sql.Tx, trackerID int64, polledA
 			SET last_polled_at = ?,
 				in_step = CASE WHEN ? THEN ? ELSE in_step END
 			WHERE tracker_id = ? AND source_id = ? AND LOWER(TRIM(source_url)) = LOWER(TRIM(?))
-		`, polledAt.UTC(), poll.Answered, poll.InStep, trackerID, sourceID, sourceURL); err != nil {
+		`, dbTime(polledAt), poll.Answered, poll.InStep, trackerID, sourceID, sourceURL); err != nil {
 			return fmt.Errorf("record source poll: %w", err)
 		}
 	}
@@ -591,11 +629,15 @@ func recordSourcePolls(ctx context.Context, tx *sql.Tx, trackerID int64, polledA
 // one transaction: they describe a single poll outcome, and a crash between
 // the DELETE and the INSERT used to drop the primary-source mirror row
 // permanently.
+//
+// updated_at moves only when the poll changed something the reader sees of
+// the tracker: its chapter, its release date, or the primary's link. It used
+// to be stamped by every poll, so "recently updated" was the order the
+// trackers had last been polled in, and the card's "updated" line the time
+// of the last cycle. When it checked, what is pending and who supplied the
+// number are the poller's own bookkeeping and have their own columns.
 func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update PollingUpdate) (bool, error) {
-	var latestReleaseValue any
-	if update.LatestReleaseAt != nil {
-		latestReleaseValue = update.LatestReleaseAt.UTC()
-	}
+	latestReleaseValue := dbTimeArg(update.LatestReleaseAt)
 	trimmedSourceURL := strings.TrimSpace(update.SourceURL)
 	trimmedCurrentSourceURL := strings.TrimSpace(update.CurrentSourceURL)
 	var sourceURLValue any
@@ -610,7 +652,7 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		}
 	}
 
-	checkedAt := update.CheckedAt.UTC()
+	checkedAt := dbTime(update.CheckedAt)
 	latestKnownChapter := update.LatestKnownChapter
 	pendingLower := update.PendingLowerChapter
 	var latestChapterSourceValue any
@@ -636,7 +678,16 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 	// and can age into confirmation.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE trackers
-		SET source_item_id = COALESCE(?, source_item_id),
+		SET updated_at = CASE
+				WHEN COALESCE(?, source_item_id) IS NOT source_item_id
+				  OR COALESCE(?, source_url) IS NOT source_url
+				  OR latest_known_chapter IS NOT ?
+				  OR (? AND latest_release_at IS NOT NULL)
+				  OR (NOT ? AND ? IS NOT NULL AND latest_release_at IS NOT ?)
+				THEN CURRENT_TIMESTAMP
+				ELSE updated_at
+			END,
+			source_item_id = COALESCE(?, source_item_id),
 			source_url = COALESCE(?, source_url),
 			latest_chapter_seen_at = CASE
 				WHEN ? IS NULL THEN latest_chapter_seen_at
@@ -666,9 +717,11 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 				WHEN ? IS NOT NULL THEN ?
 				ELSE latest_release_at
 			END,
-			last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
+			last_checked_at = ?
 		WHERE id = ? AND source_id = ? AND source_url = ? AND latest_known_chapter IS ?
-	`, sourceItemIDValue, sourceURLValue,
+	`, sourceItemIDValue, sourceURLValue, latestKnownChapter,
+		update.ClearLatestReleaseAt, update.ClearLatestReleaseAt, latestReleaseValue, latestReleaseValue,
+		sourceItemIDValue, sourceURLValue,
 		latestKnownChapter, latestKnownChapter, checkedAt, checkedAt,
 		latestKnownChapter, latestKnownChapter, checkedAt, latestKnownChapter,
 		latestKnownChapter,
@@ -698,21 +751,19 @@ func (r *TrackerRepository) UpdatePollingState(ctx context.Context, update Polli
 		if trimmedCurrentSourceURL != "" && !strings.EqualFold(trimmedCurrentSourceURL, trimmedSourceURL) {
 			if _, err := tx.ExecContext(ctx, `
 				DELETE FROM tracker_sources
-				WHERE tracker_id = ? AND source_id = ? AND LOWER(source_url) = LOWER(?)
+				WHERE tracker_id = ? AND source_id = ? AND LOWER(TRIM(source_url)) = LOWER(TRIM(?))
 			`, update.TrackerID, update.SourceID, trimmedCurrentSourceURL); err != nil {
 				return false, fmt.Errorf("delete stale polling tracker source: %w", err)
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(tracker_id, source_id, source_url)
-			DO UPDATE SET
-				source_item_id = excluded.source_item_id,
-				updated_at = CURRENT_TIMESTAMP
-		`, update.TrackerID, update.SourceID, update.SourceItemID, trimmedSourceURL); err != nil {
-			return false, fmt.Errorf("upsert polling tracker source: %w", err)
+		// The mirror row is written only when it is missing or differs. This
+		// was an upsert that rewrote the row on every poll the primary
+		// answered — its item id, with NULL when the answer carried none, and
+		// its updated_at — a moment before recordSourcePolls below wrote the
+		// same row again.
+		if _, err := keepOrInsertTrackerSourceTx(ctx, tx, update.TrackerID, update.SourceID, update.SourceItemID, trimmedSourceURL); err != nil {
+			return false, fmt.Errorf("mirror polling tracker source: %w", err)
 		}
 	}
 

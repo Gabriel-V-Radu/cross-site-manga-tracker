@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gabriel/cross-site-tracker/backend/internal/database"
 	"github.com/gabriel/cross-site-tracker/backend/internal/models"
 	"github.com/gabriel/cross-site-tracker/backend/internal/searchutil"
 )
@@ -72,11 +73,12 @@ type LinkReviewTracker struct {
 }
 
 type LinkSuggestionRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 }
 
 func NewLinkSuggestionRepository(db *sql.DB) *LinkSuggestionRepository {
-	return &LinkSuggestionRepository{db: db}
+	return &LinkSuggestionRepository{db: db, rdb: database.Reader(db)}
 }
 
 // LinkScanFilter narrows which of a profile's unlinked trackers a scan (and
@@ -122,13 +124,13 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 	  AND NOT EXISTS (
 	      SELECT 1 FROM source_link_suggestions marker
 	      WHERE marker.tracker_id = t.id AND marker.source_id = ?
-	        AND marker.status = 'dismissed'
+	        AND marker.candidate_url = '' AND marker.status = 'dismissed'
 	  )
 `
 	args := []any{sourceID, sourceID, profileID, sourceID}
 
 	if len(filter.Statuses) > 0 {
-		query += ` AND LOWER(TRIM(t.status)) IN (` + sqlPlaceholders(len(filter.Statuses)) + `)`
+		query += ` AND t.status IN (` + sqlPlaceholders(len(filter.Statuses)) + `)`
 		for _, status := range filter.Statuses {
 			args = append(args, strings.ToLower(strings.TrimSpace(status)))
 		}
@@ -161,7 +163,7 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 // ListScanTargets returns the trackers a scan of sourceID should look up.
 func (r *LinkSuggestionRepository) ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
 	query, args := linkableTrackersQuery(profileID, sourceID, filter)
-	rows, err := r.db.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
+	rows, err := r.rdb.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list link scan targets: %w", err)
 	}
@@ -256,7 +258,7 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 				score = excluded.score
 			WHERE source_link_suggestions.status = 'pending'
 		`, trackerID, sourceID, candidateURL, suggestion.CandidateItemID, suggestion.CandidateTitle,
-			suggestion.CandidateCoverURL, suggestion.CandidateLatestChapter, suggestion.CandidateReleaseAt,
+			suggestion.CandidateCoverURL, suggestion.CandidateLatestChapter, dbTimeArg(suggestion.CandidateReleaseAt),
 			suggestion.Score); err != nil {
 			return fmt.Errorf("upsert suggestion: %w", err)
 		}
@@ -274,7 +276,7 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 // top slots, so the next-best hits — often the right series — never reached
 // the queue.
 func (r *LinkSuggestionRepository) DecidedCandidateURLs(ctx context.Context, trackerID int64, sourceID int64) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.rdb.QueryContext(ctx, `
 		SELECT candidate_url FROM source_link_suggestions
 		WHERE tracker_id = ? AND source_id = ? AND status IN ('accepted', 'rejected')
 		  AND candidate_url != ''
@@ -310,7 +312,7 @@ func (r *LinkSuggestionRepository) ListReviewQueue(ctx context.Context, profileI
 		return queue, nil
 	}
 
-	suggestionRows, err := r.db.QueryContext(ctx, `
+	suggestionRows, err := r.rdb.QueryContext(ctx, `
 		SELECT s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
 		       s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
 		       s.candidate_release_at, s.score, s.status, s.created_at
@@ -346,7 +348,7 @@ func (r *LinkSuggestionRepository) ListReviewQueue(ctx context.Context, profileI
 // one holds until it is drained.
 func (r *LinkSuggestionRepository) listReviewQueueTrackers(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkReviewTracker, map[int64]int, error) {
 	query, args := linkableTrackersQuery(profileID, sourceID, filter)
-	rows, err := r.db.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
+	rows, err := r.rdb.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list review queue trackers: %w", err)
 	}
@@ -435,7 +437,7 @@ const pendingSuggestionByIDSQL = `
 // GetPendingSuggestion loads one pending suggestion, verifying through the
 // tracker that it belongs to the profile.
 func (r *LinkSuggestionRepository) GetPendingSuggestion(ctx context.Context, profileID int64, suggestionID int64) (*LinkSuggestion, error) {
-	suggestion, err := scanLinkSuggestion(r.db.QueryRowContext(ctx, pendingSuggestionByIDSQL, suggestionID, profileID))
+	suggestion, err := scanLinkSuggestion(r.rdb.QueryRowContext(ctx, pendingSuggestionByIDSQL, suggestionID, profileID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -557,6 +559,20 @@ func (r *LinkSuggestionRepository) ApplyManualLink(ctx context.Context, profileI
 	if err := upsertTrackerSourceTx(ctx, tx, trackerID, link); err != nil {
 		return err
 	}
+	// A pasted link that is one of the candidates on offer is that candidate
+	// accepted, by hand instead of by its button. It used to be rejected with
+	// the rest, and the record then said the reader had turned down the very
+	// link the tracker now has.
+	if link.SourceID == reviewSourceID {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE source_link_suggestions
+			SET status = 'accepted', decided_at = CURRENT_TIMESTAMP
+			WHERE tracker_id = ? AND source_id = ? AND status = 'pending'
+			  AND LOWER(TRIM(candidate_url)) = LOWER(TRIM(?))
+		`, trackerID, reviewSourceID, link.SourceURL); err != nil {
+			return fmt.Errorf("accept the pasted candidate: %w", err)
+		}
+	}
 	if err := rejectPendingSuggestionsTx(ctx, tx, trackerID, reviewSourceID, 0); err != nil {
 		return err
 	}
@@ -610,22 +626,17 @@ func trackerOwnedByProfileTx(ctx context.Context, tx *sql.Tx, trackerID int64, p
 }
 
 // upsertTrackerSourceTx links a tracker to a source through the transaction
-// handle. TrackerRepository.UpsertTrackerSource runs the same statement, but
-// on the *sql.DB: with MaxOpenConns(1), calling it while a transaction is open
-// would wait forever for the connection that transaction holds.
+// handle: the stored row for that link when there is one, whatever the case
+// or padding it was stored with, a new row otherwise
+// (keepOrInsertTrackerSourceTx). TrackerRepository.UpsertTrackerSource is the
+// same on a transaction of its own; calling that while a transaction is open
+// would wait forever for the writer's one connection.
 func upsertTrackerSourceTx(ctx context.Context, tx *sql.Tx, trackerID int64, source models.TrackerSource) error {
 	sourceURL := strings.TrimSpace(source.SourceURL)
 	if source.SourceID <= 0 || sourceURL == "" {
 		return fmt.Errorf("link tracker source: a source and a url are required")
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tracker_sources (tracker_id, source_id, source_item_id, source_url)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(tracker_id, source_id, source_url)
-		DO UPDATE SET
-			source_item_id = excluded.source_item_id,
-			updated_at = CURRENT_TIMESTAMP
-	`, trackerID, source.SourceID, source.SourceItemID, sourceURL); err != nil {
+	if _, err := keepOrInsertTrackerSourceTx(ctx, tx, trackerID, source.SourceID, source.SourceItemID, sourceURL); err != nil {
 		return fmt.Errorf("upsert tracker source: %w", err)
 	}
 	return nil

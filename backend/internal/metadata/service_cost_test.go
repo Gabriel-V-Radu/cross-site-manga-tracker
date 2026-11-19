@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +71,9 @@ type askedConnector struct {
 	answer   *connectors.SeriesMetadata
 	asked    []string
 	cooldown time.Duration
+	// failWith, when set, is what a resolve fails with in place of the plain
+	// "nothing to say".
+	failWith error
 }
 
 func (c *askedConnector) Key() string                       { return c.key }
@@ -80,6 +85,9 @@ func (c *askedConnector) SearchByTitle(context.Context, string, int) ([]connecto
 }
 func (c *askedConnector) ResolveByURL(_ context.Context, rawURL string) (*connectors.MangaResult, error) {
 	c.asked = append(c.asked, rawURL)
+	if c.failWith != nil {
+		return nil, c.failWith
+	}
 	if c.answer == nil {
 		return nil, errors.New("nothing to say")
 	}
@@ -197,6 +205,166 @@ func TestBackfillKeepsItsRetryWindowAndCooldownSkip(t *testing.T) {
 	}
 	if len(cooling.asked) != 1 {
 		t.Fatalf("once the cooldown ended the site was asked %d times, want 1", len(cooling.asked))
+	}
+}
+
+// TestBackfillAsksTheNextSiteWhenOneHasNothing: the retry window is a link's,
+// not a tracker's. A tracker linked to a site with nothing to say about the
+// series and to another that has it used to sit out the whole window after
+// the first site came back empty, its second site never asked.
+func TestBackfillAsksTheNextSiteWhenOneHasNothing(t *testing.T) {
+	db := openServiceTestDB(t)
+	ctx := context.Background()
+	mangadex, mangahub := sourceIDOf(t, db, "mangadex"), sourceIDOf(t, db, "mangahub")
+	const primaryURL, alternateURL = "https://mangadex.org/title/two-sites", "https://mangahub.io/manga/two-sites"
+	tracker := insertTracker(t, db, "two sites", mangadex, primaryURL)
+	if _, err := db.Exec(`INSERT INTO tracker_sources (tracker_id, source_id, source_url) VALUES (?, ?, ?)`, tracker, mangahub, alternateURL); err != nil {
+		t.Fatal(err)
+	}
+
+	silent := &askedConnector{key: "mangadex"}
+	knows := &askedConnector{key: "mangahub", answer: &connectors.SeriesMetadata{Type: "manhwa"}}
+	service := NewService(repository.NewMetadataRepository(db), fakeResolver{"mangadex": silent, "mangahub": knows},
+		Config{Backfill: true, BackfillGap: time.Millisecond, BackfillRetryAfter: time.Hour}, nil)
+
+	if asked := service.backfillPass(ctx); asked != 1 || len(silent.asked) != 1 || len(knows.asked) != 0 {
+		t.Fatalf("first pass asked %d sites (mangadex %d, mangahub %d); want the better-ranked site, once", asked, len(silent.asked), len(knows.asked))
+	}
+	if asked := service.backfillPass(ctx); asked != 1 || len(silent.asked) != 1 || len(knows.asked) != 1 {
+		t.Fatalf("second pass asked %d sites (mangadex %d, mangahub %d); want the tracker's other site", asked, len(silent.asked), len(knows.asked))
+	}
+	if written, err := service.Reconcile(ctx); err != nil || written != 1 {
+		t.Fatalf("Reconcile = %d, %v; want the tracker's view built from its second site", written, err)
+	}
+	// With metadata stored the tracker is no longer the backfill's business.
+	if asked := service.backfillPass(ctx); asked != 0 {
+		t.Fatalf("a tracker with metadata was asked about again (%d sites)", asked)
+	}
+}
+
+// TestBackfillDoesNotHoldALocalRefusalAgainstTheLink: a resolve refused
+// because the site is cooling down, or our own queue for it is full, asked
+// nobody. Marked as a failure, a ten-minute cooldown cost the link its whole
+// retry window, twelve hours by default.
+func TestBackfillDoesNotHoldALocalRefusalAgainstTheLink(t *testing.T) {
+	db := openServiceTestDB(t)
+	ctx := context.Background()
+	mangadex := sourceIDOf(t, db, "mangadex")
+	insertTracker(t, db, "refused", mangadex, "https://mangadex.org/title/refused")
+
+	connector := &askedConnector{
+		key:      "mangadex",
+		failWith: fmt.Errorf("resolve: %w", &connectors.SourceCoolingDownError{Host: "api.mangadex.org", RetryAfter: 8 * time.Minute}),
+	}
+	service := NewService(repository.NewMetadataRepository(db), fakeResolver{"mangadex": connector},
+		Config{Backfill: true, BackfillGap: time.Millisecond, BackfillRetryAfter: time.Hour}, nil)
+
+	service.backfillPass(ctx)
+	if len(service.backfillFailed) != 0 {
+		t.Fatalf("a local refusal was remembered as a failure: %v", service.backfillFailed)
+	}
+	connector.failWith, connector.answer = nil, &connectors.SeriesMetadata{Type: "manga"}
+	service.backfillPass(ctx)
+	if len(connector.asked) != 2 {
+		t.Fatalf("after the refusal the site was asked %d times in all, want 2", len(connector.asked))
+	}
+	if written, err := service.Reconcile(ctx); err != nil || written != 1 {
+		t.Fatalf("Reconcile = %d, %v; want the view the second pass brought", written, err)
+	}
+}
+
+// TestBackfillForgetsFailuresPastTheirWindow: nothing used to remove an entry
+// from the failure memory — not the window passing, not the tracker being
+// deleted — so it only ever grew.
+func TestBackfillForgetsFailuresPastTheirWindow(t *testing.T) {
+	db := openServiceTestDB(t)
+	ctx := context.Background()
+	mangadex := sourceIDOf(t, db, "mangadex")
+	gone := insertTracker(t, db, "gone", mangadex, "https://mangadex.org/title/gone")
+	insertTracker(t, db, "stays", mangadex, "https://mangadex.org/title/stays")
+
+	silent := &askedConnector{key: "mangadex"}
+	service := NewService(repository.NewMetadataRepository(db), fakeResolver{"mangadex": silent},
+		Config{Backfill: true, BackfillGap: time.Millisecond, BackfillRetryAfter: time.Hour}, nil)
+	clock := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return clock }
+
+	service.backfillPass(ctx)
+	if len(service.backfillFailed) != 2 {
+		t.Fatalf("precondition: both links failed and are remembered, got %v", service.backfillFailed)
+	}
+	if _, err := db.Exec(`DELETE FROM trackers WHERE id = ?`, gone); err != nil {
+		t.Fatal(err)
+	}
+
+	clock = clock.Add(time.Hour)
+	service.backfillPass(ctx)
+	if len(service.backfillFailed) != 1 {
+		t.Fatalf("past the window the memory holds %d entries, want only the link that failed again: %v",
+			len(service.backfillFailed), service.backfillFailed)
+	}
+	for key := range service.backfillFailed {
+		if key.trackerID == gone {
+			t.Fatalf("a deleted tracker's failure is still remembered: %+v", key)
+		}
+	}
+}
+
+// TestBackfillScheduleBacksOffWhileIdle pins the pacing the loop gives the
+// backfill: a pass per reconcile tick while there is work, twice as far apart
+// after each pass that asked nobody, and back at once when one does. It ran
+// some eighty times an hour whatever it found, which after the first days is
+// nothing.
+func TestBackfillScheduleBacksOffWhileIdle(t *testing.T) {
+	const tick = 3 * time.Minute
+	schedule := backfillSchedule{base: tick}
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+	// passesIn walks the ticks of the given span and returns the offsets at
+	// which a pass ran, each pass asking the given number of sites.
+	passesIn := func(span time.Duration, asked int) []time.Duration {
+		var ran []time.Duration
+		start := now
+		for ; now.Sub(start) < span; now = now.Add(tick) {
+			if schedule.due(now) {
+				ran = append(ran, now.Sub(start))
+				schedule.ran(asked, now)
+			}
+		}
+		return ran
+	}
+	minutes := func(offsets []time.Duration) string {
+		parts := make([]string, 0, len(offsets))
+		for _, offset := range offsets {
+			parts = append(parts, fmt.Sprint(int(offset.Minutes())))
+		}
+		return strings.Join(parts, ",")
+	}
+
+	if got := minutes(passesIn(12*time.Minute, 3)); got != "0,3,6,9" {
+		t.Fatalf("with work to do the passes ran at minutes %s, want every tick", got)
+	}
+	// Idle from here: 6, 12, 24 and then 30 minutes apart.
+	if got := minutes(passesIn(3*time.Hour, 0)); got != "0,6,18,42,72,102,132,162" {
+		t.Fatalf("idle, the passes ran at minutes %s, want them to back off to one every half hour", got)
+	}
+	if got := len(passesIn(time.Hour, 0)); got != 2 {
+		t.Fatalf("an idle hour ran %d passes, want 2", got)
+	}
+
+	// One pass with something to ask and it is back on every tick; a pass
+	// that stopped at its bound is due again at the very next one.
+	for !schedule.due(now) {
+		now = now.Add(tick)
+	}
+	schedule.ran(1, now)
+	now = now.Add(tick)
+	if !schedule.due(now) {
+		t.Fatal("after a pass that asked a site the next tick must run one")
+	}
+	schedule.ran(maxBackfillPerPass, now)
+	if !schedule.due(now) {
+		t.Fatal("a pass that stopped at its bound has more to do and must be due at once")
 	}
 }
 

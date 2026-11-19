@@ -295,12 +295,12 @@ func countedAgo(count int, unit string) string {
 	return fmt.Sprintf("%d %ss ago", count, unit)
 }
 
-// trackerAlternatesForProfile loads a profile's alternate linked sources so a
+// trackerAlternatesFor loads a tracker's alternate linked sources so a
 // re-rendered card resolves its cover and chapter links the same way the list
 // does. A load failure degrades to no fallback rather than failing the render:
 // the card is still useful without cover art.
-func (h *DashboardHandler) trackerAlternatesForProfile(ctx context.Context, profileID int64) map[int64][]repository.TrackerSourceRef {
-	alternates, err := h.trackerRepo.ListAlternateSourcesByTracker(ctx, profileID)
+func (h *DashboardHandler) trackerAlternatesFor(ctx context.Context, profileID int64, trackerID int64) map[int64][]repository.TrackerSourceRef {
+	alternates, err := h.trackerRepo.ListAlternateSourcesByTrackerIDs(ctx, profileID, []int64{trackerID})
 	if err != nil {
 		return nil
 	}

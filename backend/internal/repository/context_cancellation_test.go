@@ -10,12 +10,13 @@ import (
 	"github.com/gabriel/cross-site-tracker/backend/internal/repository"
 )
 
-// The pool runs MaxOpenConns(1). A transaction that is never committed or
+// The writer runs MaxOpenConns(1). A transaction that is never committed or
 // rolled back holds that one connection, and the context-free database/sql
 // calls queue behind it with no deadline — the process stops working with no
 // error and no log line. These tests pin that the context every method takes
 // turns that wait into an error a caller can act on, and that a transaction
-// aborted that way leaves nothing half-written.
+// aborted that way leaves nothing half-written. Reads are not in that queue
+// any more: they have a pool of their own (database.Open).
 
 // cancellationCeiling bounds every wait below. What is under test here IS a
 // hang, so no assertion may block on an unbounded receive: a regression has to
@@ -40,9 +41,14 @@ func runBounded(t *testing.T, fn func() error) error {
 }
 
 // TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction is the failure
-// this whole change exists for: an open transaction owns the pool's only
-// connection, so anything else has to wait for it. A caller with a deadline
+// the contexts exist for: an open transaction owns the writer's only
+// connection, so any other write has to wait for it. A caller with a deadline
 // gives up and says so; the same call without a context would wait forever.
+//
+// A read is the other half, and the reason for the read pool: it used to wait
+// in that same queue — a dashboard page behind the poller's write — and now
+// it is answered while the transaction is still open, from what was committed
+// before it.
 func TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction(t *testing.T) {
 	db := openPollingTestDB(t)
 	repo := repository.NewTrackerRepository(db)
@@ -53,28 +59,30 @@ func TestContextDeadlineFreesACallerQueuedBehindAnOpenTransaction(t *testing.T) 
 		t.Fatalf("open the blocking transaction: %v", err)
 	}
 	defer blocker.Rollback()
-
-	probes := []struct {
-		name string
-		call func(context.Context) error
-	}{
-		{"read", func(ctx context.Context) error {
-			_, err := repo.ListForPolling(ctx)
-			return err
-		}},
-		{"write", func(ctx context.Context) error {
-			return repo.MarkPollCheckedAt(ctx, trackerID, time.Now().UTC(), nil)
-		}},
+	if _, err := blocker.Exec(`UPDATE trackers SET latest_known_chapter = 99 WHERE id = ?`, trackerID); err != nil {
+		t.Fatalf("write inside the blocking transaction: %v", err)
 	}
 
-	for _, probe := range probes {
-		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		err := runBounded(t, func() error { return probe.call(ctx) })
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	err = runBounded(t, func() error { return repo.MarkPollCheckedAt(ctx, trackerID, time.Now().UTC(), nil) })
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write: expected the queued call to give up on its deadline, got %v", err)
+	}
 
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("%s: expected the queued call to give up on its deadline, got %v", probe.name, err)
-		}
+	var trackers []repository.PollingTracker
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	err = runBounded(t, func() error {
+		var err error
+		trackers, err = repo.ListForPolling(ctx)
+		return err
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("read: a listing must not wait behind an open transaction, got %v", err)
+	}
+	if len(trackers) != 1 || trackers[0].LatestKnownChapter == nil || *trackers[0].LatestKnownChapter != 19 {
+		t.Fatalf("read: expected the committed chapter 19, not the open transaction's 99, got %+v", trackers)
 	}
 }
 

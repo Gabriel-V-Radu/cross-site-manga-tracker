@@ -9,11 +9,13 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/config"
 	"github.com/gabriel/cross-site-tracker/backend/internal/database"
@@ -36,6 +38,11 @@ type Options struct {
 	// output belongs to the terminal it was run from, not in the server's
 	// history.
 	FileLog bool
+	// OptimizeOnClose has Close leave the query planner its statistics
+	// (database.Optimize) before the database is closed. For the server, whose
+	// connection has run the workload worth planning for; a tool's has not,
+	// and a preview must not write at all.
+	OptimizeOnClose bool
 }
 
 // Runtime is what Open hands back: the loaded configuration and an open
@@ -45,7 +52,14 @@ type Runtime struct {
 	DB     *sql.DB
 	// logFile is the server's log file, nil when it logs to stdout only.
 	logFile *rotatingLogFile
+	// optimizeOnClose is Options.OptimizeOnClose.
+	optimizeOnClose bool
 }
+
+// optimizeTimeout bounds the statistics pass at shutdown. It takes
+// milliseconds on a library this size; the bound is for the day something
+// else holds the file, when shutting down matters more than statistics.
+const optimizeTimeout = 5 * time.Second
 
 // Open runs the startup sequence. Every failure is returned rather than
 // logged-and-exited, so the binary decides how to report it; the logger is
@@ -105,7 +119,7 @@ func Open(opts Options) (*Runtime, error) {
 		}
 	}
 
-	return &Runtime{Config: cfg, DB: db, logFile: logFile}, nil
+	return &Runtime{Config: cfg, DB: db, logFile: logFile, optimizeOnClose: opts.OptimizeOnClose}, nil
 }
 
 // Close releases the database and the log file. Safe on a nil runtime, so a
@@ -115,6 +129,13 @@ func (r *Runtime) Close() {
 		return
 	}
 	if r.DB != nil {
+		if r.optimizeOnClose {
+			ctx, cancel := context.WithTimeout(context.Background(), optimizeTimeout)
+			if err := database.Optimize(ctx, r.DB); err != nil {
+				slog.Warn("sqlite statistics not refreshed at shutdown", "error", err)
+			}
+			cancel()
+		}
 		_ = r.DB.Close()
 	}
 	_ = r.logFile.Close()
