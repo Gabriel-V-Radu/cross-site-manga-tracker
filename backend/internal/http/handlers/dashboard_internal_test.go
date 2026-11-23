@@ -204,6 +204,10 @@ func (r *countingChapterLinkResolver) Lookup(_ string, sourceURL string, _ float
 	return sourceURL, false, r.waiting
 }
 
+func (r *countingChapterLinkResolver) LookupPreferring(_ string, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (string, bool, bool) {
+	return r.Lookup(sourceKey, sourceURL, chapter, alternates, pageKey)
+}
+
 func (r *countingChapterLinkResolver) InvalidateSource(sourceKey, sourceURL string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

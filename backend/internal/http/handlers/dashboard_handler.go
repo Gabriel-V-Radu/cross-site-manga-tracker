@@ -83,6 +83,9 @@ type coverResolver interface {
 // chapterLinkResolver is the chapter-link half of the same service.
 type chapterLinkResolver interface {
 	Lookup(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool)
+	// LookupPreferring is Lookup with one of the tracker's sites asked ahead
+	// of the chain's own order; an empty preferKey is Lookup.
+	LookupPreferring(preferKey, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool)
 	InvalidateSource(sourceKey, sourceURL string)
 	Close()
 }

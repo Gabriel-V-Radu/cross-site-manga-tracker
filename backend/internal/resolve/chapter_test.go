@@ -363,6 +363,139 @@ func TestFetchChapterURLFloorOnlyChainKeepsTheVerifiedSpan(t *testing.T) {
 	}
 }
 
+// newPreferenceResolver wires the chain of the tracker that showed the defect
+// the preference fixes: a default-tier reader site as primary that carries
+// every chapter, ComicK, MangaHub up to mangahubLatest, and a second default-tier
+// site that stops at chapter 50.
+func newPreferenceResolver(t *testing.T, mangahubLatest float64) (*ChapterLinkResolver, []repository.TrackerSourceRef) {
+	t.Helper()
+	registry := connectors.NewRegistry()
+	for _, connector := range []connectors.Connector{
+		mirrorConnector{key: "readersite", siteTier: siteTier{rank: connectors.ReaderRankDefault}},
+		mirrorConnector{key: "comick", siteTier: siteTier{rank: connectors.ReaderRankInfoFloor}},
+		cappedResolverConnector{mirrorConnector{key: "mangahub", siteTier: siteTier{rank: connectors.ReaderRankFreshAggregator}}, mangahubLatest},
+		cappedResolverConnector{mirrorConnector{key: "partialsite", siteTier: siteTier{rank: connectors.ReaderRankDefault}}, 50},
+	} {
+		if err := registry.Register(connector); err != nil {
+			t.Fatalf("register %s stub: %v", connector.Key(), err)
+		}
+	}
+
+	alternates := []repository.TrackerSourceRef{
+		{SourceKey: "comick", SourceURL: "https://comick.example/comic/a"},
+		{SourceKey: "mangahub", SourceURL: "https://mangahub.example/manga/a"},
+		{SourceKey: "partialsite", SourceURL: "https://partial.example/series/a"},
+	}
+	return newChapterTestResolver(t, registry), alternates
+}
+
+// TestFetchChapterURLPreferredSiteGoesAheadOfTheRanking pins what keeps a card
+// on one site. Chapter 96 is hours old and only the primary carries it, so the
+// card presents the primary; chapter 56, the one the reader is on, is on
+// MangaHub too, and by rank alone opened there — a site that stops at 95, under
+// a badge naming the other. Asked with the primary preferred it opens where the
+// rest of the card does, and the plain question keeps its own answer.
+func TestFetchChapterURLPreferredSiteGoesAheadOfTheRanking(t *testing.T) {
+	resolver, alternates := newPreferenceResolver(t, 95)
+	const sourceURL = "https://reader.example/title/a"
+
+	preferred, err := resolver.fetchPreferring(context.Background(), 0, "readersite", "readersite", sourceURL, 56, alternates)
+	if err != nil {
+		t.Fatalf("preferred resolve failed: %v", err)
+	}
+	if preferred != sourceURL+"/chapter-56" {
+		t.Fatalf("expected the preferred site to serve the chapter, got %q", preferred)
+	}
+
+	ranked, err := resolver.fetch(context.Background(), 0, "readersite", sourceURL, 56, alternates)
+	if err != nil {
+		t.Fatalf("ranked resolve failed: %v", err)
+	}
+	if ranked != "https://mangahub.example/manga/a/chapter-56" {
+		t.Fatalf("expected the ranked chain to keep opening MangaHub despite the preferred answer cached first, got %q", ranked)
+	}
+}
+
+// TestFetchChapterURLPreferredSiteCedesWhenItDoesNotCarryTheChapter pins that a
+// preference is not a pin: a preferred site that answers "not carried" gives
+// its turn to the rest of the chain as ranked, rather than leaving the link on
+// its series page.
+func TestFetchChapterURLPreferredSiteCedesWhenItDoesNotCarryTheChapter(t *testing.T) {
+	resolver, alternates := newPreferenceResolver(t, 95)
+
+	chapterURL, err := resolver.fetchPreferring(context.Background(), 0, "partialsite", "readersite", "https://reader.example/title/a", 56, alternates)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if chapterURL != "https://mangahub.example/manga/a/chapter-56" {
+		t.Fatalf("expected the ranked chain to serve what the preferred site lacks, got %q", chapterURL)
+	}
+}
+
+// TestReadingChainPreference pins which preferences take effect. The ones that
+// do not must leave the lookup on the plain chain's cache key: a second key for
+// the same chain is a second resolve sent to the sites for the same answer.
+func TestReadingChainPreference(t *testing.T) {
+	resolver, alternates := newPreferenceResolver(t, 95)
+	const sourceKey, sourceURL = "readersite", "https://reader.example/title/a"
+	plainKey := chapterCacheKey(sourceKey, sourceURL, 56, alternates)
+
+	tests := []struct {
+		name      string
+		preferKey string
+		wantHead  string
+		wantPlain bool
+	}{
+		{"no preference", "", "mangahub", true},
+		{"a lower-ranked site the tracker carries", "readersite", "readersite", false},
+		{"spelled with other case and spacing", " ReaderSite ", "readersite", false},
+		{"the site already heading the chain", "mangahub", "mangahub", true},
+		// A chapter minutes old sits on the floor alone; following it would
+		// send the reader's whole backlog to the worst reader in the chain.
+		{"the info floor", "comick", "mangahub", true},
+		{"a site the tracker does not carry", "elsewhere", "mangahub", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			chain, preferred := resolver.readingChain(test.preferKey, sourceKey, sourceURL, alternates)
+			if chain[0].SourceKey != test.wantHead {
+				t.Fatalf("chain head = %q, want %q", chain[0].SourceKey, test.wantHead)
+			}
+			if len(chain) != len(alternates)+1 {
+				t.Fatalf("expected every link to keep its turn, got %v", chain)
+			}
+			if last := chain[len(chain)-1].SourceKey; last != "comick" {
+				t.Fatalf("expected the floor to stay last, got %q", last)
+			}
+			key := preferringCacheKey(preferred, sourceKey, sourceURL, 56, alternates)
+			if (key == plainKey) != test.wantPlain {
+				t.Fatalf("key %q against the plain chain's %q: same=%v, want %v", key, plainKey, key == plainKey, test.wantPlain)
+			}
+		})
+	}
+}
+
+// TestInvalidateSourceDropsPreferredLookups pins that an answer cached under a
+// preference is still one of its link's lookups: relinking the tracker must
+// void it with the rest.
+func TestInvalidateSourceDropsPreferredLookups(t *testing.T) {
+	resolver, alternates := newPreferenceResolver(t, 95)
+	const sourceKey, sourceURL = "readersite", "https://reader.example/title/a"
+
+	if _, err := resolver.fetchPreferring(context.Background(), 0, "readersite", sourceKey, sourceURL, 56, alternates); err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	cacheKey := preferringCacheKey("readersite", sourceKey, sourceURL, 56, alternates)
+	if _, exists := resolver.cache.get(cacheKey); !exists {
+		t.Fatalf("expected the preferred answer to be cached")
+	}
+
+	resolver.InvalidateSource(sourceKey, sourceURL)
+	if _, exists := resolver.cache.get(cacheKey); exists {
+		t.Fatalf("expected the invalidation to drop the preferred answer")
+	}
+}
+
 // TestOrderReaderCandidates pins the ranking itself: origin scanlator sites
 // first, then MangaHub, ComicK last, everything else keeps its incoming order.
 // It runs against the connector set the app actually ships, since that is where

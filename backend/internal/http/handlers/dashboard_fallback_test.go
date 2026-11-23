@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/gabriel/cross-site-tracker/backend/internal/connectors"
@@ -41,11 +43,26 @@ type fakeChapterAnswer struct {
 type fakeChapterLinkResolver struct {
 	byChapter map[float64]fakeChapterAnswer
 	waiting   bool
+	// preferred, when set, records every lookup as "chapter" for one asked on
+	// the chain's own order and "chapter prefer=site" for one asked with a site
+	// ahead of it.
+	preferred *[]string
 }
 
 // Lookup degrades a chapter it holds no answer for to the series page, which is
 // what the real resolver hands back for a lookup that resolved nothing.
-func (f fakeChapterLinkResolver) Lookup(_ string, sourceURL string, chapter float64, _ []repository.TrackerSourceRef, _ string) (string, bool, bool) {
+func (f fakeChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (string, bool, bool) {
+	return f.LookupPreferring("", sourceKey, sourceURL, chapter, alternates, pageKey)
+}
+
+func (f fakeChapterLinkResolver) LookupPreferring(preferKey, _ string, sourceURL string, chapter float64, _ []repository.TrackerSourceRef, _ string) (string, bool, bool) {
+	if f.preferred != nil {
+		asked := strconv.FormatFloat(chapter, 'f', -1, 64)
+		if preferKey != "" {
+			asked += " prefer=" + preferKey
+		}
+		*f.preferred = append(*f.preferred, asked)
+	}
 	answer, ok := f.byChapter[chapter]
 	if !ok {
 		return sourceURL, false, f.waiting
@@ -187,12 +204,104 @@ func TestBuildTrackerCardsPresentsTheChapterSourceNotTheCoverSource(t *testing.T
 
 	// Each link still goes wherever that chapter actually exists — forcing both
 	// onto one site would break whichever one that site cannot serve — so each
-	// says where it lands.
+	// says where it lands. (The last-read link asks the newest chapter's site
+	// first, see TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite;
+	// here that site could not answer for it.)
 	if card.LatestKnownChapterSite != "MangaFire" {
 		t.Fatalf("expected the latest chapter to be labelled MangaFire, got %q", card.LatestKnownChapterSite)
 	}
 	if card.LastReadChapterSite != "ComicK" {
 		t.Fatalf("expected the last read chapter to be labelled ComicK, got %q", card.LastReadChapterSite)
+	}
+}
+
+// TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite pins the
+// defect behind "the card shows MangaFire but my last read chapter opens
+// MangaHub". Chapter 96 was hours old and only MangaFire carried it, so the
+// badge, the latest link and Open all named MangaFire; chapter 56, asked on the
+// chain's own order, opened on the better-ranked MangaHub — which would have
+// run out one chapter before the end. The last-read lookup now names the site
+// the latest link was confirmed on, and the resolver asks there first.
+func TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite(t *testing.T) {
+	const (
+		primaryURL  = "https://mangafire.to/title/npozj-akanabe"
+		mangahubURL = "https://mangahub.io/manga/akanabe"
+	)
+	mangafireID := int64(1)
+
+	tests := []struct {
+		name           string
+		latest         float64
+		lastRead       float64
+		latestAnswer   fakeChapterAnswer
+		pinnedSourceID *int64
+		want           []string
+	}{
+		{
+			name: "latest confirmed on a site", latest: 96, lastRead: 56,
+			latestAnswer: fakeChapterAnswer{url: primaryURL + "/chapter/9353930", resolved: true},
+			want:         []string{"96", "56 prefer=mangafire"},
+		},
+		{
+			// A series page confirms nothing, so there is no site to follow.
+			name: "latest link degraded to the series page", latest: 96, lastRead: 56,
+			latestAnswer: fakeChapterAnswer{url: primaryURL},
+			want:         []string{"96", "56"},
+		},
+		{
+			// A pin already holds both links to the pinned site.
+			name: "reading pinned to one site", latest: 96, lastRead: 56,
+			latestAnswer:   fakeChapterAnswer{url: primaryURL + "/chapter/9353930", resolved: true},
+			pinnedSourceID: &mangafireID,
+			want:           []string{"96", "56"},
+		},
+		{
+			// Caught up: one chapter, one question, asked once.
+			name: "last read is the latest", latest: 96, lastRead: 96,
+			latestAnswer: fakeChapterAnswer{url: primaryURL + "/chapter/9353930", resolved: true},
+			want:         []string{"96"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var asked []string
+			handler := newCardTestHandler(
+				connectordefaults.NewRegistry(),
+				fakeCoverResolver{},
+				fakeChapterLinkResolver{
+					byChapter: map[float64]fakeChapterAnswer{test.latest: test.latestAnswer},
+					preferred: &asked,
+				},
+			)
+
+			latest, lastRead := test.latest, test.lastRead
+			items := []models.Tracker{{
+				ID: 1, Title: "Akanabe", Status: "reading", SourceID: mangafireID,
+				SourceURL:          primaryURL,
+				LatestKnownChapter: &latest,
+				LastReadChapter:    &lastRead,
+				ReadingSourceID:    test.pinnedSourceID,
+			}}
+			sourceByID := map[int64]models.Source{
+				1: {ID: 1, Key: "mangafire", Name: "MangaFire"},
+				2: {ID: 2, Key: "mangahub", Name: "MangaHub"},
+			}
+			alternates := map[int64][]repository.TrackerSourceRef{
+				1: {{SourceID: 2, SourceKey: "mangahub", SourceURL: mangahubURL}},
+			}
+
+			cards, _ := handler.buildTrackerCards(items, sourceByID, map[int64]string{}, alternates, "")
+			if len(cards) != 1 {
+				t.Fatalf("expected 1 card, got %d", len(cards))
+			}
+			if !slices.Equal(asked, test.want) {
+				t.Fatalf("chapter lookups = %v, want %v", asked, test.want)
+			}
+			if test.latest == test.lastRead && cards[0].LastReadChapterURL != cards[0].LatestKnownChapterURL {
+				t.Fatalf("expected a caught-up card to open one link, got %q and %q", cards[0].LastReadChapterURL, cards[0].LatestKnownChapterURL)
+			}
+		})
 	}
 }
 

@@ -364,9 +364,28 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 		}
 	}
 
+	// The last-read link is asked first on the site the latest-chapter link was
+	// confirmed on, so the card reads on one site wherever that site can serve
+	// both: the badge and the open-to-read button already follow that site, and
+	// it is the one that carries the run from the reader's chapter up to the
+	// newest. Asked on the chain's own order, a chapter hours old opened on the
+	// only site that had it while this link opened on a better-ranked site that
+	// stopped one chapter short — under a badge naming the first. A pin already
+	// holds both links to one site, and a latest link that confirmed nothing
+	// has no site to follow.
 	lastReadChapter := chapterLinkLookup{Attempted: item.LastReadChapter != nil}
-	if lastReadChapter.Attempted {
-		chapterURL, resolved, waitingChapterURL := h.chapterLinks.Lookup(chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
+	switch {
+	case !lastReadChapter.Attempted:
+	case latestChapter.Attempted && *item.LastReadChapter == *item.LatestKnownChapter:
+		// Caught up: both links are the same question, already answered above.
+		lastReadChapter.URL = latestChapter.URL
+		lastReadChapter.Resolved = latestChapter.Resolved
+	default:
+		preferKey := ""
+		if pinned == nil && latestChapter.Resolved {
+			preferKey = h.sourceKeyForURL(latestChapter.URL)
+		}
+		chapterURL, resolved, waitingChapterURL := h.chapterLinks.LookupPreferring(preferKey, chapterKey, chapterBaseURL, *item.LastReadChapter, chapterAlternates, pageKey)
 		lastReadChapter.URL = chapterURL
 		lastReadChapter.Resolved = resolved
 		if waitingChapterURL {

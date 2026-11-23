@@ -80,6 +80,23 @@ func (r *ChapterLinkResolver) Close() {
 // opens chapter 65 on some site" from "we gave up and pointed at the series
 // page", because only the former says which site is serving the card.
 func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool) {
+	return r.LookupPreferring("", sourceKey, sourceURL, chapter, alternates, pageKey)
+}
+
+// LookupPreferring is Lookup with one of the tracker's sites asked ahead of the
+// reading chain's own order. A card's two chapter links are separate questions,
+// and the chain answers each with the best-ranked site that carries that
+// chapter — so a chapter hours old opened on the one site that had it while the
+// chapter the reader is actually on opened on a better-ranked site that did
+// not, under a badge naming only the first. The card passes the site its
+// latest-chapter link was confirmed on, and the older chapter is asked there
+// first: that site demonstrably carries the run up to the newest chapter, which
+// the better-ranked one would have stopped short of.
+//
+// It is a preference, not a pin: a preferred site that does not carry the
+// chapter, or cannot be asked, cedes to the rest of the chain as ranked. See
+// readingChain for the preferences that are ignored.
+func (r *ChapterLinkResolver) LookupPreferring(preferKey, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef, pageKey string) (chapterURL string, resolved bool, waiting bool) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", false, false
@@ -90,7 +107,8 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 		return trimmedSourceURL, false, false
 	}
 
-	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter, alternates)
+	_, preferred := r.readingChain(preferKey, trimmedSourceKey, trimmedSourceURL, alternates)
+	cacheKey := preferringCacheKey(preferred, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	if cachedChapterURL, found, ok := r.cached(cacheKey); ok {
 		if found {
 			return cachedChapterURL, true, false
@@ -102,9 +120,52 @@ func (r *ChapterLinkResolver) Lookup(sourceKey, sourceURL string, chapter float6
 	// that lands while it waits in the queue voids its answer just the same.
 	generation := r.cache.currentGeneration(chapterScope(trimmedSourceKey, trimmedSourceURL))
 	r.queue.run(cacheKey, r.sem, pageKey, func(ctx context.Context) {
-		_, _ = r.fetch(ctx, generation, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
+		_, _ = r.fetchPreferring(ctx, generation, preferred, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	})
 	return trimmedSourceURL, false, true
+}
+
+// readingChain lists a tracker's usable links in the order the chain asks them:
+// the primary and its alternates by reading rank, with the preferred site, when
+// the preference counts, moved to the head. It also returns the preference that
+// took effect, which is what a lookup is cached under — empty whenever the
+// chain is the ranked one anyway, so a preference that changes nothing shares
+// the plain lookup's answer instead of sending the sites a second resolve for
+// it. A preference does not count when:
+//   - it names the info floor: that site holds a chapter minutes old before
+//     anyone else, and following it would pin the reader's whole backlog to the
+//     worst reader in the chain;
+//   - it names no link the tracker carries;
+//   - the site already heads the ranked chain.
+func (r *ChapterLinkResolver) readingChain(preferKey, sourceKey, sourceURL string, alternates []repository.TrackerSourceRef) ([]repository.TrackerSourceRef, string) {
+	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
+	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: sourceKey, SourceURL: sourceURL})
+	for _, alternate := range alternates {
+		alternate.SourceKey = strings.TrimSpace(alternate.SourceKey)
+		alternate.SourceURL = strings.TrimSpace(alternate.SourceURL)
+		if alternate.SourceKey == "" || alternate.SourceURL == "" {
+			continue
+		}
+		candidates = append(candidates, alternate)
+	}
+	orderReaderCandidates(candidates, r.readerCandidateRank)
+
+	preferred := strings.ToLower(strings.TrimSpace(preferKey))
+	if preferred == "" || r.readerCandidateRank(preferred) == connectors.ReaderRankInfoFloor {
+		return candidates, ""
+	}
+	for index, candidate := range candidates {
+		if !strings.EqualFold(candidate.SourceKey, preferred) {
+			continue
+		}
+		if index == 0 {
+			return candidates, ""
+		}
+		copy(candidates[1:index+1], candidates[:index])
+		candidates[0] = candidate
+		return candidates, preferred
+	}
+	return candidates, ""
 }
 
 // InvalidateSource drops the chapter links remembered for lookups that start
@@ -159,6 +220,13 @@ func chapterScope(sourceKey, sourceURL string) string {
 // generation is the link's invalidation count when the resolve was queued. The
 // answer is only written while it still holds; see InvalidateSource.
 func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
+	return r.fetchPreferring(ctx, generation, "", sourceKey, sourceURL, chapter, alternates)
+}
+
+// fetchPreferring is fetch with one site asked ahead of the ranked chain; see
+// LookupPreferring for why a card asks that, and readingChain for when the
+// preference is ignored.
+func (r *ChapterLinkResolver) fetchPreferring(ctx context.Context, generation uint64, preferKey, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) (string, error) {
 	trimmedSourceURL := strings.TrimSpace(sourceURL)
 	if trimmedSourceURL == "" {
 		return "", fmt.Errorf("missing source url")
@@ -169,7 +237,11 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 		return trimmedSourceURL, nil
 	}
 
-	cacheKey := chapterCacheKey(trimmedSourceKey, trimmedSourceURL, chapter, alternates)
+	// Primary source first, then the tracker's other linked sources, reordered
+	// by reading priority, and the preferred site ahead of that when it counts.
+	candidates, preferred := r.readingChain(preferKey, trimmedSourceKey, trimmedSourceURL, alternates)
+
+	cacheKey := preferringCacheKey(preferred, trimmedSourceKey, trimmedSourceURL, chapter, alternates)
 	if cachedChapterURL, found, ok := r.cached(cacheKey); ok {
 		if found {
 			return cachedChapterURL, nil
@@ -185,13 +257,6 @@ func (r *ChapterLinkResolver) fetch(ctx context.Context, generation uint64, sour
 	if r.cache.currentGeneration(scope) != generation {
 		return trimmedSourceURL, fmt.Errorf("chapter links invalidated while queued")
 	}
-
-	// Primary source first, then the tracker's other linked sources, reordered
-	// by reading priority.
-	candidates := make([]repository.TrackerSourceRef, 0, len(alternates)+1)
-	candidates = append(candidates, repository.TrackerSourceRef{SourceKey: trimmedSourceKey, SourceURL: trimmedSourceURL})
-	candidates = append(candidates, alternates...)
-	orderReaderCandidates(candidates, r.readerCandidateRank)
 
 	// A source that was actually queried and failed may succeed shortly; one with
 	// no usable connector will not, so the two are cached for different spans.
@@ -397,6 +462,20 @@ func chapterCacheKey(sourceKey, sourceURL string, chapter float64, alternates []
 		key.WriteString(strings.ToLower(alternateURL))
 	}
 	return key.String()
+}
+
+// preferringCacheKey is chapterCacheKey for a lookup whose chain is headed by a
+// preferred site (readingChain's effective preference; empty for the ranked
+// chain, which keeps the plain key). The preference goes last so the key still
+// starts with the link's scope, which is what InvalidateSource matches on, and
+// is written with a colon where an alternate has "=", so it cannot be read as
+// one.
+func preferringCacheKey(preferred, sourceKey, sourceURL string, chapter float64, alternates []repository.TrackerSourceRef) string {
+	key := chapterCacheKey(sourceKey, sourceURL, chapter, alternates)
+	if preferred == "" {
+		return key
+	}
+	return key + "|prefer:" + preferred
 }
 
 func (r *ChapterLinkResolver) cached(cacheKey string) (chapterURL string, found bool, ok bool) {
