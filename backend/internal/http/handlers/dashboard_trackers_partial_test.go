@@ -116,6 +116,41 @@ func TestDecideTrackerLinksFallsBackToTheReporterForTheBadge(t *testing.T) {
 	}
 }
 
+// TestDecideTrackerLinksUnconfirmedLinksOpenTheBadgedSite pins the defect
+// behind "the card shows MangaFire and Open sends me to MangaDex". A MangaDex
+// tracker's chapter 58 was reported by its linked MangaFire; while the chapter
+// links were still being resolved — and on a page that had stopped asking, for
+// good — the badge already named MangaFire, but Open and the last-read link
+// opened the primary's series page. Every link that is not a confirmed chapter
+// page opens the site the badge names.
+func TestDecideTrackerLinksUnconfirmedLinksOpenTheBadgedSite(t *testing.T) {
+	decision := decideTrackerLinks(trackerLinkInputs{
+		PrimarySourceKey:  "mangaupdates",
+		PrimarySourceURL:  primarySeriesURL,
+		Alternates:        sampleAlternates(),
+		LatestChapter:     chapterLinkLookup{Attempted: true, URL: primarySeriesURL},
+		LastReadChapter:   chapterLinkLookup{Attempted: true, URL: primarySeriesURL},
+		ReporterSourceKey: "mangafire",
+		SourceKeyForURL:   testSourceKeyForURL,
+	})
+
+	if decision.ServingSourceKey != "mangafire" {
+		t.Fatalf("expected the reporter to serve the badge, got %q", decision.ServingSourceKey)
+	}
+	for name, got := range map[string]string{
+		"open-to-read button": decision.HighlightURL,
+		"latest-chapter link": decision.LatestChapterURL,
+		"last-read link":      decision.LastReadChapterURL,
+	} {
+		if got != mangafireSeriesURL {
+			t.Fatalf("expected the %s on the badged site's series page, got %q", name, got)
+		}
+	}
+	if decision.LatestChapterSiteKey != "mangafire" || decision.LastReadChapterSiteKey != "mangafire" {
+		t.Fatalf("expected both links labelled with the site they open, got %q and %q", decision.LatestChapterSiteKey, decision.LastReadChapterSiteKey)
+	}
+}
+
 // TestDecideTrackerLinksFallsBackToTheCoverSourceForTheBadge is the bottom of
 // the precedence: the weakest signal on the card still beats badging a primary
 // that served nothing.
@@ -132,6 +167,9 @@ func TestDecideTrackerLinksFallsBackToTheCoverSourceForTheBadge(t *testing.T) {
 	}
 	if !decision.ServingSourceFound || decision.ServingSource.SourceID != 3 {
 		t.Fatalf("expected the badge resolved to the linked ComicK alternate, got %+v", decision.ServingSource)
+	}
+	if decision.HighlightURL != comickSeriesURL {
+		t.Fatalf("expected the open-to-read button to follow the badge, got %q", decision.HighlightURL)
 	}
 }
 
@@ -175,10 +213,10 @@ func TestDecideTrackerLinksDegradesToTheReporterSeriesPage(t *testing.T) {
 	if decision.LatestChapterSiteKey != "comick" {
 		t.Fatalf("expected the link labelled with the reporter's site, got %q", decision.LatestChapterSiteKey)
 	}
-	// A degraded link confirmed nothing, so it does not move the open-to-read
-	// button even though the badge follows the reporter.
-	if decision.HighlightURL != primarySeriesURL {
-		t.Fatalf("expected the open-to-read button to stay on the primary series page, got %q", decision.HighlightURL)
+	// The badge follows the reporter, so the open-to-read button does too: it
+	// used to stay on the primary here, under a badge naming another site.
+	if decision.HighlightURL != comickSeriesURL {
+		t.Fatalf("expected the open-to-read button on the badged site's series page, got %q", decision.HighlightURL)
 	}
 }
 
@@ -252,16 +290,15 @@ func TestDecideTrackerLinksPinnedChapterLinkStillSetsTheBadge(t *testing.T) {
 	}
 }
 
-// TestDecideTrackerLinksLastReadLinkIsIndependent: the last-read link gets no
-// reporter fallback — the reporter's claim is about the newest chapter, not
-// about the one the user stopped at.
-func TestDecideTrackerLinksLastReadLinkIsIndependent(t *testing.T) {
+// TestDecideTrackerLinksLastReadLinkNeverDecidesTheBadge: the last-read link
+// follows the badge when it confirmed nothing, and says where it goes when it
+// did, but it is never evidence about the newest chapter.
+func TestDecideTrackerLinksLastReadLinkNeverDecidesTheBadge(t *testing.T) {
 	decision := decideTrackerLinks(trackerLinkInputs{
-		PrimarySourceKey:  "mangaupdates",
-		PrimarySourceURL:  primarySeriesURL,
-		Alternates:        sampleAlternates(),
-		LastReadChapter:   chapterLinkLookup{Attempted: true, URL: primarySeriesURL},
-		ReporterSourceKey: "comick",
+		PrimarySourceKey: "mangaupdates",
+		PrimarySourceURL: primarySeriesURL,
+		Alternates:       sampleAlternates(),
+		LastReadChapter:  chapterLinkLookup{Attempted: true, URL: primarySeriesURL},
 	})
 
 	if decision.LastReadChapterURL != primarySeriesURL {
@@ -330,10 +367,10 @@ func TestDecideTrackerLinksIgnoresAnUnrecognisedChapterHost(t *testing.T) {
 	if decision.LatestChapterSiteKey != "" {
 		t.Fatalf("expected no site label for an unattributable host, got %q", decision.LatestChapterSiteKey)
 	}
-	if decision.HighlightURL != primarySeriesURL {
-		t.Fatalf("expected the open-to-read button unmoved by an unattributable host, got %q", decision.HighlightURL)
-	}
 	if decision.ServingSourceKey != "comick" {
 		t.Fatalf("expected the badge to fall through to the reporter, got %q", decision.ServingSourceKey)
+	}
+	if decision.HighlightURL != comickSeriesURL {
+		t.Fatalf("expected the open-to-read button to follow the badge to the reporter, got %q", decision.HighlightURL)
 	}
 }

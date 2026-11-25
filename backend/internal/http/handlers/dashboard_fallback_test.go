@@ -234,9 +234,25 @@ func TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite(t *testing.
 		latest         float64
 		lastRead       float64
 		latestAnswer   fakeChapterAnswer
+		waiting        bool
 		pinnedSourceID *int64
 		want           []string
 	}{
+		{
+			// Which site to prefer is unknown until the latest link answers;
+			// asking on the chain's own order meanwhile is what opened another
+			// site's chapter under this card's badge.
+			name: "latest link still being resolved", latest: 96, lastRead: 56,
+			latestAnswer: fakeChapterAnswer{url: primaryURL}, waiting: true,
+			want: []string{"96"},
+		},
+		{
+			// Nothing to wait for: a pin asks one site whatever the latest says.
+			name: "latest link still being resolved under a pin", latest: 96, lastRead: 56,
+			latestAnswer: fakeChapterAnswer{url: primaryURL}, waiting: true,
+			pinnedSourceID: &mangafireID,
+			want:           []string{"96", "56"},
+		},
 		{
 			name: "latest confirmed on a site", latest: 96, lastRead: 56,
 			latestAnswer: fakeChapterAnswer{url: primaryURL + "/chapter/9353930", resolved: true},
@@ -271,6 +287,7 @@ func TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite(t *testing.
 				fakeCoverResolver{},
 				fakeChapterLinkResolver{
 					byChapter: map[float64]fakeChapterAnswer{test.latest: test.latestAnswer},
+					waiting:   test.waiting,
 					preferred: &asked,
 				},
 			)
@@ -291,9 +308,12 @@ func TestBuildTrackerCardsAsksTheLastReadLinkOnTheLatestChaptersSite(t *testing.
 				1: {{SourceID: 2, SourceKey: "mangahub", SourceURL: mangahubURL}},
 			}
 
-			cards, _ := handler.buildTrackerCards(items, sourceByID, map[int64]string{}, alternates, "")
+			cards, pending := handler.buildTrackerCards(items, sourceByID, map[int64]string{}, alternates, "")
 			if len(cards) != 1 {
 				t.Fatalf("expected 1 card, got %d", len(cards))
+			}
+			if pending != test.waiting {
+				t.Fatalf("pending = %v, want %v: a card whose last-read link was held back must be asked for again", pending, test.waiting)
 			}
 			if !slices.Equal(asked, test.want) {
 				t.Fatalf("chapter lookups = %v, want %v", asked, test.want)
@@ -317,11 +337,17 @@ func TestBuildTrackerCardsFallsBackToTheCoverSource(t *testing.T) {
 	if card.SourceLogoLabel != "ComicK" {
 		t.Fatalf("expected the cover's source to decide when no chapter link resolved, got %q", card.SourceLogoLabel)
 	}
-	if card.SourceURL != "https://comick.dev/comic/akanabe" {
-		t.Fatalf("expected Open to follow the mirror, got %q", card.SourceURL)
+	// The button reads HighlightURL; SourceURL is only its fallback.
+	if card.HighlightURL != "https://comick.dev/comic/akanabe" || card.SourceURL != "https://comick.dev/comic/akanabe" {
+		t.Fatalf("expected Open to follow the mirror, got %q and %q", card.HighlightURL, card.SourceURL)
 	}
-	if card.LatestKnownChapterSite != "" {
-		t.Fatalf("expected no label for an unresolved link, got %q", card.LatestKnownChapterSite)
+	// An unresolved link opens the series page of the site the card presents,
+	// and says so.
+	if card.LatestKnownChapterURL != "https://comick.dev/comic/akanabe" {
+		t.Fatalf("expected the unresolved link on the mirror's series page, got %q", card.LatestKnownChapterURL)
+	}
+	if card.LatestKnownChapterSite != "ComicK" {
+		t.Fatalf("expected the unresolved link labelled with the site it opens, got %q", card.LatestKnownChapterSite)
 	}
 }
 

@@ -355,10 +355,12 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 	}
 
 	latestChapter := chapterLinkLookup{Attempted: item.LatestKnownChapter != nil}
+	latestWaiting := false
 	if latestChapter.Attempted {
 		chapterURL, resolved, waitingChapterURL := h.chapterLinks.Lookup(chapterKey, chapterBaseURL, *item.LatestKnownChapter, chapterAlternates, pageKey)
 		latestChapter.URL = chapterURL
 		latestChapter.Resolved = resolved
+		latestWaiting = waitingChapterURL
 		if waitingChapterURL {
 			waiting = true
 		}
@@ -380,6 +382,14 @@ func (h *DashboardHandler) buildTrackerCard(item models.Tracker, sourceByID map[
 		// Caught up: both links are the same question, already answered above.
 		lastReadChapter.URL = latestChapter.URL
 		lastReadChapter.Resolved = latestChapter.Resolved
+	case latestWaiting && len(chapterAlternates) > 0:
+		// Which site to ask first is not known until the latest link answers,
+		// and the card is rendered again when it does. Asked now, on the
+		// chain's own order, this link opened another site's chapter for as
+		// long as that took — or for good, on a page that had stopped asking —
+		// and then cost a second resolve under the preference. Until then it
+		// opens the series page the rest of the card does.
+		lastReadChapter.URL = chapterBaseURL
 	default:
 		preferKey := ""
 		if pinned == nil && latestChapter.Resolved {
@@ -512,65 +522,37 @@ type trackerLinkDecision struct {
 // another.
 //
 // The order is:
-//   - Every link starts at the reading base — the pinned source's series page,
-//     or the primary's under auto.
-//   - A chapter lookup that ran replaces its own link, confirmed or not.
-//   - Under auto, a latest-chapter link that resolved nowhere degrades to the
-//     reporter's series page when the tracker carries one: the number on the
-//     card is that site's claim, so its page is where the chapter can actually
-//     be seen.
-//   - Under auto, the open-to-read button follows the site the latest-chapter
-//     link was confirmed on: a MangaUpdates-primary tracker whose chapters open
-//     on MangaFire should open its series there too. A degraded link does not
-//     move it, having confirmed nothing.
-//   - The badge follows the strongest signal available: the site whose chapter
-//     link was confirmed, else the site that reported the chapter number, else
-//     whoever supplied the cover art — the weakest signal on the card, but
-//     better than badging a primary that served nothing.
+//   - The badge follows the strongest signal available: the site whose
+//     latest-chapter link was confirmed, else the site that reported the
+//     chapter number, else whoever supplied the cover art — the weakest signal
+//     on the card, but better than badging a primary that served nothing.
+//   - A link the resolver confirmed opens that chapter's page, wherever it is.
+//   - Every other link — the open-to-read button, and a chapter link that is
+//     still being resolved or resolved nowhere — opens the series page of the
+//     site the badge names: the linked alternate under auto when one serves the
+//     card, else the reading base (the pinned source's page, or the primary's).
+//     A pin is a promise of one site, so under it nothing follows the badge.
+//
+// The last rule used to hold for the latest-chapter link alone, and only for
+// the reporter: the open-to-read button moved off the primary once a chapter
+// link was confirmed and not before. A card whose lookups were still running —
+// every card after a restart, and the ones that stay that way when the page
+// stops asking — badged the reporter while the button it sits beside opened
+// the primary: "it shows MangaFire and Open sends me to MangaDex".
 func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
 	sourceKeyForURL := in.SourceKeyForURL
 	if sourceKeyForURL == nil {
 		sourceKeyForURL = func(string) string { return "" }
 	}
 
-	readingBaseURL := in.PrimarySourceURL
-	if in.Pinned != nil {
-		readingBaseURL = in.Pinned.SourceURL
-	}
+	decision := trackerLinkDecision{}
 
-	decision := trackerLinkDecision{
-		LatestChapterURL:   readingBaseURL,
-		LastReadChapterURL: readingBaseURL,
-		HighlightURL:       readingBaseURL,
-	}
+	latestConfirmed := in.LatestChapter.Attempted && in.LatestChapter.Resolved
+	lastReadConfirmed := in.LastReadChapter.Attempted && in.LastReadChapter.Resolved
 
 	confirmedChapterSiteKey := ""
-	if in.LatestChapter.Attempted {
-		decision.LatestChapterURL = in.LatestChapter.URL
-		if in.LatestChapter.Resolved {
-			confirmedChapterSiteKey = sourceKeyForURL(in.LatestChapter.URL)
-			decision.LatestChapterSiteKey = confirmedChapterSiteKey
-		}
-	}
-
-	if in.Pinned == nil && in.LatestChapter.Attempted && !in.LatestChapter.Resolved && in.ReporterSourceKey != "" {
-		if seriesURL, found := linkedAlternateURL(in.Alternates, in.ReporterSourceKey); found {
-			decision.LatestChapterURL = seriesURL
-			decision.LatestChapterSiteKey = in.ReporterSourceKey
-		}
-	}
-
-	if in.Pinned == nil && confirmedChapterSiteKey != "" && confirmedChapterSiteKey != in.PrimarySourceKey {
-		if seriesURL, found := linkedAlternateURL(in.Alternates, confirmedChapterSiteKey); found {
-			decision.HighlightURL = seriesURL
-		}
-	}
-
-	if in.LastReadChapter.Attempted {
-		decision.LastReadChapterURL = in.LastReadChapter.URL
-		if in.LastReadChapter.Resolved {
-			decision.LastReadChapterSiteKey = sourceKeyForURL(in.LastReadChapter.URL)
-		}
+	if latestConfirmed {
+		confirmedChapterSiteKey = sourceKeyForURL(in.LatestChapter.URL)
 	}
 
 	decision.ServingSourceKey = confirmedChapterSiteKey
@@ -582,23 +564,37 @@ func decideTrackerLinks(in trackerLinkInputs) trackerLinkDecision {
 	}
 	decision.ServingSource, decision.ServingSourceFound = findServingSource(decision.ServingSourceKey, in.PrimarySourceKey, in.Alternates)
 
-	return decision
-}
-
-// linkedAlternateURL finds the series page a tracker carries for one source
-// key. An alternate linked without a URL is skipped rather than accepted: it
-// would turn a working link into an empty href.
-func linkedAlternateURL(alternates []repository.TrackerSourceRef, sourceKey string) (string, bool) {
-	for _, alternate := range alternates {
-		if !strings.EqualFold(strings.TrimSpace(alternate.SourceKey), sourceKey) {
-			continue
-		}
-		if strings.TrimSpace(alternate.SourceURL) == "" {
-			continue
-		}
-		return alternate.SourceURL, true
+	// Where a link that is not a confirmed chapter page goes, and the site that
+	// names when it is not the reading base.
+	seriesURL, seriesSiteKey := in.PrimarySourceURL, ""
+	switch {
+	case in.Pinned != nil:
+		seriesURL = in.Pinned.SourceURL
+	case decision.ServingSourceFound:
+		seriesURL, seriesSiteKey = decision.ServingSource.SourceURL, decision.ServingSourceKey
 	}
-	return "", false
+
+	decision.HighlightURL = seriesURL
+
+	decision.LatestChapterURL = seriesURL
+	switch {
+	case latestConfirmed:
+		decision.LatestChapterURL = in.LatestChapter.URL
+		decision.LatestChapterSiteKey = confirmedChapterSiteKey
+	case in.LatestChapter.Attempted:
+		decision.LatestChapterSiteKey = seriesSiteKey
+	}
+
+	decision.LastReadChapterURL = seriesURL
+	switch {
+	case lastReadConfirmed:
+		decision.LastReadChapterURL = in.LastReadChapter.URL
+		decision.LastReadChapterSiteKey = sourceKeyForURL(in.LastReadChapter.URL)
+	case in.LastReadChapter.Attempted:
+		decision.LastReadChapterSiteKey = seriesSiteKey
+	}
+
+	return decision
 }
 
 // buildSourceNameByKey indexes the enabled sources by their key, so a link whose
