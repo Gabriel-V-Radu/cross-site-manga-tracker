@@ -16,6 +16,7 @@ var laterFiles = []string{
 	"0002_series_metadata.sql",
 	"0003_feed_missed.sql",
 	"0004_indexes.sql",
+	"0005_link_cross_links.sql",
 }
 
 func indexExists(t *testing.T, db *sql.DB, name string) bool {

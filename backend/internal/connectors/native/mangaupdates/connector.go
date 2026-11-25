@@ -488,6 +488,17 @@ func (c *Connector) parseSeriesURL(rawURL string) (int64, error) {
 	return seriesID, nil
 }
 
+// SeriesKey implements connectors.SeriesKeyer: the decoded series id, so the
+// zero-padded "/series/0abc12/slug" a record hands out and the bare
+// "mangaupdates.com/series/abc12/" another site links to name the same series.
+func (c *Connector) SeriesKey(rawURL string) (string, bool) {
+	seriesID, err := c.parseSeriesURL(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatInt(seriesID, 10), true
+}
+
 // seriesURL prefers the link the API hands out — it carries the zero-padded
 // base36 id and the title slug the site itself uses — and falls back to
 // building one on the canonical site origin for a record that omits it.

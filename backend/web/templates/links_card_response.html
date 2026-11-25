@@ -1,5 +1,7 @@
 {{if .Group}}
 {{template "link_review_card" .Group}}
+{{else if .Replacement}}
+{{template "link_replacement_card" .Replacement}}
 {{else if .NoMatch}}
 {{/* Rendered where the clicked card was, marked as moved: links.js takes it
      from there into the "No candidate found" list, in title order. */}}

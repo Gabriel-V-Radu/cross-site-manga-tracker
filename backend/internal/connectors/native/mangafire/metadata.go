@@ -3,6 +3,7 @@ package mangafire
 import (
 	"encoding/json"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,67 @@ type apiTitleDetail struct {
 	Demographics  looseLabels `json:"demographics"`
 	Authors       looseLabels `json:"authors"`
 	Artists       looseLabels `json:"artists"`
+
+	// Links are MangaFire's pointers to the series on other sites, keyed by
+	// its own short names ("md", "mu", "mb", "al", "mal"); see crossLinks.
+	Links looseLinks `json:"links"`
+}
+
+// crossLinkKeys maps MangaFire's link names onto the keys of
+// connectors.CrossLinkReader. Only the sites something here can use are kept:
+// MangaDex and MangaUpdates are sources, MangaBaka is the link scan's
+// metadata aggregator. AniList and MyAnimeList carry no chapters (and
+// MangaBaka's record already merges them).
+var crossLinkKeys = map[string]string{
+	"md": "mangadex",
+	"mu": "mangaupdates",
+	"mb": connectors.CrossLinkMangaBaka,
+}
+
+// crossLinks returns the record's links under connectors.CrossLinkReader's
+// keys, keeping only absolute http(s) URLs; nil when it names none.
+func (detail apiTitleDetail) crossLinks() map[string]string {
+	var links map[string]string
+	for name, rawURL := range detail.Links {
+		key, ok := crossLinkKeys[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			continue
+		}
+		parsed, err := url.Parse(strings.TrimSpace(rawURL))
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Hostname() == "" {
+			continue
+		}
+		if links == nil {
+			links = map[string]string{}
+		}
+		links[key] = parsed.String()
+	}
+	return links
+}
+
+// looseLinks decodes the record's {"md":"https://…"} object. A title with no
+// links sends an empty array instead ("links":[], seen 2026-11-25 on several
+// titles), and any other shape, like a non-string value, costs that entry or
+// the whole field — never the record.
+type looseLinks map[string]string
+
+func (links *looseLinks) UnmarshalJSON(data []byte) error {
+	*links = nil
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	for name, raw := range entries {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if *links == nil {
+			*links = looseLinks{}
+		}
+		(*links)[name] = strings.TrimSpace(value)
+	}
+	return nil
 }
 
 // metadata maps the detail record onto the shared vocabulary, nil when the

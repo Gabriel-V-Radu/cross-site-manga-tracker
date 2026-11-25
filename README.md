@@ -99,6 +99,18 @@ in Docker and is used from any browser on the same network.
   as a fallback for, and lets you accept, reject or paste the right URL for
   each match. Accepted links merge the source's alternate titles into the
   tracker, which is what makes later scans match better.
+- Matches by id come before matches by title. MangaFire's title pages link the
+  series' MangaDex, MangaUpdates and MangaBaka entries, so a tracker on
+  MangaFire gets those pages offered directly ("Same series per MangaFire"),
+  and a MangaFire search hit that links the tracker's own MangaDex page is
+  confirmed as the series. An id match on a site that is behind the tracker's
+  chapter is still offered, marked "behind", but left out of the bulk accept:
+  a lagging site in the poller's rotation makes new chapters slower to find.
+- A scan also checks the links you already have on that source. When
+  MangaFire names a different page than the stored one (typically a light
+  novel's MangaUpdates entry linked where the manga was meant), the queue lists
+  it under **Stored links that disagree**: Replace swaps the link, Keep current
+  keeps it and is remembered.
 
 ## Source Health
 - The toolbar pill next to **Link review** says whether any site is failing

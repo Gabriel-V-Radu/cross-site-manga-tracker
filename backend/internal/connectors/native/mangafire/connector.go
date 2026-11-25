@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -258,6 +259,33 @@ func (c *Connector) ResolveCoverURL(ctx context.Context, rawURL string) (string,
 		return "", fmt.Errorf("fetch manga detail: %w", err)
 	}
 	return posterURL(detail.apiTitle), nil
+}
+
+var _ connectors.CrossLinkReader = (*Connector)(nil)
+
+// CrossLinks implements connectors.CrossLinkReader from the title's detail
+// record — the one resolves and covers read, cached for a day — so a title the
+// poller visited recently answers without a request.
+func (c *Connector) CrossLinks(ctx context.Context, rawURL string) (map[string]string, error) {
+	hid, _, err := c.parseTitleURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	detail, _, err := c.titleDetail(ctx, hid)
+	if err != nil {
+		return nil, fmt.Errorf("fetch manga detail: %w", err)
+	}
+	return detail.crossLinks(), nil
+}
+
+// CrossLinkKeys implements connectors.CrossLinkReader.
+func (c *Connector) CrossLinkKeys() []string {
+	keys := make([]string, 0, len(crossLinkKeys))
+	for _, key := range crossLinkKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (c *Connector) SearchByTitle(ctx context.Context, title string, limit int) ([]connectors.MangaResult, error) {

@@ -1,5 +1,6 @@
 {{define "link_queue_summary_body"}}
     <p class="links-summary__line">
+        {{if .ReplacementCount}}<strong>{{.ReplacementCount}}</strong> stored link(s) to check ·{{end}}
         <strong>{{.PendingCount}}</strong> candidate(s) across <strong>{{.GroupCount}}</strong> series ·
         <strong>{{.NoMatchCount}}</strong> without a candidate on {{.SourceName}}
     </p>
@@ -30,6 +31,60 @@
 </form>
 {{end}}
 
+{{define "link_candidate_meta"}}
+<p class="link-candidate__meta">
+    <span class="link-score{{if .Exact}} link-score--exact{{end}}">{{.ScoreLabel}}</span>
+    {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
+    {{if .ReleaseAgo}} · {{.ReleaseAgo}}{{end}}
+    {{if .Behind}} · <span class="link-candidate__behind" title="Behind the tracker's chapter: on a site the poller takes turns on, a link that lags makes new chapters slower to find.">behind your chapter</span>{{end}}
+</p>
+{{end}}
+
+{{/* A stored link another site's cross link contradicts. Replace swaps the
+     stored link for the candidate (accept); Keep turns the candidate down for
+     good (reject). */}}
+{{define "link_replacement_card"}}
+<article class="link-card link-card--replacement" id="link-card-{{.Tracker.ID}}">
+    <div class="link-card__tracker">
+        <h3 class="link-card__title">{{.Tracker.Title}}</h3>
+        <p class="link-card__meta">
+            {{.Tracker.StatusLabel}}
+            {{if .Tracker.LatestChapterLabel}} · {{.Tracker.LatestChapterLabel}}{{end}}
+            {{if .Tracker.LatestReleaseAgo}} · updated {{.Tracker.LatestReleaseAgo}}{{end}}
+        </p>
+        {{if .Tracker.PrimaryURL}}
+        <a class="link-card__open" href="{{.Tracker.PrimaryURL}}" target="_blank" rel="noopener noreferrer">
+            Open on {{if .Tracker.PrimarySourceName}}{{.Tracker.PrimarySourceName}}{{else}}primary site{{end}}
+        </a>
+        {{end}}
+    </div>
+    <div class="link-card__candidates">
+        {{range .Suggestions}}
+        <p class="link-card__current">Linked now: <a href="{{.ReplacesURL}}" target="_blank" rel="noopener noreferrer">{{.ReplacesURL}}</a></p>
+        <div class="link-candidate">
+            {{if .CoverURL}}<img class="link-candidate__cover" src="{{coverSrc .CoverURL}}" alt="" loading="lazy" referrerpolicy="no-referrer">{{end}}
+            <div class="link-candidate__body">
+                <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></p>
+                {{template "link_candidate_meta" .}}
+            </div>
+            <div class="link-candidate__actions">
+                <button type="button" class="action-btn action-btn--accent"
+                        hx-post="/dashboard/links/suggestions/{{.ID}}/accept"
+                        hx-include="#links-scope"
+                        hx-target="closest .link-card"
+                        hx-swap="outerHTML">Replace</button>
+                <button type="button" class="action-btn"
+                        hx-post="/dashboard/links/suggestions/{{.ID}}/reject"
+                        hx-include="#links-scope"
+                        hx-target="closest .link-card"
+                        hx-swap="outerHTML">Keep current</button>
+            </div>
+        </div>
+        {{end}}
+    </div>
+</article>
+{{end}}
+
 {{define "link_review_card"}}
 <article class="link-card" id="link-card-{{.Tracker.ID}}">
     <div class="link-card__tracker">
@@ -51,11 +106,7 @@
             {{if .CoverURL}}<img class="link-candidate__cover" src="{{coverSrc .CoverURL}}" alt="" loading="lazy" referrerpolicy="no-referrer">{{end}}
             <div class="link-candidate__body">
                 <p class="link-candidate__title"><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></p>
-                <p class="link-candidate__meta">
-                    <span class="link-score{{if .Exact}} link-score--exact{{end}}">{{.ScoreLabel}}</span>
-                    {{if .LatestChapterLabel}} · {{.LatestChapterLabel}}{{end}}
-                    {{if .ReleaseAgo}} · {{.ReleaseAgo}}{{end}}
-                </p>
+                {{template "link_candidate_meta" .}}
             </div>
             <div class="link-candidate__actions">
                 <button type="button" class="action-btn action-btn--accent"
@@ -117,6 +168,16 @@
 {{/* Each section hides itself once it holds no card (the .links-section rule
      in dashboard.css): accepting or rejecting the last candidate left its
      heading standing over nothing. */}}
+{{if .Replacements}}
+<section class="links-section">
+<h2 class="links-section-heading">Stored links that disagree</h2>
+<p class="links-section-hint">Another linked site points these series at a different page on {{.Summary.SourceName}} than the one stored: often a light novel linked where the manga was meant. Replace the link, or keep it if the stored page is right.</p>
+{{range .Replacements}}
+{{template "link_replacement_card" .}}
+{{end}}
+</section>
+{{end}}
+
 {{if .Groups}}
 <section class="links-section">
 <h2 class="links-section-heading">Candidates to review</h2>
@@ -142,6 +203,6 @@
 </section>
 {{end}}
 
-{{if and (not .Groups) (not .NoCandidates)}}
+{{if and (not .Groups) (not .NoCandidates) (not .Replacements)}}
 <p class="links-empty">Every tracker is linked to {{.Summary.SourceName}} (or reviewed). Nothing to do here.</p>
 {{end}}

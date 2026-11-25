@@ -25,6 +25,22 @@ const (
 	minKeepScore            = 0.35
 	maxCandidatesPerTracker = 3
 	perRequestTimeout       = 15 * time.Second
+
+	// maxIDChecks is how many search hits a scan asks for their cross links
+	// when the scanned site can name the tracker's other pages: one request
+	// each on a cold record, and the right series is rarely ranked lower.
+	maxIDChecks = 4
+
+	// behindIDScore is what an id match scores when its site is behind the
+	// tracker: the right series, still offered, but kept out of the bulk
+	// accept. A site taking turns in the poller's rotation that answers with
+	// an older chapter ends that poll on it (scheduler.pollTracker), so linking
+	// one makes new chapters slower to find, not faster.
+	behindIDScore = 0.9
+
+	// behindTolerance is how far behind the tracker's chapter a site may be
+	// and still count as in step: sites pick a chapter up hours apart.
+	behindTolerance = 1.0
 )
 
 // shutdownGrace is how long Close waits for a running scan to notice the
@@ -60,6 +76,9 @@ type Progress struct {
 	// LastError carries the same count in words, which is how it reaches the
 	// status line.
 	SearchFailed int
+	// Replacements counts linked trackers whose stored link on the source a
+	// cross link contradicts: each is offered in the queue as a replacement.
+	Replacements int
 	StartedAt    time.Time
 	FinishedAt   *time.Time
 	LastError    string
@@ -101,7 +120,9 @@ type Status struct {
 // with nothing to report it.
 type suggestionStore interface {
 	ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
+	ListLinkedScanTargets(ctx context.Context, profileID int64, sourceID int64, filter repository.LinkScanFilter) ([]repository.LinkScanTarget, error)
 	ReplacePendingSuggestions(ctx context.Context, trackerID int64, sourceID int64, suggestions []repository.LinkSuggestion) error
+	ReplacePendingReplacement(ctx context.Context, trackerID int64, sourceID int64, suggestion *repository.LinkSuggestion) error
 	DecidedCandidateURLs(ctx context.Context, trackerID int64, sourceID int64) ([]string, error)
 	MergeRelatedTitles(ctx context.Context, trackerID int64, titles []string) error
 }
@@ -109,9 +130,12 @@ type suggestionStore interface {
 // AidLookup is the metadata aggregator consulted per tracker before searching
 // the source itself — in production, MangaBaka. A confirmed record contributes
 // every alternate title the series has (better scoring, better queries) and
-// the series' MangaUpdates id (an exact link instead of a fuzzy search).
+// the series' MangaUpdates id (an exact link instead of a fuzzy search). It is
+// read by id when one of the tracker's sites links the record, by title
+// otherwise.
 type AidLookup interface {
 	Search(ctx context.Context, query string, limit int) ([]mangabaka.Series, error)
+	SeriesByID(ctx context.Context, id int64) (*mangabaka.Series, error)
 }
 
 type Scanner struct {
@@ -281,8 +305,20 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 		return
 	}
 
+	// The trackers already linked to the source are checked too, when some
+	// linked site can name the source's page: a stored link its cross link
+	// contradicts is offered for replacement. Without a site that could say,
+	// there is nothing to check them against.
+	var linked []repository.LinkScanTarget
+	if s.crossLinkable(connector.Key()) {
+		if linked, err = s.store.ListLinkedScanTargets(ctx, profileID, sourceID, filter); err != nil {
+			s.setError(fmt.Sprintf("load linked trackers: %v", err))
+			return
+		}
+	}
+
 	s.mu.Lock()
-	s.progress.Total = len(targets)
+	s.progress.Total = len(targets) + len(linked)
 	s.progress.Starting = false
 	s.mu.Unlock()
 
@@ -332,6 +368,19 @@ func (s *Scanner) run(ctx context.Context, done chan struct{}, profileID int64, 
 		}
 		s.mu.Unlock()
 	}
+
+	for _, target := range linked {
+		if s.shouldStop() || ctx.Err() != nil {
+			return
+		}
+		found := s.checkReplacement(ctx, connector, target, sourceID)
+		s.mu.Lock()
+		s.progress.Done++
+		if found {
+			s.progress.Replacements++
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Scanner) setError(message string) {
@@ -360,9 +409,23 @@ func (s *Scanner) noteSearchFailed(total int, cause error) {
 }
 
 // findCandidates searches the source for one tracker and scores what comes
-// back. A metadata-aggregator lookup runs first: a confirmed record widens
-// the title set candidates are scored against, and on MangaUpdates it skips
-// the fuzzy search entirely in favour of the record's exact series id.
+// back. Id evidence comes first, title matching after it:
+//
+//   - The tracker's linked sites that publish cross links are asked where else
+//     the series lives. When one names the series' page on this source, that
+//     page is the tracker's single candidate — an id match, not a title guess
+//     (MangaFire naming its MangaDex page, say).
+//   - The metadata aggregator is read next — by id when a cross link names its
+//     record, by title otherwise. A confirmed record widens the title set
+//     candidates are scored against, and on MangaUpdates it skips the fuzzy
+//     search in favour of the record's exact series id.
+//   - The search runs last. When this source itself publishes cross links,
+//     the best hits are asked for theirs: a hit linking one of the tracker's
+//     own pages is the series, one linking a different page on a site the
+//     tracker is linked to is not, and is dropped.
+//
+// An id match on a site that takes turns in the poller's rotation is offered
+// as exact only while it is in step with the tracker (see behindIDScore).
 //
 // decidedURLs are candidates the user already accepted or rejected for this
 // tracker. They are dropped before ranking: left in, three rejected hits
@@ -383,7 +446,20 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 		decided[strings.TrimSpace(url)] = struct{}{}
 	}
 
-	if aid := s.lookupAid(ctx, target); aid != nil {
+	links, _ := s.crossLinks(ctx, connector, target)
+
+	// A linked site names the series' page here.
+	if link, ok := links[connector.Key()]; ok {
+		if suggestion := s.directSuggestion(ctx, connector, target, sourceID, link.URL); suggestion != nil {
+			if _, done := decided[suggestion.CandidateURL]; !done {
+				suggestion.Basis = link.from
+				gateBehind(connector, target, suggestion)
+				return []repository.LinkSuggestion{*suggestion}, nil
+			}
+		}
+	}
+
+	if aid := s.lookupAid(ctx, target, links); aid != nil {
 		wanted = searchutil.UniqueNonEmpty(append(wanted, aid.Titles...))
 		// Names learned from a confirmed record outlive this scan: they make
 		// every future scan and dashboard search match better.
@@ -391,13 +467,25 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 			s.logger.Warn("merge related titles failed", "trackerId", target.TrackerID, "error", err)
 		}
 
-		if connector.Key() == "mangaupdates" {
+		// A novel's record lends its titles to a manga tracker, never its
+		// MangaUpdates entry: that is the novel's, and linking it is how nine
+		// trackers ended up following light novels (found 2026-11-25).
+		if connector.Key() == "mangaupdates" && (!aid.IsNovel() || readsProse(target)) {
 			if suggestion := s.directSuggestion(ctx, connector, target, sourceID, aid.MangaUpdatesURL()); suggestion != nil {
 				if _, done := decided[suggestion.CandidateURL]; !done {
 					return []repository.LinkSuggestion{*suggestion}, nil
 				}
 			}
 		}
+	}
+
+	// When this source publishes cross links of its own, a few more hits are
+	// kept to be asked for them: the right series ranked fourth by title is
+	// still found by id.
+	reader, checkIDs := s.idChecker(connector, target)
+	keep := maxCandidatesPerTracker
+	if checkIDs {
+		keep = maxIDChecks
 	}
 
 	queries := []string{target.Title}
@@ -462,8 +550,16 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 			suggestion.CandidateLatestChapter = result.LatestChapter
 			suggestion.CandidateReleaseAt = result.LastUpdatedAt
 
-			best = insertRanked(best, suggestion, maxCandidatesPerTracker)
+			best = insertRanked(best, suggestion, keep)
 		}
+	}
+
+	confirmed := false
+	if checkIDs {
+		best, confirmed = s.confirmByID(ctx, connector, reader, target, best)
+	}
+	if len(best) > maxCandidatesPerTracker {
+		best = best[:maxCandidatesPerTracker]
 	}
 
 	// Resolve the top candidate so the review card can show its latest
@@ -481,16 +577,319 @@ func (s *Scanner) findCandidates(ctx context.Context, connector connectors.Conne
 			}
 		}
 	}
+	if confirmed {
+		gateBehind(connector, target, &best[0])
+	}
 
 	return best, searchErr
 }
 
+// crossLink is one page a linked site names for the series, with the key of
+// the site that named it.
+type crossLink struct {
+	URL  string
+	from string
+}
+
+// crossLinks asks the tracker's linked sites that publish cross links where
+// else the series lives, keyed like connectors.CrossLinkReader's answers. Only
+// readers that could name something this scan uses are asked: the scanned
+// site, or the aggregator. The scanned site's own link is not asked about
+// itself. The first site to name a key wins. complete is false when a site
+// that was asked failed to answer: its silence then says nothing.
+func (s *Scanner) crossLinks(parent context.Context, scanned connectors.Connector, target repository.LinkScanTarget) (links map[string]crossLink, complete bool) {
+	links = map[string]crossLink{}
+	complete = true
+	for _, link := range target.Links {
+		if link.SourceKey == scanned.Key() {
+			continue
+		}
+		connector, ok := s.registry.Get(link.SourceKey)
+		if !ok {
+			continue
+		}
+		reader, ok := connector.(connectors.CrossLinkReader)
+		if !ok {
+			continue
+		}
+		useful := namesKey(reader, scanned.Key()) || (s.aid != nil && namesKey(reader, connectors.CrossLinkMangaBaka))
+		if !useful {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
+		named, err := reader.CrossLinks(ctx, link.URL)
+		cancel()
+		if err != nil {
+			s.logger.Debug("cross links unavailable", "trackerId", target.TrackerID, "source", link.SourceKey, "error", err)
+			complete = false
+			continue
+		}
+		for key, url := range named {
+			if _, taken := links[key]; !taken && strings.TrimSpace(url) != "" {
+				links[key] = crossLink{URL: strings.TrimSpace(url), from: link.SourceKey}
+			}
+		}
+	}
+	return links, complete
+}
+
+func namesKey(reader connectors.CrossLinkReader, key string) bool {
+	for _, named := range reader.CrossLinkKeys() {
+		if named == key {
+			return true
+		}
+	}
+	return false
+}
+
+// crossLinkable reports whether any registered site publishes cross links
+// naming the given site: only then can a stored link to it be contradicted.
+func (s *Scanner) crossLinkable(key string) bool {
+	for _, connector := range s.registry.Connectors() {
+		if reader, ok := connector.(connectors.CrossLinkReader); ok && namesKey(reader, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// idChecker returns the scanned site as a cross link reader when its hits can
+// be checked against the tracker: it names at least one site the tracker is
+// linked to.
+func (s *Scanner) idChecker(connector connectors.Connector, target repository.LinkScanTarget) (connectors.CrossLinkReader, bool) {
+	reader, ok := connector.(connectors.CrossLinkReader)
+	if !ok {
+		return nil, false
+	}
+	for _, link := range target.Links {
+		if namesKey(reader, link.SourceKey) {
+			return reader, true
+		}
+	}
+	return nil, false
+}
+
+// confirmByID asks the best hits, in rank order, for their cross links and
+// compares them with the tracker's own links. The first hit that links one of
+// the tracker's pages is the series: it comes back alone, exact, with the
+// scanned site as its basis. A hit linking a different page on a site the
+// tracker is linked to is another series and is dropped. Hits that say
+// nothing either way — or could not be asked — stay as the title ranked them.
+func (s *Scanner) confirmByID(parent context.Context, connector connectors.Connector, reader connectors.CrossLinkReader, target repository.LinkScanTarget, candidates []repository.LinkSuggestion) ([]repository.LinkSuggestion, bool) {
+	kept := make([]repository.LinkSuggestion, 0, len(candidates))
+	for index, candidate := range candidates {
+		if index >= maxIDChecks {
+			kept = append(kept, candidates[index:]...)
+			break
+		}
+		ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
+		named, err := reader.CrossLinks(ctx, candidate.CandidateURL)
+		cancel()
+		if err != nil {
+			s.logger.Debug("candidate cross links unavailable", "url", candidate.CandidateURL, "error", err)
+			kept = append(kept, candidate)
+			continue
+		}
+		switch s.compareLinks(target, named) {
+		case linksAgree:
+			candidate.Score = 1.0
+			candidate.Basis = connector.Key()
+			return []repository.LinkSuggestion{candidate}, true
+		case linksDisagree:
+			continue
+		default:
+			kept = append(kept, candidate)
+		}
+	}
+	return kept, false
+}
+
+type linkVerdict int
+
+const (
+	linksSayNothing linkVerdict = iota
+	linksAgree
+	linksDisagree
+)
+
+// compareLinks checks a page's cross links against the tracker's own links:
+// agree when any names a page the tracker is linked to, disagree when they
+// name only other pages on sites the tracker is linked to.
+func (s *Scanner) compareLinks(target repository.LinkScanTarget, named map[string]string) linkVerdict {
+	verdict := linksSayNothing
+	for key, url := range named {
+		connector, ok := s.registry.Get(key)
+		if !ok {
+			continue
+		}
+		for _, link := range target.Links {
+			if link.SourceKey != key {
+				continue
+			}
+			if connectors.SameSeries(connector, url, link.URL) {
+				return linksAgree
+			}
+			verdict = linksDisagree
+		}
+	}
+	return verdict
+}
+
+// gateBehind keeps an id match out of the bulk accept while its site is
+// behind the tracker, on a site that takes turns in the poller's rotation
+// (see behindIDScore). A trailing feed like MangaUpdates is only ever a
+// fallback, so lagging there costs nothing and the match stays exact.
+func gateBehind(connector connectors.Connector, target repository.LinkScanTarget, suggestion *repository.LinkSuggestion) {
+	if info, ok := connector.(connectors.PollRotationInfo); ok && info.TrailingChapterFeed() {
+		return
+	}
+	if target.LatestKnownChapter == nil {
+		return
+	}
+	if suggestion.CandidateLatestChapter == nil || *suggestion.CandidateLatestChapter < *target.LatestKnownChapter-behindTolerance {
+		suggestion.Score = behindIDScore
+	}
+}
+
+// checkReplacement compares a linked tracker's stored link on the source with
+// the page its other sites name for it there. When they name another series,
+// that page is resolved and stored as the tracker's replacement candidate;
+// when they agree — or name nothing, having been asked — any pending
+// replacement is withdrawn. It reports whether a replacement is on offer. A
+// site that could not be asked, or a candidate that would not resolve, leaves
+// what was stored before as it was: not knowing is not disagreeing.
+func (s *Scanner) checkReplacement(ctx context.Context, connector connectors.Connector, target repository.LinkScanTarget, sourceID int64) bool {
+	if len(target.CurrentLinks) == 0 {
+		return false
+	}
+	links, complete := s.crossLinks(ctx, connector, target)
+	link, named := links[connector.Key()]
+	if !named {
+		if complete {
+			s.storeReplacement(ctx, target, sourceID, nil)
+		}
+		return false
+	}
+	if agreesWithStored(connector, target, link.URL) {
+		s.storeReplacement(ctx, target, sourceID, nil)
+		return false
+	}
+
+	resolved := s.resolve(ctx, connector, link.URL)
+	if resolved == nil {
+		return false
+	}
+	candidateURL := strings.TrimSpace(resolved.URL)
+	if candidateURL == "" {
+		candidateURL = link.URL
+	}
+	// The cross link may have been another spelling of the stored page that
+	// only the resolve canonicalised.
+	if agreesWithStored(connector, target, candidateURL) {
+		s.storeReplacement(ctx, target, sourceID, nil)
+		return false
+	}
+
+	// A candidate the reader already turned down — "keep my link" — stays
+	// turned down, and is not counted as on offer.
+	decided, err := s.store.DecidedCandidateURLs(ctx, target.TrackerID, sourceID)
+	if err != nil {
+		s.logger.Warn("link scan could not load decided candidates", "trackerId", target.TrackerID, "error", err)
+	}
+	for _, url := range decided {
+		if strings.EqualFold(strings.TrimSpace(url), candidateURL) {
+			s.storeReplacement(ctx, target, sourceID, nil)
+			return false
+		}
+	}
+
+	replaces := target.CurrentLinks[0]
+	suggestion := repository.LinkSuggestion{
+		TrackerID:              target.TrackerID,
+		SourceID:               sourceID,
+		CandidateURL:           candidateURL,
+		CandidateTitle:         strings.TrimSpace(resolved.Title),
+		CandidateLatestChapter: resolved.LatestChapter,
+		CandidateReleaseAt:     resolved.LastUpdatedAt,
+		Score:                  1.0,
+		Basis:                  link.from,
+		ReplacesURL:            &replaces,
+	}
+	if itemID := strings.TrimSpace(resolved.SourceItemID); itemID != "" {
+		suggestion.CandidateItemID = &itemID
+	}
+	if cover := strings.TrimSpace(resolved.CoverImageURL); cover != "" {
+		suggestion.CandidateCoverURL = &cover
+	}
+	s.storeReplacement(ctx, target, sourceID, &suggestion)
+	return true
+}
+
+func agreesWithStored(connector connectors.Connector, target repository.LinkScanTarget, url string) bool {
+	for _, current := range target.CurrentLinks {
+		if connectors.SameSeries(connector, current, url) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scanner) storeReplacement(ctx context.Context, target repository.LinkScanTarget, sourceID int64, suggestion *repository.LinkSuggestion) {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := s.store.ReplacePendingReplacement(ctx, target.TrackerID, sourceID, suggestion); err != nil {
+		s.logger.Warn("link scan could not store a replacement", "trackerId", target.TrackerID, "error", err)
+	}
+}
+
 // lookupAid asks the aggregator about the tracker and returns its record only
-// on an exact normalized title match — a wrong record would poison both the
-// scoring set and the id link, so near matches are not good enough.
-func (s *Scanner) lookupAid(parent context.Context, target repository.LinkScanTarget) *mangabaka.Series {
+// when one of its titles is an exact normalized match for one of the
+// tracker's — a wrong record would poison both the scoring set and the id
+// link, so near matches are not good enough.
+//
+// A record a linked site names (links[mangabaka]) is read by id first. It
+// still has to share a title: cross links name the work, not the edition, and
+// an "(Official Colored)" tracker given the original's titles would then match
+// the black-and-white original everywhere at the exact score. When it shares
+// none, the title search decides as it always did.
+//
+// Among several records sharing a title, a light novel is passed over unless
+// the tracker itself reads prose: a novel and its manga share every title,
+// and the search lists the novel first as often as not.
+func (s *Scanner) lookupAid(parent context.Context, target repository.LinkScanTarget, links map[string]crossLink) *mangabaka.Series {
 	if s.aid == nil {
 		return nil
+	}
+
+	trackerTitles := map[string]struct{}{}
+	for _, title := range append([]string{target.Title}, target.RelatedTitles...) {
+		if normalized := searchutil.Normalize(title); normalized != "" {
+			trackerTitles[normalized] = struct{}{}
+		}
+	}
+	sharesTitle := func(series mangabaka.Series) bool {
+		for _, title := range series.Titles {
+			if _, ok := trackerTitles[searchutil.Normalize(title)]; ok {
+				return true
+			}
+		}
+		return false
+	}
+
+	if link, ok := links[connectors.CrossLinkMangaBaka]; ok {
+		if id, ok := mangabaka.SeriesIDFromURL(link.URL); ok {
+			ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
+			series, err := s.aid.SeriesByID(ctx, id)
+			cancel()
+			switch {
+			case err != nil:
+				s.logger.Debug("aggregator lookup by id failed", "id", id, "error", err)
+			case series != nil && sharesTitle(*series):
+				return series
+			}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(parent, perRequestTimeout)
@@ -502,21 +901,35 @@ func (s *Scanner) lookupAid(parent context.Context, target repository.LinkScanTa
 		return nil
 	}
 
-	trackerTitles := map[string]struct{}{}
-	for _, title := range append([]string{target.Title}, target.RelatedTitles...) {
-		if normalized := searchutil.Normalize(title); normalized != "" {
-			trackerTitles[normalized] = struct{}{}
-		}
-	}
-
+	readsProse := readsProse(target)
+	var novel *mangabaka.Series
 	for index, series := range results {
-		for _, title := range series.Titles {
-			if _, ok := trackerTitles[searchutil.Normalize(title)]; ok {
-				return &results[index]
+		if !sharesTitle(series) {
+			continue
+		}
+		if series.IsNovel() && !readsProse {
+			if novel == nil {
+				novel = &results[index]
 			}
+			continue
+		}
+		return &results[index]
+	}
+	// Only a novel shares the title. Its titles are still the series' names,
+	// but its MangaUpdates entry is the novel's: the caller does not link it
+	// (see findCandidates).
+	return novel
+}
+
+// readsProse reports a tracker that follows a novel: one linked to a site
+// that hosts nothing else.
+func readsProse(target repository.LinkScanTarget) bool {
+	for _, link := range target.Links {
+		if link.SourceKey == "freewebnovel" {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // directSuggestion resolves a known series URL on the source and wraps it as

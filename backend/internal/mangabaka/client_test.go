@@ -9,12 +9,12 @@ import (
 )
 
 const searchFixture = `{"status":200,"data":[
-	{"id":145,"state":"active","title":"Nano Machine","native_title":"나노마신","romanized_title":"Nano Machine",
+	{"id":145,"state":"active","type":"manhwa","title":"Nano Machine","native_title":"나노마신","romanized_title":"Nano Machine",
 	 "secondary_titles":{"unknown":[{"title":"Nano Mashin"},{"title":"나노마신"},{"title":"Nano Machine"}]},
 	 "source":{"manga_updates":{"id":"01w7hvo"},"my_anime_list":{"id":147863}}},
 	{"id":999,"state":"merged","merged_with":145,"title":"Nano Machine (duplicate)",
 	 "secondary_titles":{},"source":{"manga_updates":{"id":"zzzzzz"}}},
-	{"id":500,"state":"active","title":"Machine Uprising","secondary_titles":{},
+	{"id":500,"state":"active","type":"novel","title":"Machine Uprising","secondary_titles":{},
 	 "source":{"manga_updates":{"id":null}}}
 ]}`
 
@@ -73,5 +73,56 @@ func TestSearchParsesTitlesAndMangaUpdatesID(t *testing.T) {
 	// A null manga_updates id decodes to the empty string.
 	if results[1].MangaUpdatesID != "" || results[1].MangaUpdatesURL() != "" {
 		t.Fatalf("null id should map to empty: %+v", results[1])
+	}
+	if nano.Type != "manhwa" || nano.IsNovel() || !results[1].IsNovel() {
+		t.Fatalf("types = %q, %q; want manhwa and a novel", nano.Type, results[1].Type)
+	}
+}
+
+// A record asked for by id needs no title to match, and one merged into
+// another is followed to the live record.
+func TestSeriesByIDFollowsAMerge(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/series/999", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":200,"data":{"id":999,"state":"merged","merged_with":145,"title":"Nano Machine (duplicate)"}}`))
+	})
+	mux.HandleFunc("/v1/series/145", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":200,"data":{"id":145,"state":"active","type":"Manhwa","title":"Nano Machine",
+			"secondary_titles":{"en":[{"title":"Nano Mashin"}]},"source":{"manga_updates":{"id":"01w7hvo"}}}}`))
+	})
+	mux.HandleFunc("/v1/series/404", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := NewClientWithOptions(server.URL, &http.Client{Timeout: 5 * time.Second})
+
+	series, err := client.SeriesByID(context.Background(), 999)
+	if err != nil {
+		t.Fatalf("series by id: %v", err)
+	}
+	if series == nil || series.ID != 145 || series.MangaUpdatesID != "01w7hvo" || series.Type != "manhwa" {
+		t.Fatalf("series = %+v, want the live record 145", series)
+	}
+
+	missing, err := client.SeriesByID(context.Background(), 404)
+	if err != nil || missing != nil {
+		t.Fatalf("a missing record = %+v, %v; want nil, nil", missing, err)
+	}
+}
+
+func TestSeriesIDFromURL(t *testing.T) {
+	for rawURL, want := range map[string]int64{
+		"https://mangabaka.org/6957/":      6957,
+		"https://mangabaka.org/6957":       6957,
+		"https://mangabaka.dev/6957/slug":  6957,
+		"https://mangabaka.org/search?q=x": 0,
+		"https://mangadex.org/title/6957/": 0,
+		"not a url":                        0,
+	} {
+		got, ok := SeriesIDFromURL(rawURL)
+		if got != want || ok != (want != 0) {
+			t.Errorf("SeriesIDFromURL(%q) = %d, %v; want %d", rawURL, got, ok, want)
+		}
 	}
 }

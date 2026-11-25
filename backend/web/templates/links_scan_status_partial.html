@@ -20,7 +20,7 @@
     {{if .Starting}}
     Starting the {{.SourceName}} scan: counting the series to check…
     {{else}}
-    Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates
+    Scanning {{.SourceName}}: {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Replacements}}, {{.Replacements}} stored link(s) disagree{{end}}
     {{end}}
     <button type="button" class="action-btn link-scan-status__stop"
             hx-post="/dashboard/links/scan/stop"
@@ -38,7 +38,7 @@
 <div id="link-scan-status" class="link-scan-status"
      {{if .BusyElsewhere}}hx-get="/dashboard/links/scan-status" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML"{{end}}>
     {{if .SourceName}}
-    Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Stopped}} — stopped early{{end}}.
+    Last scan ({{.SourceName}}): {{.Done}}/{{.Total}} series checked, {{.WithCandidates}} with candidates{{if .Replacements}}, {{.Replacements}} stored link(s) disagree{{end}}{{if .Stopped}} — stopped early{{end}}.
     {{if .LastError}}<span class="link-scan-status__error">{{.LastError}}</span>{{end}}
     {{end}}
     {{if .Notice}}<span class="link-scan-status__error" role="status">{{.Notice}}</span>

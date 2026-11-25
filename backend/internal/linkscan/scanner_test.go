@@ -18,7 +18,9 @@ import (
 type stubStore struct {
 	mu           sync.Mutex
 	targets      []repository.LinkScanTarget
+	linked       []repository.LinkScanTarget
 	stored       map[int64][]repository.LinkSuggestion
+	replacements map[int64]*repository.LinkSuggestion
 	mergedTitles map[int64][]string
 	decided      map[int64][]string
 }
@@ -27,9 +29,21 @@ func newStubStore(targets ...repository.LinkScanTarget) *stubStore {
 	return &stubStore{
 		targets:      targets,
 		stored:       map[int64][]repository.LinkSuggestion{},
+		replacements: map[int64]*repository.LinkSuggestion{},
 		mergedTitles: map[int64][]string{},
 		decided:      map[int64][]string{},
 	}
+}
+
+func (s *stubStore) ListLinkedScanTargets(context.Context, int64, int64, repository.LinkScanFilter) ([]repository.LinkScanTarget, error) {
+	return s.linked, nil
+}
+
+func (s *stubStore) ReplacePendingReplacement(_ context.Context, trackerID int64, _ int64, suggestion *repository.LinkSuggestion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replacements[trackerID] = suggestion
+	return nil
 }
 
 func (s *stubStore) DecidedCandidateURLs(_ context.Context, trackerID int64, _ int64) ([]string, error) {
@@ -88,10 +102,20 @@ func (c *stubConnector) SearchByTitle(_ context.Context, title string, _ int) ([
 type stubAid struct {
 	series []mangabaka.Series
 	err    error
+	byID   map[int64]mangabaka.Series
+	idAsks []int64
 }
 
 func (a *stubAid) Search(context.Context, string, int) ([]mangabaka.Series, error) {
 	return a.series, a.err
+}
+
+func (a *stubAid) SeriesByID(_ context.Context, id int64) (*mangabaka.Series, error) {
+	a.idAsks = append(a.idAsks, id)
+	if series, ok := a.byID[id]; ok {
+		return &series, nil
+	}
+	return nil, a.err
 }
 
 func runScan(t *testing.T, store *stubStore, connector connectors.Connector, aid AidLookup) *Scanner {

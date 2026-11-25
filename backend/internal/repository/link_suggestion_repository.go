@@ -48,15 +48,38 @@ type LinkSuggestion struct {
 	Score                  float64
 	Status                 string
 	CreatedAt              time.Time
+	// Basis is the key of the site whose own page links this candidate as the
+	// same series — an id match rather than a title guess; "" for a candidate
+	// found by title.
+	Basis string
+	// ReplacesURL is set on a candidate for a site the tracker is already
+	// linked to: another site's link says the series lives at the candidate,
+	// not at this stored link. Accepting it swaps the link; nil for an
+	// ordinary candidate.
+	ReplacesURL *string
 }
 
-// LinkScanTarget is a tracker a scan should look up on a source: it has no
-// link to that source yet and was not dismissed.
+// TrackerLink is one of a tracker's linked sites (its primary included).
+type TrackerLink struct {
+	SourceID  int64
+	SourceKey string
+	URL       string
+}
+
+// LinkScanTarget is a tracker a scan should look up on a source. From
+// ListScanTargets it has no link to that source yet and was not dismissed;
+// from ListLinkedScanTargets it has one, as an alternate, in CurrentLinks.
 type LinkScanTarget struct {
 	TrackerID          int64
 	Title              string
 	RelatedTitles      []string
 	LatestKnownChapter *float64
+	// Links are every site the tracker is linked to, so the scan can ask the
+	// ones that know (connectors.CrossLinkReader) where else the series lives.
+	Links []TrackerLink
+	// CurrentLinks are the tracker's stored URLs on the scanned source; only
+	// ListLinkedScanTargets fills them.
+	CurrentLinks []string
 }
 
 // LinkReviewTracker is one tracker in the review queue, with whatever pending
@@ -128,7 +151,32 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 	  )
 `
 	args := []any{sourceID, sourceID, profileID, sourceID}
+	return withScanFilter(query, args, filter)
+}
 
+// linkedTrackersQuery selects a profile's trackers that are linked to the
+// source as an alternate — the ones whose stored link another site's cross
+// link can contradict — narrowed by the same filter. A tracker that follows
+// the source as its primary is left out: a primary is what the tracker is,
+// not a link to second-guess here.
+func linkedTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilter) (string, []any) {
+	query := `
+	SELECT t.id, t.title, t.related_titles, t.status, t.source_id, t.source_url,
+	       t.latest_known_chapter, t.latest_release_at
+	FROM trackers t
+	WHERE t.source_id != ?
+	  AND EXISTS (
+	      SELECT 1 FROM tracker_sources ts
+	      WHERE ts.tracker_id = t.id AND ts.source_id = ?
+	  )
+	  AND t.profile_id = ?
+`
+	args := []any{sourceID, sourceID, profileID}
+	return withScanFilter(query, args, filter)
+}
+
+// withScanFilter appends the filter's clauses to a tracker query.
+func withScanFilter(query string, args []any, filter LinkScanFilter) (string, []any) {
 	if len(filter.Statuses) > 0 {
 		query += ` AND t.status IN (` + sqlPlaceholders(len(filter.Statuses)) + `)`
 		for _, status := range filter.Statuses {
@@ -163,6 +211,72 @@ func linkableTrackersQuery(profileID int64, sourceID int64, filter LinkScanFilte
 // ListScanTargets returns the trackers a scan of sourceID should look up.
 func (r *LinkSuggestionRepository) ListScanTargets(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
 	query, args := linkableTrackersQuery(profileID, sourceID, filter)
+	targets, err := r.listTargets(ctx, query, args)
+	if err != nil {
+		return nil, err
+	}
+	return targets, r.attachLinks(ctx, profileID, sourceID, targets)
+}
+
+// ListLinkedScanTargets returns the trackers linked to sourceID as an
+// alternate, with those links in CurrentLinks: the ones a scan checks against
+// what their other sites say the series' page on sourceID is.
+func (r *LinkSuggestionRepository) ListLinkedScanTargets(ctx context.Context, profileID int64, sourceID int64, filter LinkScanFilter) ([]LinkScanTarget, error) {
+	query, args := linkedTrackersQuery(profileID, sourceID, filter)
+	targets, err := r.listTargets(ctx, query, args)
+	if err != nil {
+		return nil, err
+	}
+	return targets, r.attachLinks(ctx, profileID, sourceID, targets)
+}
+
+// attachLinks fills each target's Links, and its CurrentLinks on sourceID, in
+// one query for the whole profile. It runs after the targets' cursor is
+// closed: the read pool has a single connection.
+func (r *LinkSuggestionRepository) attachLinks(ctx context.Context, profileID int64, sourceID int64, targets []LinkScanTarget) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	byTracker := make(map[int64]int, len(targets))
+	for index, target := range targets {
+		byTracker[target.TrackerID] = index
+	}
+
+	rows, err := r.rdb.QueryContext(ctx, `
+		SELECT ts.tracker_id, ts.source_id, s.key, ts.source_url
+		FROM tracker_sources ts
+		INNER JOIN sources s ON s.id = ts.source_id
+		INNER JOIN trackers t ON t.id = ts.tracker_id
+		WHERE t.profile_id = ?
+		ORDER BY ts.tracker_id ASC, ts.id ASC
+	`, profileID)
+	if err != nil {
+		return fmt.Errorf("list tracker links: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var trackerID int64
+		var link TrackerLink
+		if err := rows.Scan(&trackerID, &link.SourceID, &link.SourceKey, &link.URL); err != nil {
+			return fmt.Errorf("scan tracker link: %w", err)
+		}
+		index, ok := byTracker[trackerID]
+		if !ok || strings.TrimSpace(link.URL) == "" {
+			continue
+		}
+		targets[index].Links = append(targets[index].Links, link)
+		if link.SourceID == sourceID {
+			targets[index].CurrentLinks = append(targets[index].CurrentLinks, link.URL)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate tracker links: %w", err)
+	}
+	return nil
+}
+
+func (r *LinkSuggestionRepository) listTargets(ctx context.Context, query string, args []any) ([]LinkScanTarget, error) {
 	rows, err := r.rdb.QueryContext(ctx, query+` ORDER BY t.title ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list link scan targets: %w", err)
@@ -244,23 +358,11 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 		if candidateURL == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO source_link_suggestions
-				(tracker_id, source_id, candidate_url, candidate_item_id, candidate_title,
-				 candidate_cover_url, candidate_latest_chapter, candidate_release_at, score, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-			ON CONFLICT(tracker_id, source_id, candidate_url) DO UPDATE SET
-				candidate_item_id = excluded.candidate_item_id,
-				candidate_title = excluded.candidate_title,
-				candidate_cover_url = excluded.candidate_cover_url,
-				candidate_latest_chapter = excluded.candidate_latest_chapter,
-				candidate_release_at = excluded.candidate_release_at,
-				score = excluded.score
-			WHERE source_link_suggestions.status = 'pending'
-		`, trackerID, sourceID, candidateURL, suggestion.CandidateItemID, suggestion.CandidateTitle,
-			suggestion.CandidateCoverURL, suggestion.CandidateLatestChapter, dbTimeArg(suggestion.CandidateReleaseAt),
-			suggestion.Score); err != nil {
-			return fmt.Errorf("upsert suggestion: %w", err)
+		// An ordinary candidate replaces nothing, whatever a row for the same
+		// URL said before.
+		suggestion.ReplacesURL = nil
+		if err := upsertPendingSuggestionTx(ctx, tx, trackerID, sourceID, candidateURL, suggestion); err != nil {
+			return err
 		}
 	}
 
@@ -268,6 +370,127 @@ func (r *LinkSuggestionRepository) ReplacePendingSuggestions(ctx context.Context
 		return fmt.Errorf("commit replace pending suggestions tx: %w", err)
 	}
 	return nil
+}
+
+// upsertPendingSuggestionTx stores one candidate as pending, refreshing what
+// it shows when the row exists and is still pending; a decided row is left as
+// it was.
+func upsertPendingSuggestionTx(ctx context.Context, tx *sql.Tx, trackerID int64, sourceID int64, candidateURL string, suggestion LinkSuggestion) error {
+	var replacesURL *string
+	if suggestion.ReplacesURL != nil {
+		if trimmed := strings.TrimSpace(*suggestion.ReplacesURL); trimmed != "" {
+			replacesURL = &trimmed
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO source_link_suggestions
+			(tracker_id, source_id, candidate_url, candidate_item_id, candidate_title,
+			 candidate_cover_url, candidate_latest_chapter, candidate_release_at, score, status,
+			 basis, replaces_url)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+		ON CONFLICT(tracker_id, source_id, candidate_url) DO UPDATE SET
+			candidate_item_id = excluded.candidate_item_id,
+			candidate_title = excluded.candidate_title,
+			candidate_cover_url = excluded.candidate_cover_url,
+			candidate_latest_chapter = excluded.candidate_latest_chapter,
+			candidate_release_at = excluded.candidate_release_at,
+			score = excluded.score,
+			basis = excluded.basis,
+			replaces_url = excluded.replaces_url
+		WHERE source_link_suggestions.status = 'pending'
+	`, trackerID, sourceID, candidateURL, suggestion.CandidateItemID, suggestion.CandidateTitle,
+		suggestion.CandidateCoverURL, suggestion.CandidateLatestChapter, dbTimeArg(suggestion.CandidateReleaseAt),
+		suggestion.Score, strings.TrimSpace(suggestion.Basis), replacesURL); err != nil {
+		return fmt.Errorf("upsert suggestion: %w", err)
+	}
+	return nil
+}
+
+// ReplacePendingReplacement sets a linked tracker's pending replacement on a
+// source: the candidate another site says the stored link should be, or none
+// (nil) once nothing disagrees any more. A candidate the reader already
+// decided stays decided — kept links stay kept.
+func (r *LinkSuggestionRepository) ReplacePendingReplacement(ctx context.Context, trackerID int64, sourceID int64, suggestion *LinkSuggestion) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace pending replacement tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	deleteQuery := `
+		DELETE FROM source_link_suggestions
+		WHERE tracker_id = ? AND source_id = ? AND status = 'pending' AND replaces_url IS NOT NULL`
+	deleteArgs := []any{trackerID, sourceID}
+	candidateURL := ""
+	if suggestion != nil {
+		candidateURL = strings.TrimSpace(suggestion.CandidateURL)
+	}
+	if candidateURL != "" {
+		deleteQuery += ` AND candidate_url != ?`
+		deleteArgs = append(deleteArgs, candidateURL)
+	}
+	if _, err := tx.ExecContext(ctx, deleteQuery, deleteArgs...); err != nil {
+		return fmt.Errorf("delete pending replacements: %w", err)
+	}
+
+	if candidateURL != "" && suggestion.ReplacesURL != nil && strings.TrimSpace(*suggestion.ReplacesURL) != "" {
+		if err := upsertPendingSuggestionTx(ctx, tx, trackerID, sourceID, candidateURL, *suggestion); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace pending replacement tx: %w", err)
+	}
+	return nil
+}
+
+// ListReplacements returns the profile's pending replacements on a source —
+// stored links another site's link contradicts — each as a review entry with
+// its one candidate. A replacement whose stored link is gone (removed in the
+// edit form since) is no longer offered.
+func (r *LinkSuggestionRepository) ListReplacements(ctx context.Context, profileID int64, sourceID int64) ([]LinkReviewTracker, error) {
+	rows, err := r.rdb.QueryContext(ctx, `
+		SELECT `+linkSuggestionColumns+`,
+		       t.title, t.status, t.source_id, t.source_url, t.latest_known_chapter, t.latest_release_at
+		FROM source_link_suggestions s
+		INNER JOIN trackers t ON t.id = s.tracker_id
+		WHERE s.source_id = ? AND s.status = 'pending' AND s.replaces_url IS NOT NULL
+		  AND t.profile_id = ? AND t.source_id != s.source_id
+		  AND EXISTS (
+		      SELECT 1 FROM tracker_sources ts
+		      WHERE ts.tracker_id = t.id AND ts.source_id = s.source_id
+		        AND LOWER(TRIM(ts.source_url)) = LOWER(TRIM(s.replaces_url))
+		  )
+		ORDER BY t.title ASC, s.id ASC
+	`, sourceID, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list replacements: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]LinkReviewTracker, 0)
+	for rows.Next() {
+		var entry LinkReviewTracker
+		var latestReleaseAt sql.NullTime
+		suggestion, err := scanLinkSuggestionWith(rows,
+			&entry.Title, &entry.Status, &entry.SourceID, &entry.SourceURL,
+			&entry.LatestKnownChapter, &latestReleaseAt)
+		if err != nil {
+			return nil, err
+		}
+		entry.TrackerID = suggestion.TrackerID
+		if latestReleaseAt.Valid {
+			value := latestReleaseAt.Time
+			entry.LatestReleaseAt = &value
+		}
+		entry.Suggestions = []LinkSuggestion{suggestion}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate replacements: %w", err)
+	}
+	return entries, nil
 }
 
 // DecidedCandidateURLs returns the candidate URLs the user already accepted or
@@ -313,9 +536,7 @@ func (r *LinkSuggestionRepository) ListReviewQueue(ctx context.Context, profileI
 	}
 
 	suggestionRows, err := r.rdb.QueryContext(ctx, `
-		SELECT s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
-		       s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
-		       s.candidate_release_at, s.score, s.status, s.created_at
+		SELECT `+linkSuggestionColumns+`
 		FROM source_link_suggestions s
 		INNER JOIN trackers t ON t.id = s.tracker_id
 		WHERE s.source_id = ? AND s.status = 'pending' AND t.profile_id = ?
@@ -386,12 +607,24 @@ func (r *LinkSuggestionRepository) listReviewQueueTrackers(ctx context.Context, 
 	return queue, byTracker, nil
 }
 
+// linkSuggestionColumns are the columns scanLinkSuggestion reads, in its
+// order, for a query that aliases source_link_suggestions as s.
+const linkSuggestionColumns = `s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
+	s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
+	s.candidate_release_at, s.score, s.status, s.created_at, s.basis, s.replaces_url`
+
 func scanLinkSuggestion(row rowScanner) (LinkSuggestion, error) {
+	return scanLinkSuggestionWith(row)
+}
+
+// scanLinkSuggestionWith reads linkSuggestionColumns and then whatever
+// further columns the query selected into extra.
+func scanLinkSuggestionWith(row rowScanner, extra ...any) (LinkSuggestion, error) {
 	var suggestion LinkSuggestion
-	var candidateItemID, candidateCoverURL sql.NullString
+	var candidateItemID, candidateCoverURL, replacesURL sql.NullString
 	var candidateLatestChapter sql.NullFloat64
 	var candidateReleaseAt sql.NullTime
-	if err := row.Scan(
+	destinations := append([]any{
 		&suggestion.ID,
 		&suggestion.TrackerID,
 		&suggestion.SourceID,
@@ -404,8 +637,15 @@ func scanLinkSuggestion(row rowScanner) (LinkSuggestion, error) {
 		&suggestion.Score,
 		&suggestion.Status,
 		&suggestion.CreatedAt,
-	); err != nil {
+		&suggestion.Basis,
+		&replacesURL,
+	}, extra...)
+	if err := row.Scan(destinations...); err != nil {
 		return suggestion, fmt.Errorf("scan link suggestion: %w", err)
+	}
+	if replacesURL.Valid && strings.TrimSpace(replacesURL.String) != "" {
+		value := replacesURL.String
+		suggestion.ReplacesURL = &value
 	}
 	if candidateItemID.Valid {
 		suggestion.CandidateItemID = &candidateItemID.String
@@ -426,9 +666,7 @@ func scanLinkSuggestion(row rowScanner) (LinkSuggestion, error) {
 // pendingSuggestionByIDSQL loads one pending candidate by id, verifying
 // through the tracker that it belongs to the profile.
 const pendingSuggestionByIDSQL = `
-	SELECT s.id, s.tracker_id, s.source_id, s.candidate_url, s.candidate_item_id,
-	       s.candidate_title, s.candidate_cover_url, s.candidate_latest_chapter,
-	       s.candidate_release_at, s.score, s.status, s.created_at
+	SELECT ` + linkSuggestionColumns + `
 	FROM source_link_suggestions s
 	INNER JOIN trackers t ON t.id = s.tracker_id
 	WHERE s.id = ? AND s.status = 'pending' AND t.profile_id = ?
@@ -494,12 +732,22 @@ func (r *LinkSuggestionRepository) AcceptSuggestion(ctx context.Context, profile
 		return nil, err
 	}
 
-	if err := upsertTrackerSourceTx(ctx, tx, suggestion.TrackerID, models.TrackerSource{
-		SourceID:     suggestion.SourceID,
-		SourceItemID: suggestion.CandidateItemID,
-		SourceURL:    suggestion.CandidateURL,
-	}); err != nil {
-		return nil, err
+	replaced := false
+	if suggestion.ReplacesURL != nil {
+		if replaced, err = replaceTrackerSourceTx(ctx, tx, suggestion); err != nil {
+			return nil, err
+		}
+	}
+	if !replaced {
+		// An ordinary candidate, or a replacement whose stored link was removed
+		// since: either way the candidate becomes a link of its own.
+		if err := upsertTrackerSourceTx(ctx, tx, suggestion.TrackerID, models.TrackerSource{
+			SourceID:     suggestion.SourceID,
+			SourceItemID: suggestion.CandidateItemID,
+			SourceURL:    suggestion.CandidateURL,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE source_link_suggestions
@@ -586,6 +834,80 @@ func (r *LinkSuggestionRepository) ApplyManualLink(ctx context.Context, profileI
 		return fmt.Errorf("commit manual link tx: %w", err)
 	}
 	return nil
+}
+
+// replaceTrackerSourceTx swaps the alternate link a replacement names for the
+// replacement's candidate, and reports false when that link is gone (or is the
+// tracker's primary, which a replacement never touches). The row is rewritten
+// in place: what the poller knew about the old page — whether it was in step,
+// when it was last asked — is cleared, because it described another series.
+// The old URL is then recorded as rejected for the tracker, so no scan offers
+// it back; an accepted row it had from the review that linked it flips too.
+func replaceTrackerSourceTx(ctx context.Context, tx *sql.Tx, suggestion LinkSuggestion) (bool, error) {
+	oldURL := strings.TrimSpace(*suggestion.ReplacesURL)
+	var rowID int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT ts.id FROM tracker_sources ts
+		INNER JOIN trackers t ON t.id = ts.tracker_id
+		WHERE ts.tracker_id = ? AND ts.source_id = ? AND t.source_id != ts.source_id
+		  AND LOWER(TRIM(ts.source_url)) = LOWER(TRIM(?))
+		ORDER BY (ts.source_url = ?) DESC, ts.id ASC
+		LIMIT 1
+	`, suggestion.TrackerID, suggestion.SourceID, oldURL, oldURL).Scan(&rowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find the link to replace: %w", err)
+	}
+
+	candidateURL := strings.TrimSpace(suggestion.CandidateURL)
+	var alreadyLinked int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM tracker_sources
+		WHERE tracker_id = ? AND source_id = ? AND id != ? AND LOWER(TRIM(source_url)) = LOWER(TRIM(?))
+	`, suggestion.TrackerID, suggestion.SourceID, rowID, candidateURL).Scan(&alreadyLinked); err != nil {
+		return false, fmt.Errorf("check the replacement link: %w", err)
+	}
+	if alreadyLinked > 0 {
+		// The candidate is linked already, beside the wrong page: dropping the
+		// wrong one is the whole replacement.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tracker_sources WHERE id = ?`, rowID); err != nil {
+			return false, fmt.Errorf("drop the replaced link: %w", err)
+		}
+	} else {
+		var itemID *string
+		if suggestion.CandidateItemID != nil {
+			if trimmed := strings.TrimSpace(*suggestion.CandidateItemID); trimmed != "" {
+				itemID = &trimmed
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tracker_sources
+			SET source_url = ?, source_item_id = ?, in_step = 0, last_polled_at = NULL,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, candidateURL, itemID, rowID); err != nil {
+			return false, fmt.Errorf("replace the link: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE source_link_suggestions
+		SET status = 'rejected', decided_at = CURRENT_TIMESTAMP
+		WHERE tracker_id = ? AND source_id = ? AND status IN ('accepted', 'pending')
+		  AND LOWER(TRIM(candidate_url)) = LOWER(TRIM(?))
+	`, suggestion.TrackerID, suggestion.SourceID, oldURL); err != nil {
+		return false, fmt.Errorf("reject the replaced link: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO source_link_suggestions (tracker_id, source_id, candidate_url, status, decided_at)
+		VALUES (?, ?, ?, 'rejected', CURRENT_TIMESTAMP)
+		ON CONFLICT(tracker_id, source_id, candidate_url) DO NOTHING
+	`, suggestion.TrackerID, suggestion.SourceID, oldURL); err != nil {
+		return false, fmt.Errorf("record the replaced link: %w", err)
+	}
+	return true, nil
 }
 
 const rejectPendingSuggestionsSQL = `

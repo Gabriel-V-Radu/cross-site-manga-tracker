@@ -2522,6 +2522,24 @@ input.is-loading::placeholder {
 
 .link-card--nomatch { gap: 8px; }
 
+/* A stored link a cross link contradicts: the page it would swap out sits
+   above the candidate, struck through so the two read as before → after. */
+.link-card--replacement { border-left: 3px solid var(--accent); }
+
+.link-card__current {
+    margin: 0;
+    font-size: 12px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+}
+
+.link-card__current a {
+    color: var(--ink-soft);
+    text-decoration: line-through;
+}
+
+.link-candidate__behind { color: var(--accent-soft); }
+
 .links-empty {
     margin-top: 24px;
     color: var(--ink-soft);

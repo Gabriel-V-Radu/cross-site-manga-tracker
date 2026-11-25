@@ -188,6 +188,12 @@ type linkSuggestionView struct {
 	ReleaseAgo         string
 	ScoreLabel         string
 	Exact              bool
+	// Behind marks a candidate whose latest chapter trails the tracker's: on
+	// a site that takes turns in the poller's rotation, linking it would make
+	// new chapters slower to find.
+	Behind bool
+	// ReplacesURL is the stored link a replacement would swap out.
+	ReplacesURL string
 }
 
 type linkReviewTrackerView struct {
@@ -212,17 +218,21 @@ type linkReviewGroupView struct {
 }
 
 type linkQueueSummaryView struct {
-	SourceID       int64
-	SourceName     string
-	PendingCount   int
-	GroupCount     int
-	NoMatchCount   int
-	ExactCount     int
-	ShowAcceptable bool
+	SourceID         int64
+	SourceName       string
+	PendingCount     int
+	GroupCount       int
+	NoMatchCount     int
+	ExactCount       int
+	ReplacementCount int
+	ShowAcceptable   bool
 }
 
 type linkQueueData struct {
-	Summary      linkQueueSummaryView
+	Summary linkQueueSummaryView
+	// Replacements are linked trackers whose stored link on the source
+	// another site's cross link contradicts, one candidate each.
+	Replacements []linkReviewGroupView
 	Groups       []linkReviewGroupView
 	NoCandidates []linkReviewTrackerView
 	// ShowNoCandidates renders the "no candidate found" section even while it
@@ -240,6 +250,7 @@ type linkScanStatusData struct {
 	Total          int
 	Done           int
 	WithCandidates int
+	Replacements   int
 	Stopped        bool
 	Stopping       bool
 	LastError      string
@@ -253,9 +264,10 @@ type linkScanStatusData struct {
 // an out-of-band refresh of the summary bar, so counters stay honest without
 // re-rendering the whole queue on every click.
 type linkCardResponseData struct {
-	Group   *linkReviewGroupView
-	NoMatch *linkReviewTrackerView
-	Summary linkQueueSummaryView
+	Group       *linkReviewGroupView
+	Replacement *linkReviewGroupView
+	NoMatch     *linkReviewTrackerView
+	Summary     linkQueueSummaryView
 }
 
 func (h *DashboardHandler) LinksPage(c *fiber.Ctx) error {
@@ -437,9 +449,25 @@ func (h *DashboardHandler) buildLinkQueue(ctx context.Context, profileID int64, 
 		return linkQueueData{}, err
 	}
 
+	replacements, err := h.linkSuggestionRepo.ListReplacements(ctx, profileID, source.ID)
+	if err != nil {
+		return linkQueueData{}, err
+	}
+
+	names := h.sourceNamesByKey(ctx)
 	data := linkQueueData{
 		Summary:          linkQueueSummaryView{SourceID: source.ID, SourceName: source.Name},
 		ShowNoCandidates: scope.Show != "with",
+	}
+	// Replacements are listed whatever the scope: each is a stored link that
+	// is probably wrong, which no filter makes less so.
+	for _, item := range replacements {
+		group := linkReviewGroupView{Tracker: h.toLinkReviewTrackerView(item, source.ID)}
+		for _, suggestion := range item.Suggestions {
+			group.Suggestions = append(group.Suggestions, toLinkSuggestionView(suggestion, item.LatestKnownChapter, names))
+		}
+		data.Replacements = append(data.Replacements, group)
+		data.Summary.ReplacementCount++
 	}
 	for _, item := range queue {
 		trackerView := h.toLinkReviewTrackerView(item, source.ID)
@@ -451,7 +479,7 @@ func (h *DashboardHandler) buildLinkQueue(ctx context.Context, profileID int64, 
 
 		group := linkReviewGroupView{Tracker: trackerView}
 		for _, suggestion := range item.Suggestions {
-			group.Suggestions = append(group.Suggestions, toLinkSuggestionView(suggestion))
+			group.Suggestions = append(group.Suggestions, toLinkSuggestionView(suggestion, item.LatestKnownChapter, names))
 			data.Summary.PendingCount++
 		}
 		if isBulkAcceptable(item.Suggestions) {
@@ -508,13 +536,24 @@ func (h *DashboardHandler) toLinkReviewTrackerView(item repository.LinkReviewTra
 	return view
 }
 
-func toLinkSuggestionView(suggestion repository.LinkSuggestion) linkSuggestionView {
+// behindTolerance is how far behind the tracker's chapter a candidate may be
+// and still not be marked behind: sites pick a chapter up hours apart. It is
+// the link scan's own tolerance (linkscan.behindTolerance).
+const behindTolerance = 1.0
+
+// toLinkSuggestionView renders one candidate. trackerLatest is the tracker's
+// latest chapter, which a candidate's is compared with; names maps source
+// keys to the names the basis label uses (sourceNamesByKey).
+func toLinkSuggestionView(suggestion repository.LinkSuggestion, trackerLatest *float64, names map[string]string) linkSuggestionView {
 	view := linkSuggestionView{
 		ID:        suggestion.ID,
 		TrackerID: suggestion.TrackerID,
 		Title:     suggestion.CandidateTitle,
 		URL:       suggestion.CandidateURL,
 		Exact:     suggestion.Score >= exactScoreFloor,
+	}
+	if suggestion.ReplacesURL != nil {
+		view.ReplacesURL = *suggestion.ReplacesURL
 	}
 	if suggestion.CandidateCoverURL != nil {
 		view.CoverURL = *suggestion.CandidateCoverURL
@@ -525,12 +564,52 @@ func toLinkSuggestionView(suggestion repository.LinkSuggestion) linkSuggestionVi
 	if suggestion.CandidateReleaseAt != nil {
 		view.ReleaseAgo = relativeTime(*suggestion.CandidateReleaseAt)
 	}
-	if view.Exact {
+	if trackerLatest != nil && suggestion.CandidateLatestChapter != nil {
+		view.Behind = *suggestion.CandidateLatestChapter < *trackerLatest-behindTolerance
+	}
+
+	switch basis := nameOf(names, suggestion.Basis); {
+	case basis != "" && view.Exact:
+		view.ScoreLabel = "Same series per " + basis
+	case basis != "":
+		// An id match the scan kept out of the bulk accept: the right series,
+		// on a site that is behind or has no chapters in English.
+		view.Behind = true
+		view.ScoreLabel = "Same series per " + basis + ", but behind"
+	case view.Exact:
 		view.ScoreLabel = "Exact title"
-	} else {
+	default:
 		view.ScoreLabel = strconv.Itoa(int(suggestion.Score*100+0.5)) + "% match"
 	}
 	return view
+}
+
+// sourceNamesByKey maps the enabled sources' keys to their names, for the
+// sites a candidate's basis names. A failed lookup leaves the keys to stand
+// for themselves.
+func (h *DashboardHandler) sourceNamesByKey(ctx context.Context) map[string]string {
+	sources, err := h.listSourcesByID(ctx)
+	if err != nil {
+		slog.Warn("could not name the link review's sources", "error", err)
+		return nil
+	}
+	names := make(map[string]string, len(sources))
+	for _, source := range sources {
+		names[source.Key] = source.Name
+	}
+	return names
+}
+
+// nameOf names the site a key stands for, "" for none.
+func nameOf(names map[string]string, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if name := names[key]; name != "" {
+		return name
+	}
+	return key
 }
 
 func (h *DashboardHandler) StartLinkScan(c *fiber.Ctx) error {
@@ -605,6 +684,7 @@ func (h *DashboardHandler) renderLinkScanStatus(c *fiber.Ctx, profileID int64, a
 		Total:          progress.Total,
 		Done:           progress.Done,
 		WithCandidates: progress.WithCandidates,
+		Replacements:   progress.Replacements,
 		Stopped:        progress.Stopped,
 		Stopping:       progress.Stopping,
 		LastError:      progress.LastError,
@@ -650,7 +730,13 @@ func (h *DashboardHandler) AcceptLinkSuggestion(c *fiber.Ctx) error {
 	if accepted == nil {
 		return h.fail(c, fiber.StatusNotFound, staleSuggestionMessage, nil)
 	}
-	h.invalidateTrackerLookups(c.Context(), profile.ID, accepted.TrackerID)
+	// A replacement took a link away: what was cached about the old page goes
+	// with it.
+	var former []models.TrackerSource
+	if accepted.ReplacesURL != nil {
+		former = append(former, models.TrackerSource{SourceID: accepted.SourceID, SourceURL: *accepted.ReplacesURL})
+	}
+	h.invalidateTrackerLookups(c.Context(), profile.ID, accepted.TrackerID, former...)
 
 	return h.renderLinkCardResponse(c, profile.ID, accepted.SourceID, accepted.TrackerID)
 }
@@ -918,7 +1004,16 @@ func (h *DashboardHandler) renderLinkCardResponse(c *fiber.Ctx, profileID int64,
 			break
 		}
 	}
-	if response.Group == nil {
+	// A replacement card only ever leaves (Replace and Keep both settle it),
+	// but one still listed — a second disagreement on the same tracker — is
+	// rendered back in its place.
+	for index := range data.Replacements {
+		if response.Group == nil && data.Replacements[index].Tracker.ID == trackerID {
+			response.Replacement = &data.Replacements[index]
+			break
+		}
+	}
+	if response.Group == nil && response.Replacement == nil {
 		// A card action never leaves a "no candidate" row in place — those
 		// rows only link or leave — so a tracker found here just lost its last
 		// candidate to a Reject, and its row moves to that section instead of
